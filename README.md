@@ -97,9 +97,23 @@ class MyProvider:
         ...
 ```
 
-Ships with `ScriptedProvider` and `RuleProvider` (offline, no deps) and
-`AnthropicProvider` (optional). OpenAI-compatible and local providers are ~30
-lines each.
+Ships with:
+
+- `ScriptedProvider`, `RuleProvider` — offline, no deps (used in all examples)
+- `AnthropicProvider` — `pip install "loom-agent[anthropic]"`, needs `ANTHROPIC_API_KEY`
+- `OpenAIProvider` — `pip install "loom-agent[openai]"`; works with OpenAI **and**
+  any OpenAI-compatible server via `base_url` (vLLM, Ollama, LM Studio, Together,
+  Groq, OpenRouter, …):
+
+```python
+from loom import Agent
+from loom.providers import OpenAIProvider
+
+# OpenAI
+agent = Agent(provider=OpenAIProvider("gpt-4o"))
+# A local model (Ollama / vLLM) — same code, different base_url
+agent = Agent(provider=OpenAIProvider("llama3.1", base_url="http://localhost:11434/v1", api_key="x"))
+```
 
 ## Subagents
 
@@ -134,8 +148,8 @@ loom replay trip.loom.json                          # replay offline
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
+- ~~OpenAI-compatible provider~~ ✅ shipped
 - Streaming
-- OpenAI-compatible provider
 - Provenance-based context-rot warnings
 - `loom bisect` binary search over turns
 
