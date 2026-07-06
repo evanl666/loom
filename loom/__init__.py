@@ -18,7 +18,7 @@ Quickstart:
     print(run.output)
 """
 
-from .agent import Agent
+from .agent import Agent, SubagentTool
 from .context import Context, Item
 from .effect import EffectEntry, Recorder, ReplayExhausted, ReplayMismatch
 from .providers.base import ModelProvider, ModelResponse, ToolCall
@@ -38,6 +38,7 @@ __all__ = [
     "ReplayExhausted",
     "tool",
     "Tool",
+    "SubagentTool",
     "ModelProvider",
     "ModelResponse",
     "ToolCall",

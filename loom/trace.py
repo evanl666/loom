@@ -43,14 +43,20 @@ class Run:
 
     @property
     def num_turns(self) -> int:
-        """Number of model calls in the run."""
+        """Number of top-level model calls (the boundaries fork rewinds to)."""
+        return sum(1 for e in self.log if e.kind == "model" and e.depth == 0)
+
+    @property
+    def num_model_calls(self) -> int:
+        """Total model calls at every nesting level (including subagents)."""
         return sum(1 for e in self.log if e.kind == "model")
 
     def timeline(self) -> list[dict]:
-        """A human-readable step-by-step summary of the run."""
+        """A human-readable step-by-step summary of the run, with nesting depth."""
         out: list[dict] = []
         turn = 0
         for e in self.log:
+            depth = e.depth
             if e.kind == "model":
                 resp = ModelResponse.from_dict(e.result)
                 if resp.tool_calls:
@@ -59,17 +65,26 @@ class Run:
                     )
                 else:
                     detail = (resp.text[:80] + "...") if len(resp.text) > 80 else resp.text
-                out.append({"step": e.seq, "turn": turn, "kind": "model", "detail": detail})
-                turn += 1
+                out.append(
+                    {"step": e.seq, "turn": turn, "depth": depth, "kind": "model", "detail": detail}
+                )
+                if depth == 0:
+                    turn += 1
             else:  # tool
                 result = e.result if isinstance(e.result, str) else json.dumps(e.result)
                 detail = (result[:80] + "...") if len(result) > 80 else result
-                out.append({"step": e.seq, "turn": turn - 1, "kind": e.kind, "detail": detail})
+                out.append(
+                    {"step": e.seq, "turn": turn - 1, "depth": depth, "kind": e.kind, "detail": detail}
+                )
         return out
 
     def print_timeline(self) -> None:
         for row in self.timeline():
-            print(f"  [{row['step']:>2}] turn {row['turn']:>2} {row['kind']:<14} {row['detail']}")
+            indent = "  " * row["depth"]
+            marker = "> " * row["depth"]
+            print(
+                f"  [{row['step']:>2}] {indent}{marker}{row['kind']:<14} {row['detail']}"
+            )
 
     def cost(self) -> dict:
         """Aggregate token usage across all model calls."""

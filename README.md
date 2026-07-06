@@ -101,6 +101,24 @@ Ships with `ScriptedProvider` and `RuleProvider` (offline, no deps) and
 `AnthropicProvider` (optional). OpenAI-compatible and local providers are ~30
 lines each.
 
+## Subagents
+
+Any agent can be exposed as a tool for another agent. The child runs with its own
+**isolated context**, and its steps **nest into the same trace** — so replay,
+fork, and bisect keep working across delegation.
+
+```python
+researcher = Agent(model=..., tools=[search], name="researcher")
+lead = Agent(model=..., tools=[researcher.as_tool()])
+
+run = lead.run("Summarize the latest on X.")
+run.print_timeline()      # the researcher's turns show up indented under the lead
+run.replay()              # deterministic through the delegation, zero API calls
+```
+
+The parent only ever sees the delegated *result*, not the child's internal steps
+— context stays clean. See [`examples/04_subagents.py`](examples/04_subagents.py).
+
 ## CLI
 
 ```
@@ -115,7 +133,7 @@ loom replay trip.loom.json                          # replay offline
 [ROADMAP](#roadmap).
 
 ### Roadmap
-- Subagents (isolated context, nested traces)
+- ~~Subagents (isolated context, nested traces)~~ ✅ shipped
 - Streaming
 - OpenAI-compatible provider
 - Provenance-based context-rot warnings

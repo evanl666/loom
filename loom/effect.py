@@ -43,13 +43,26 @@ class EffectEntry:
     kind: str  # "model" | "tool:<name>" | ...
     key: str  # hash of the inputs at record time
     result: Any  # JSON-serializable result payload
+    depth: int = 0  # 0 = top-level agent, 1+ = nested subagent
 
     def to_dict(self) -> dict:
-        return {"seq": self.seq, "kind": self.kind, "key": self.key, "result": self.result}
+        return {
+            "seq": self.seq,
+            "kind": self.kind,
+            "key": self.key,
+            "result": self.result,
+            "depth": self.depth,
+        }
 
     @staticmethod
     def from_dict(d: dict) -> "EffectEntry":
-        return EffectEntry(seq=d["seq"], kind=d["kind"], key=d["key"], result=d["result"])
+        return EffectEntry(
+            seq=d["seq"],
+            kind=d["kind"],
+            key=d["key"],
+            result=d["result"],
+            depth=d.get("depth", 0),
+        )
 
 
 class Recorder:
@@ -72,6 +85,7 @@ class Recorder:
         self.replay_until = replay_until
         self.allow_live = allow_live
         self._cursor = 0
+        self.depth = 0  # current nesting depth; agents set this before recording
 
     # -- constructors -----------------------------------------------------
 
@@ -120,7 +134,9 @@ class Recorder:
             )
 
         result = fn()
-        entry = EffectEntry(seq=seq, kind=kind, key=_key([kind, payload]), result=encode(result))
+        entry = EffectEntry(
+            seq=seq, kind=kind, key=_key([kind, payload]), result=encode(result), depth=self.depth
+        )
         # Forking overwrites the tail of the original log from this point on.
         del self.log[seq:]
         self.log.append(entry)
@@ -133,6 +149,14 @@ class Recorder:
     def cursor(self) -> int:
         return self._cursor
 
-    def model_seqs(self) -> list[int]:
-        """Seq indices of every model call -- i.e. the turn boundaries."""
-        return [e.seq for e in self.log if e.kind == "model"]
+    def model_seqs(self, depth: "int | None" = 0) -> list[int]:
+        """Seq indices of model calls -- the turn boundaries.
+
+        By default only top-level (depth 0) turns, which is what forking rewinds
+        to. Pass ``depth=None`` for every model call at any nesting level.
+        """
+        return [
+            e.seq
+            for e in self.log
+            if e.kind == "model" and (depth is None or e.depth == depth)
+        ]
