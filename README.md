@@ -2,6 +2,8 @@
 
 **The agent harness you can read, replay, and rewind.**
 
+![Loom demo: record, read, replay, rewind](docs/demo.gif)
+
 Every other agent framework asks you to trust a black box. Loom's entire kernel
 is a few hundred lines you can read in an afternoon — and because every
 nondeterministic step flows through a single **Effect boundary**, any agent run
