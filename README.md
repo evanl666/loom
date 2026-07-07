@@ -70,6 +70,32 @@ run = agent.run("What's the weather in Tokyo?")
 print(run.output)
 ```
 
+## Structured output
+
+Give the agent a type; get a validated object back. The schema rides in the
+system prompt, and the final answer is parsed **at the Effect boundary** — a
+failed parse feeds the error back to the model and retries, and every retry is
+an ordinary recorded effect, so validated runs replay deterministically:
+
+```python
+from dataclasses import dataclass
+
+@dataclass
+class Weather:
+    city: str
+    temp_c: float
+    rain: bool
+
+agent = Agent(model="claude-opus-4-8", output_type=Weather)  # or TypedDict / pydantic
+run = agent.run("Weather in Tokyo?")
+run.parsed          # Weather(city='Tokyo', temp_c=21.0, rain=False)
+run.parsed.temp_c   # a real float, validated -- not a string you hope is a number
+```
+
+Retries exhausted (`output_retries`, default 2) sets
+`run.stop_reason == "invalid_output"` instead of raising — inspect the trace to
+see exactly what the model kept saying.
+
 ## Time travel
 
 ```python
@@ -231,6 +257,17 @@ each one becomes a **fork** that redacts it → only the divergent tail re-runs
 → the first branch that passes your check wins. Diagnosis to *verified* fix,
 automatically. Also available for any saved trace: `loom doctor run.loom.json`.
 
+And every repair can grow your test suite — pass `regression_dir` and the
+healed branch is saved as a golden trace, ready for `loom test` and
+`verify_replay`:
+
+```python
+healed = run.heal(check, regression_dir="tests/regressions/")
+healed.regression_path   # tests/regressions/healed-3fa1b2c4d5.loom.json
+```
+
+Every bug becomes a test, automatically.
+
 ## Trace memory: agents that learn from their own history
 
 Every run leaves a complete trace — so a directory of traces is recallable
@@ -253,6 +290,28 @@ deterministically:
 ```python
 agent = Agent(model=..., compact_after=8000, compact_keep=4)
 ```
+
+## Impact: change your prompt without fear
+
+Every team has the same fear: touch the system prompt and something,
+somewhere, silently breaks. `loom impact` is snapshot testing for agents —
+replay your recorded corpus against the changed configuration and see exactly
+which runs are affected and where, **before paying for a single API call**:
+
+```
+$ loom impact fixtures/ --agent myproject.agents:support_agent
+inputs-differ    fixtures/refund.loom.json (first at seq 0)
+    3 effect(s) see different inputs, starting with 'model'
+unchanged        fixtures/greeting.loom.json
+    every recorded effect gets identical inputs
+
+1 of 2 recorded run(s) affected
+```
+
+Dry mode (free) recomputes every effect's input hash under the new config and
+reports the first divergence. Add `--live` to re-run affected conversations
+and see **how** the outputs change, not just where. Exit code 1 when anything
+is affected — drop it straight into CI. Python API: `loom.impact.assess`.
 
 ## Agent CI: `loom test` and `loom watch`
 
@@ -352,6 +411,25 @@ agent = Agent(provider=OpenAIProvider("gpt-4o"))
 agent = Agent(provider=OpenAIProvider("llama3.1", base_url="http://localhost:11434/v1", api_key="x"))
 ```
 
+## MCP: bring your tool ecosystem
+
+Any [Model Context Protocol](https://modelcontextprotocol.io) server plugs in
+as ordinary tools (`pip install "loom-harness[mcp]"`):
+
+```python
+from loom.mcp import MCPServer
+
+with MCPServer("npx", ["-y", "@modelcontextprotocol/server-filesystem", "."]) as fs:
+    agent = Agent(model="claude-opus-4-8", tools=fs.tools())
+    run = agent.run("What's in this directory?")
+    run.save("fs.loom.json")
+```
+
+Because MCP calls cross the same Effect boundary as everything else, they are
+recorded like any tool call — which means **a trace recorded against a live
+MCP server replays with the server gone**. Your CI verifies filesystem,
+database, or browser-driving agent behavior with zero MCP processes running.
+
 ## Subagents
 
 Any agent can be exposed as a tool for another agent. The child runs with its own
@@ -413,10 +491,12 @@ import an SDK.
 
 ## Status
 
-`v0.5` — alpha. Kernel, time-travel (replay/fork/bisect), sweep, diff,
-subagents, conversations, human-in-the-loop, streaming, parallel tools, HTML
-export, context-rot checkup/heal, and durable runs are complete and tested.
-See [Roadmap](#roadmap).
+`v0.8` — alpha, on PyPI as
+[`loom-harness`](https://pypi.org/project/loom-harness/). Kernel, time-travel
+(replay/fork/bisect), sweep, diff, subagents, conversations, human-in-the-loop,
+streaming, parallel tools, HTML export, context-rot checkup/heal, durable runs,
+policy, effect cache, trace memory, compaction, structured output, impact
+analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
@@ -434,7 +514,13 @@ See [Roadmap](#roadmap).
 - ~~Model A/B (`run.rerun`) + edits persisted as effects~~ ✅ shipped
 - ~~`loom test` & `loom watch`~~ ✅ shipped
 - ~~Trace memory + context compaction~~ ✅ shipped
-- PyPI release
+- ~~PyPI release (`pip install loom-harness`)~~ ✅ shipped
+- ~~Structured output (`output_type=`, validation-retry at the boundary)~~ ✅ shipped
+- ~~Impact analysis (`loom impact` — snapshot testing for config changes)~~ ✅ shipped
+- ~~Heal-to-test (`heal(regression_dir=)` — every bug becomes a test)~~ ✅ shipped
+- ~~MCP servers as tools (`loom-harness[mcp]`)~~ ✅ shipped
+- `loom fuzz` — chaos engineering for agents (fault injection at any effect)
+- `loom proxy` — record any framework's runs through an API-compatible proxy
 
 ## License
 
