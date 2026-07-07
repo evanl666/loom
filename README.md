@@ -186,10 +186,40 @@ loom replay trip.loom.json                          # replay offline
 loom diff yesterday.loom.json today.loom.json       # where + why two runs diverged
 ```
 
+## FAQ
+
+**Is Loom a harness or a debugging plugin?**
+
+A harness — you build your agent *on* Loom, and the debugging superpowers come
+built in. They can't be bolted onto another framework: replay/fork/sweep work
+because *every* nondeterministic step flows through the Effect boundary and gets
+recorded. An agent built elsewhere never passed through that chokepoint, so
+there is nothing to replay. Think Git, not a browser extension: Git can diff
+and bisect your history because your commits live in it from day one.
+
+**Can I use Loom to debug my existing LangGraph / CrewAI / OpenAI-SDK agent?**
+
+Not in place — but migrating is deliberately cheap. Loom's `Agent` is a thin
+loop and tools are plain decorated functions, so porting an agent is usually a
+dozen lines: bring your system prompt, re-declare each tool with `@tool`, pick
+a provider. From then on every run is recorded, replayable, and diffable.
+
+**Do I pay for replays?**
+
+No. Replay serves every model and tool result from the recorded log — zero API
+calls, zero tokens. That's also why forks and sweeps are cheap: the shared
+prefix replays free and you only pay for the divergent tail.
+
+**Is a trace tied to one vendor?**
+
+The trace format is vendor-neutral JSON (`ModelResponse`, tool results, input
+hashes). Providers translate at the edge; the kernel and the traces never
+import an SDK.
+
 ## Status
 
-`v0.1` — alpha. The kernel and time-travel are complete and tested. See
-[ROADMAP](#roadmap).
+`v0.2` — alpha. The kernel, time-travel (replay/fork/bisect), sweep, diff, and
+subagents are complete and tested. See [Roadmap](#roadmap).
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
