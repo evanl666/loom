@@ -42,6 +42,7 @@ class Run:
         self.paused = paused
         self.pending = pending
         self.pending_depth = pending_depth
+        self.healed_by: "str | None" = None  # set on branches returned by heal()
 
     # -- inspection -------------------------------------------------------
 
@@ -246,6 +247,47 @@ class Run:
         from .diff import diff_logs
 
         return diff_logs(self.log, other.log)
+
+    def checkup(self) -> Any:
+        """Inspect this run's context for rot (oversized/unused/duplicate items).
+
+        Returns a ``loom.health.HealthReport``; its ``experiments()`` produce
+        sweep-ready repair edits, and ``heal()`` drives the whole loop.
+        """
+        from .health import analyze
+
+        return analyze(self.episodes, self.log)
+
+    def heal(
+        self,
+        check: Callable[[str], bool],
+        at: "int | None" = None,
+        variants: "list | None" = None,
+        labels: "list[str] | None" = None,
+    ) -> "Run | None":
+        """Try to fix a failing run by testing context repairs, cheapest first.
+
+        If ``check(self.output)`` already passes, returns self. Otherwise runs
+        each experiment from ``checkup()`` (or the provided ``variants``) as a
+        fork at turn ``at`` (default: the final turn), and returns the first
+        branch whose output passes -- with ``healed_by`` naming the repair.
+        Returns None if no experiment fixed it. Only divergent tails run live.
+        """
+        self._require_agent("heal")
+        if check(self.output):
+            return self
+        if variants is None:
+            labels, variants = self.checkup().experiments()
+        if labels is None:
+            labels = [f"v{i}" for i in range(len(variants))]
+        if at is None:
+            at = max(0, self.num_turns - 1)
+        for label, edit in zip(labels, variants):
+            branch = self.fork(at=at, edit=edit)
+            if not branch.paused and check(branch.output):
+                branch.healed_by = label
+                return branch
+        return None
 
     def bisect(self, check: Callable[[str], bool]) -> int:
         """Find the first turn whose assistant text fails ``check``.

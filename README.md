@@ -139,6 +139,28 @@ no external assets, safe to attach to a bug report or email to a teammate:
 loom export run.loom.json        # writes run.loom.html
 ```
 
+## Context-rot detection — and self-healing
+
+Context rot (stale, bloated, unused context) is the leading cause of agent
+failures. Loom can diagnose it after the fact — and *test the repairs*:
+
+```python
+report = run.checkup()
+print(report.summary())
+# 2 finding(s) in 688 tokens of context:
+#   [high] oversized: tool:fetch result is 675 tokens (98% of context)
+#   [warn] unused: tool:fetch result never referenced by any later answer
+
+healed = run.heal(check=lambda text: "ERROR" not in text)
+healed.output      # "The answer is 42."     <- fixed
+healed.healed_by   # "redact-oversized-0"    <- and it names the culprit
+```
+
+`heal()` is the loop nobody else can run: **checkup** flags suspects →
+each one becomes a **fork** that redacts it → only the divergent tail re-runs
+→ the first branch that passes your check wins. Diagnosis to *verified* fix,
+automatically. Also available for any saved trace: `loom doctor run.loom.json`.
+
 ## Sweep: cheap counterfactuals
 
 `sweep` is the batch version of `fork`: test N hypotheses from the same rewind
@@ -247,6 +269,7 @@ loom timeline trip.loom.json                        # inspect a saved trace
 loom replay trip.loom.json                          # replay offline
 loom diff yesterday.loom.json today.loom.json       # where + why two runs diverged
 loom export trip.loom.json                          # self-contained HTML trace viewer
+loom doctor trip.loom.json                          # check a trace for context rot
 ```
 
 ## FAQ
@@ -281,9 +304,10 @@ import an SDK.
 
 ## Status
 
-`v0.3` — alpha. Kernel, time-travel (replay/fork/bisect), sweep, diff,
-subagents, conversations, human-in-the-loop, streaming, parallel tools, and
-HTML export are complete and tested. See [Roadmap](#roadmap).
+`v0.4` — alpha. Kernel, time-travel (replay/fork/bisect), sweep, diff,
+subagents, conversations, human-in-the-loop, streaming, parallel tools, HTML
+export, and context-rot checkup/heal are complete and tested. See
+[Roadmap](#roadmap).
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
@@ -294,8 +318,9 @@ HTML export are complete and tested. See [Roadmap](#roadmap).
 - ~~Human-in-the-loop as an effect (pause / resume)~~ ✅ shipped
 - ~~Streaming, parallel tools, `arun`~~ ✅ shipped
 - ~~HTML trace export~~ ✅ shipped
-- Provenance-based context-rot warnings
+- ~~Context-rot checkup + self-healing (`run.heal`)~~ ✅ shipped
 - Effect-level caching (same inputs → reuse recorded results)
+- PyPI release
 
 ## License
 

@@ -30,3 +30,4 @@ jobs:
           python examples/05_sweep_diff.py
           python examples/06_conversation.py
           python examples/07_human_in_the_loop.py
+          python examples/08_checkup_heal.py

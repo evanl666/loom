@@ -23,11 +23,12 @@ from .context import Context, Item
 from .diff import StepDiff, TraceDiff, diff_logs
 from .effect import EffectEntry, Recorder, ReplayExhausted, ReplayMismatch
 from .export import trace_to_html
+from .health import Finding, HealthReport
 from .providers.base import ModelProvider, ModelResponse, ToolCall
 from .tools import Tool, tool
 from .trace import Run, SweepResult
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "Agent",
@@ -49,6 +50,8 @@ __all__ = [
     "HumanInputRequired",
     "ask_human",
     "trace_to_html",
+    "HealthReport",
+    "Finding",
     "ModelProvider",
     "ModelResponse",
     "ToolCall",

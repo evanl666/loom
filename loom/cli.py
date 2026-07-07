@@ -78,6 +78,17 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_doctor(args: argparse.Namespace) -> int:
+    """Check a saved trace for context rot; exit 1 if findings exist."""
+    from .health import analyze
+
+    log, data = _load_log(args.path)
+    episodes = data.get("episodes") or [data.get("prompt", "")]
+    report = analyze(episodes, log)
+    print(report.summary())
+    return 0 if report.ok else 1
+
+
 def _cmd_export(args: argparse.Namespace) -> int:
     """Render a saved trace to a self-contained HTML page."""
     from .export import trace_to_html
@@ -132,6 +143,10 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("path")
     ex.add_argument("-o", "--output", default="", help="output path (default: <trace>.html)")
     ex.set_defaults(func=_cmd_export)
+
+    dr = sub.add_parser("doctor", help="check a saved trace for context rot")
+    dr.add_argument("path")
+    dr.set_defaults(func=_cmd_doctor)
     return p
 
 
