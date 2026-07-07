@@ -6,7 +6,9 @@ captured through the Effect boundary.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from typing import Any, Callable
 
 from .context import Context
@@ -45,6 +47,7 @@ class Run:
         self.pending_depth = pending_depth
         self.stop_reason = stop_reason  # "" | "budget" -- why the run stopped early
         self.healed_by: "str | None" = None  # set on branches returned by heal()
+        self.regression_path: "str | None" = None  # where heal() saved this branch
 
     # -- inspection -------------------------------------------------------
 
@@ -127,6 +130,7 @@ class Run:
             "pending_depth": self.pending_depth,
             "stop_reason": self.stop_reason,
             "log": [e.to_dict() for e in self.log],
+            **({"healed_by": self.healed_by} if self.healed_by else {}),
         }
 
     def save(self, path: str) -> None:
@@ -156,6 +160,7 @@ class Run:
         )
         run._loaded_model = data.get("model")
         run._loaded_system = data.get("system", "")
+        run.healed_by = data.get("healed_by")
         return run
 
     @classmethod
@@ -346,6 +351,7 @@ class Run:
         at: "int | None" = None,
         variants: "list | None" = None,
         labels: "list[str] | None" = None,
+        regression_dir: "str | None" = None,
     ) -> "Run | None":
         """Try to fix a failing run by testing context repairs, cheapest first.
 
@@ -354,6 +360,11 @@ class Run:
         fork at turn ``at`` (default: the final turn), and returns the first
         branch whose output passes -- with ``healed_by`` naming the repair.
         Returns None if no experiment fixed it. Only divergent tails run live.
+
+        With ``regression_dir``, every repair also grows your test suite: the
+        healed branch is saved there as a golden trace (content-addressed
+        filename, so re-healing is idempotent), ready for ``loom test`` and
+        ``verify_replay``. The branch's ``regression_path`` says where.
         """
         self._require_agent("heal")
         if check(self.output):
@@ -368,6 +379,15 @@ class Run:
             branch = self.fork(at=at, edit=edit)
             if not branch.paused and check(branch.output):
                 branch.healed_by = label
+                if regression_dir is not None:
+                    data = branch.to_dict()
+                    digest = hashlib.sha1(
+                        json.dumps(data, sort_keys=True).encode()
+                    ).hexdigest()[:10]
+                    os.makedirs(regression_dir, exist_ok=True)
+                    path = os.path.join(regression_dir, f"healed-{digest}.loom.json")
+                    branch.save(path)
+                    branch.regression_path = path
                 return branch
         return None
 

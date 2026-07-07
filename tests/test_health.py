@@ -135,3 +135,49 @@ def test_heal_returns_none_when_nothing_works():
     run = build_poisoned_agent().run("What is the answer?")
     # An impossible check: no experiment can satisfy it.
     assert run.heal(check=lambda t: "unicorn" in t) is None
+
+
+# -- heal-to-test ------------------------------------------------------------
+
+
+def test_heal_saves_regression_trace(tmp_path):
+    from loom import Run
+    from loom.testing import verify_replay, verify_trace
+
+    run = build_poisoned_agent().run("What is the answer?")
+    check = lambda text: "ERROR" not in text  # noqa: E731
+
+    healed = run.heal(check, regression_dir=str(tmp_path))
+    assert healed is not None
+    assert healed.regression_path is not None
+    assert healed.regression_path.endswith(".loom.json")
+
+    # The saved golden trace is structurally sound and replays byte-identically
+    # against a fresh agent -- a ready-made regression test.
+    assert verify_trace(healed.regression_path) == []
+    verify_replay(healed.regression_path, agent=build_poisoned_agent())
+
+    # The repair provenance survives the round-trip.
+    loaded = Run.load(healed.regression_path, agent=build_poisoned_agent())
+    assert loaded.healed_by == healed.healed_by
+    assert loaded.output == "Clean answer: 42"
+
+
+def test_heal_regression_save_is_idempotent(tmp_path):
+    run = build_poisoned_agent().run("What is the answer?")
+    check = lambda text: "ERROR" not in text  # noqa: E731
+
+    first = run.heal(check, regression_dir=str(tmp_path))
+    second = run.heal(check, regression_dir=str(tmp_path))
+    # Same repair -> same content-addressed file, no duplicate accumulation.
+    assert first.regression_path == second.regression_path
+    assert len(list(tmp_path.glob("*.loom.json"))) == 1
+
+
+def test_heal_already_passing_saves_nothing(tmp_path):
+    from loom.providers import ModelResponse, ScriptedProvider
+
+    agent = Agent(model=ScriptedProvider([ModelResponse(text="fine", stop_reason="end_turn")]))
+    run = agent.run("hi")
+    assert run.heal(check=lambda t: "fine" in t, regression_dir=str(tmp_path)) is run
+    assert list(tmp_path.glob("*.loom.json")) == []
