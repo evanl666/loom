@@ -65,6 +65,22 @@ class Run:
         """Total model calls at every nesting level (including subagents)."""
         return sum(1 for e in self.log if e.kind == "model")
 
+    @property
+    def parsed(self) -> Any:
+        """The final answer parsed as the agent's ``output_type``.
+
+        None when the agent has no output_type, when the run is paused or
+        truncated, or when validation retries ran out (stop_reason
+        "invalid_output"). Recomputed from the recorded text, so it works on
+        loaded and replayed traces alike.
+        """
+        output_type = getattr(self.agent, "output_type", None) if self.agent else None
+        if output_type is None or self.paused or self.truncated or self.stop_reason:
+            return None
+        from .structured import parse_as
+
+        return parse_as(output_type, self.output)
+
     def timeline(self) -> list[dict]:
         """A human-readable step-by-step summary of the run, with nesting depth."""
         out: list[dict] = []

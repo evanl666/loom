@@ -28,6 +28,7 @@ from .health import Finding, HealthReport
 from .journal import Journal
 from .memory import TraceMemory
 from .policy import Policy
+from .structured import OutputInvalid, parse_as, schema_for
 from .testing import verify_replay, verify_trace
 from .providers.base import ModelProvider, ModelResponse, ToolCall
 from .tools import Tool, tool
@@ -61,6 +62,9 @@ __all__ = [
     "Policy",
     "EffectCache",
     "TraceMemory",
+    "OutputInvalid",
+    "parse_as",
+    "schema_for",
     "verify_trace",
     "verify_replay",
     "ModelProvider",

@@ -123,10 +123,21 @@ class Agent:
         memory: "Any | None" = None,
         compact_after: "int | None" = None,
         compact_keep: int = 4,
+        output_type: "Any | None" = None,
+        output_retries: int = 2,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
         self.tools: dict[str, Tool] = {t.name: t for t in (tools or [])}
+        # output_type is agent CONFIG (not a run() argument) so that replays
+        # walk the same validation path -- the same-config rule.
+        self.output_type = output_type
+        self.output_retries = output_retries
+        if output_type is not None:
+            from .structured import format_instruction
+
+            suffix = format_instruction(output_type)
+            system = f"{system}\n\n{suffix}" if system else suffix
         self.system = system
         self.max_steps = max_steps
         self.budget = budget
@@ -274,6 +285,7 @@ class Agent:
                 if recalled:
                     ctx.add_user(recalled, source="memory")
             truncated = True
+            format_retries = 0  # validation retries used in this episode
             for _ in range(self.max_steps):
                 # Replay any recorded context edits (from earlier forks) first,
                 # so rebuilt context reproduces past surgery exactly.
@@ -337,6 +349,25 @@ class Agent:
                 if resp.stop_reason == "tool_use" and resp.tool_calls:
                     self._run_tools(resp.tool_calls, ctx, rec, depth)
                     continue  # let the model observe tool results
+
+                # Structured output: validate the final answer at the boundary.
+                # Validation is a pure function of the recorded text, so replays
+                # deterministically walk the same retry path.
+                if self.output_type is not None and depth == 0:
+                    from .structured import OutputInvalid, parse_as
+
+                    try:
+                        parse_as(self.output_type, resp.text)
+                    except OutputInvalid as err:
+                        if format_retries < self.output_retries:
+                            format_retries += 1
+                            ctx.add_user(
+                                f"Your answer could not be parsed: {err}. Respond "
+                                "again with ONLY a JSON object matching the schema.",
+                                source="validation",
+                            )
+                            continue
+                        stop_reason = "invalid_output"
 
                 truncated = False
                 break
