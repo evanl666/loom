@@ -319,6 +319,27 @@ agent = Agent(model="claude-opus-4-8", critic="claude-haiku-4-5", deliberate=3)
 Spend compute exactly where you need confidence — and replay the whole
 deliberation later for free.
 
+## Skills: the toolbox grows itself
+
+Your trace lake is full of tool sequences that demonstrably worked. Mine them
+into **skills** — macro-tools the agent can call in one step next time:
+
+```python
+from loom.skills import mine, save
+
+runs = [Run.load(p, agent=agent) for p in glob("runs/*.loom.json")]
+skills = mine(runs)          # sequences seen in >= 2 successful runs
+skills[0].name               # "skill_geocode_then_forecast"
+skills[0].params             # ["city", "coords"]  <- learned by comparing runs
+
+agent2 = Agent(model=..., tools=[*tools, *[s.as_tool(tools) for s in skills]])
+```
+
+Parameterization is learned by comparison: argument values that **varied**
+across the mined runs become parameters, values that never changed are baked
+in. Every skill carries its provenance (`support` = how many recorded runs
+prove it) — the agent's habits have receipts.
+
 ## The clock is an effect too
 
 ```python
@@ -562,6 +583,7 @@ analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
 - ~~MCP servers as tools (`loom-harness[mcp]`)~~ ✅ shipped
 - ~~Clock & randomness as effects (`loom.now`, `loom.random`, `Agent(clock=True)`)~~ ✅ shipped
 - ~~Critic gate + deliberate mode (replayable self-correction)~~ ✅ shipped
+- ~~Skill crystallization (`loom.skills.mine` — proven sequences become tools)~~ ✅ shipped
 - `loom fuzz` — chaos engineering for agents (fault injection at any effect)
 - `loom proxy` — record any framework's runs through an API-compatible proxy
 
