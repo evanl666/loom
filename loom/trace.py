@@ -27,6 +27,10 @@ class Run:
         prompt: str,
         output: str,
         truncated: bool = False,
+        episodes: "list[str] | None" = None,
+        paused: bool = False,
+        pending: "str | None" = None,
+        pending_depth: int = 0,
     ):
         self.agent = agent
         self.recorder = recorder
@@ -34,6 +38,10 @@ class Run:
         self.prompt = prompt
         self.output = output
         self.truncated = truncated
+        self.episodes = episodes or [prompt]
+        self.paused = paused
+        self.pending = pending
+        self.pending_depth = pending_depth
 
     # -- inspection -------------------------------------------------------
 
@@ -108,8 +116,12 @@ class Run:
             "model": self.agent.model,
             "system": self.agent.system,
             "prompt": self.prompt,
+            "episodes": self.episodes,
             "output": self.output,
             "truncated": self.truncated,
+            "paused": self.paused,
+            "pending": self.pending,
+            "pending_depth": self.pending_depth,
             "log": [e.to_dict() for e in self.log],
         }
 
@@ -132,6 +144,10 @@ class Run:
             prompt=data["prompt"],
             output=data["output"],
             truncated=data.get("truncated", False),
+            episodes=data.get("episodes"),
+            paused=data.get("paused", False),
+            pending=data.get("pending"),
+            pending_depth=data.get("pending_depth", 0),
         )
         run._loaded_model = data.get("model")
         run._loaded_system = data.get("system", "")
@@ -147,7 +163,40 @@ class Run:
         """
         self._require_agent("replay")
         rec = Recorder.replay(self.log)
-        return self.agent.run(self.prompt, recorder=rec)
+        return self.agent.run(self.episodes, recorder=rec)
+
+    def ask(self, prompt: str) -> "Run":
+        """Continue the conversation with a new user message.
+
+        The entire recorded history replays for free; only the new exchange
+        runs live. The result is one longer trace, so the whole conversation
+        stays replayable, forkable, sweepable, and diffable.
+        """
+        self._require_agent("ask")
+        if self.paused:
+            raise ValueError("run is paused; answer it with resume() first")
+        rec = Recorder.fork(self.log, at=len(self.log))
+        return self.agent.run([*self.episodes, prompt], recorder=rec)
+
+    def resume(self, answer: str) -> "Run":
+        """Answer a paused run's pending question and continue it.
+
+        The answer is appended to the log as a recorded ``"human"`` effect;
+        the whole prefix (including the answer) replays for free, then the run
+        continues live from exactly where it paused.
+        """
+        self._require_agent("resume")
+        if not self.paused:
+            raise ValueError("run is not paused")
+        entry = EffectEntry(
+            seq=len(self.log),
+            kind="human",
+            key="resumed",
+            result=str(answer),
+            depth=self.pending_depth,
+        )
+        rec = Recorder.fork([*self.log, entry], at=len(self.log) + 1)
+        return self.agent.run(self.episodes, recorder=rec)
 
     def fork(
         self, at: int, edit: "Callable[[Context], None] | None" = None
@@ -163,7 +212,7 @@ class Run:
             raise IndexError(f"fork turn {at} out of range (run has {len(seqs)} turns)")
         replay_until = seqs[at]  # seq of the at-th model call
         rec = Recorder.fork(self.log, replay_until)
-        return self.agent.run(self.prompt, recorder=rec, _edit=edit, _edit_at_turn=at)
+        return self.agent.run(self.episodes, recorder=rec, _edit=edit, _edit_at_turn=at)
 
     def sweep(
         self,

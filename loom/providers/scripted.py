@@ -13,18 +13,29 @@ produce reproducible traces that double as replay fixtures.
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable  # noqa: F401 -- used in annotations
 
 from .base import ModelResponse
 
 
 class ScriptedProvider:
-    """Replays a fixed list of ``ModelResponse`` objects, one per model call."""
+    """Replays a fixed list of ``ModelResponse`` objects, one per model call.
 
-    def __init__(self, responses: list[ModelResponse], model: str = "scripted"):
+    With ``on_token`` set, the response text is emitted word by word before the
+    call returns -- an offline stand-in for real streaming, handy in demos and
+    tests. (During trace replay providers are never called, so nothing streams.)
+    """
+
+    def __init__(
+        self,
+        responses: list[ModelResponse],
+        model: str = "scripted",
+        on_token: "Callable[[str], None] | None" = None,
+    ):
         self.responses = list(responses)
         self.model = model
         self.name = "scripted"
+        self.on_token = on_token
         self._i = 0
 
     def complete(self, system: str, messages: list[dict], tools: list[dict]) -> ModelResponse:
@@ -33,6 +44,9 @@ class ScriptedProvider:
             return ModelResponse(text="", stop_reason="end_turn")
         resp = self.responses[self._i]
         self._i += 1
+        if self.on_token is not None and resp.text:
+            for i, word in enumerate(resp.text.split(" ")):
+                self.on_token(word if i == 0 else " " + word)
         return resp
 
 

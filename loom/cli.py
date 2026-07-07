@@ -78,6 +78,19 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_export(args: argparse.Namespace) -> int:
+    """Render a saved trace to a self-contained HTML page."""
+    from .export import trace_to_html
+
+    with open(args.path) as f:
+        data = json.load(f)
+    out = args.output or (args.path.rsplit(".json", 1)[0] + ".html")
+    with open(out, "w") as f:
+        f.write(trace_to_html(data))
+    print(f"wrote {out}")
+    return 0
+
+
 def _cmd_diff(args: argparse.Namespace) -> int:
     """Compare two saved traces; exit 0 if identical, 1 if they diverge."""
     from .diff import diff_logs
@@ -114,6 +127,11 @@ def build_parser() -> argparse.ArgumentParser:
     df.add_argument("a")
     df.add_argument("b")
     df.set_defaults(func=_cmd_diff)
+
+    ex = sub.add_parser("export", help="render a saved trace to self-contained HTML")
+    ex.add_argument("path")
+    ex.add_argument("-o", "--output", default="", help="output path (default: <trace>.html)")
+    ex.set_defaults(func=_cmd_export)
     return p
 
 

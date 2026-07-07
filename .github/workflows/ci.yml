@@ -26,3 +26,7 @@ jobs:
         run: |
           python examples/01_hello.py
           python examples/02_record_replay_fork_bisect.py
+          python examples/04_subagents.py
+          python examples/05_sweep_diff.py
+          python examples/06_conversation.py
+          python examples/07_human_in_the_loop.py

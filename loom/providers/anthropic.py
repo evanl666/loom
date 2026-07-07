@@ -7,13 +7,27 @@ stays an optional dependency.
 
 from __future__ import annotations
 
+from typing import Callable  # noqa: F401 -- used in annotations
+
 from .base import ModelResponse, ToolCall
 
 
 class AnthropicProvider:
-    """Adapts Loom's neutral interface to the Anthropic Messages API."""
+    """Adapts Loom's neutral interface to the Anthropic Messages API.
 
-    def __init__(self, model: str, api_key: str | None = None, max_tokens: int = 2048):
+    With ``on_token`` set, responses stream and each text delta is passed to
+    the callback as it arrives; the recorded effect is still the complete
+    final response. (During trace replay providers are never called, so
+    nothing re-streams -- replays return instantly.)
+    """
+
+    def __init__(
+        self,
+        model: str,
+        api_key: "str | None" = None,
+        max_tokens: int = 2048,
+        on_token: "Callable[[str], None] | None" = None,
+    ):
         try:
             import anthropic
         except ImportError as e:  # pragma: no cover - import guard
@@ -25,6 +39,7 @@ class AnthropicProvider:
         self.model = model
         self.name = "anthropic"
         self.max_tokens = max_tokens
+        self.on_token = on_token
 
     def complete(self, system: str, messages: list[dict], tools: list[dict]) -> ModelResponse:
         kwargs: dict = {
@@ -43,7 +58,13 @@ class AnthropicProvider:
                 }
                 for t in tools
             ]
-        resp = self._client.messages.create(**kwargs)
+        if self.on_token is not None:
+            with self._client.messages.stream(**kwargs) as stream:
+                for text in stream.text_stream:
+                    self.on_token(text)
+                resp = stream.get_final_message()
+        else:
+            resp = self._client.messages.create(**kwargs)
         return self._from_anthropic(resp)
 
     # -- translation ------------------------------------------------------

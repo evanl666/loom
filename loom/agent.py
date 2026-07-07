@@ -31,6 +31,43 @@ class SubagentTool(Tool):
     agent: "Agent | None" = None
 
 
+@dataclass
+class HumanTool(Tool):
+    """A tool that asks the human operator for input.
+
+    A human's answer is nondeterminism like any other, so it is recorded as a
+    ``"human"`` effect -- replays include human decisions. If the agent has an
+    ``on_human`` handler, the question is answered inline; otherwise the run
+    pauses (``run.paused``) and can be continued later with ``run.resume(answer)``.
+    """
+
+
+def ask_human(
+    name: str = "ask_human",
+    description: str = "Ask the human operator a question and wait for their answer.",
+) -> HumanTool:
+    """Build the built-in human-in-the-loop tool. Add it to an agent's tools."""
+    return HumanTool(
+        name=name,
+        description=description,
+        fn=lambda **_: None,  # never called; the loop handles this tool
+        input_schema={
+            "type": "object",
+            "properties": {"question": {"type": "string"}},
+            "required": ["question"],
+        },
+    )
+
+
+class HumanInputRequired(RuntimeError):
+    """Raised internally when a human answer is needed and no handler is set."""
+
+    def __init__(self, question: str, depth: int = 0):
+        super().__init__(f"human input required: {question!r}")
+        self.question = question
+        self.depth = depth
+
+
 def _jsonable(value: Any) -> Any:
     """Coerce a tool result into something JSON-serializable for the trace."""
     try:
@@ -68,6 +105,8 @@ class Agent:
         max_steps: int = 20,
         budget: "int | None" = None,
         name: str = "agent",
+        on_human: "Callable[[str], str] | None" = None,
+        parallel_tools: bool = False,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -76,6 +115,8 @@ class Agent:
         self.max_steps = max_steps
         self.budget = budget
         self.name = name
+        self.on_human = on_human
+        self.parallel_tools = parallel_tools
 
     # -- delegation -------------------------------------------------------
 
@@ -102,83 +143,155 @@ class Agent:
 
     def run(
         self,
-        prompt: str,
+        prompt: "str | list[str]",
         *,
         recorder: "Recorder | None" = None,
         _edit: "Callable[[Context], None] | None" = None,
         _edit_at_turn: int = -1,
     ) -> "Run":
-        """Run the agent to completion and return a recorded ``Run``."""
+        """Run the agent (or a whole conversation) and return a recorded ``Run``.
+
+        ``prompt`` is one user message, or a list of them: each entry runs to
+        completion in order, sharing one context and one trace.
+        """
         from .trace import Run  # local import to avoid a cycle
 
-        rec = recorder or Recorder.record()
-        output, ctx, truncated = self._loop(
-            prompt, rec, depth=0, edit=_edit, edit_at_turn=_edit_at_turn
+        episodes = (
+            [str(p) for p in prompt] if isinstance(prompt, (list, tuple)) else [str(prompt)]
         )
+        rec = recorder or Recorder.record()
+        try:
+            output, ctx, truncated = self._loop(
+                episodes, rec, depth=0, edit=_edit, edit_at_turn=_edit_at_turn
+            )
+        except HumanInputRequired as e:
+            # Pause: everything up to the question is already recorded, so
+            # resume() can inject the answer as a "human" effect and continue.
+            return Run(
+                agent=self,
+                recorder=rec,
+                context=Context(),
+                prompt=episodes[0],
+                output="",
+                truncated=True,
+                episodes=episodes,
+                paused=True,
+                pending=e.question,
+                pending_depth=e.depth,
+            )
         return Run(
             agent=self,
             recorder=rec,
             context=ctx,
-            prompt=prompt,
+            prompt=episodes[0],
             output=output,
             truncated=truncated,
+            episodes=episodes,
         )
+
+    async def arun(self, prompt: "str | list[str]", **kwargs: Any) -> "Run":
+        """Async convenience wrapper: runs the (synchronous) loop in a thread."""
+        import asyncio
+
+        return await asyncio.to_thread(self.run, prompt, **kwargs)
 
     def _loop(
         self,
-        prompt: str,
+        episodes: list[str],
         rec: Recorder,
         depth: int = 0,
         edit: "Callable[[Context], None] | None" = None,
         edit_at_turn: int = -1,
     ) -> "tuple[str, Context, bool]":
-        """The core agent loop. Shared by top-level runs and nested subagents."""
-        ctx = Context(system=self.system, budget=self.budget)
-        ctx.add_user(prompt)
+        """The core agent loop. Shared by top-level runs and nested subagents.
 
+        ``episodes`` is the conversation: each entry is one user message, run
+        to completion (end_turn) before the next begins.
+        """
+        ctx = Context(system=self.system, budget=self.budget)
         tool_schemas = [t.schema() for t in self.tools.values()]
         resp = ModelResponse()
         truncated = True
+        turn = 0  # model calls at this depth, counted across all episodes
 
-        for turn in range(self.max_steps):
-            # Fork intervention applies only at the top level, before this turn.
-            if edit is not None and depth == 0 and turn == edit_at_turn:
-                edit(ctx)
+        for episode in episodes:
+            ctx.add_user(episode)
+            truncated = True
+            for _ in range(self.max_steps):
+                # Fork intervention applies only at the top level, before this turn.
+                if edit is not None and depth == 0 and turn == edit_at_turn:
+                    edit(ctx)
 
-            rec.depth = depth
-            messages = ctx.messages()
-            resp = rec.run(
-                "model",
-                {"system": self.system, "messages": messages},
-                lambda messages=messages: self.provider.complete(
-                    self.system, messages, tool_schemas
-                ),
-                encode=lambda r: r.to_dict(),
-                decode=ModelResponse.from_dict,
-            )
-            ctx.add_assistant(resp)
+                rec.depth = depth
+                messages = ctx.messages()
+                resp = rec.run(
+                    "model",
+                    {"system": self.system, "messages": messages},
+                    lambda messages=messages: self.provider.complete(
+                        self.system, messages, tool_schemas
+                    ),
+                    encode=lambda r: r.to_dict(),
+                    decode=ModelResponse.from_dict,
+                )
+                ctx.add_assistant(resp)
+                turn += 1
 
-            if resp.stop_reason == "tool_use" and resp.tool_calls:
-                for tc in resp.tool_calls:
-                    tool = self.tools.get(tc.name)
-                    if isinstance(tool, SubagentTool) and tool.agent is not None:
-                        # Delegate: the child records its own effects at depth+1.
-                        task = str(tc.input.get("task", ""))
-                        result, _child_ctx, _ = tool.agent._loop(task, rec, depth=depth + 1)
-                    else:
-                        rec.depth = depth
-                        result = rec.run(
-                            f"tool:{tc.name}",
-                            {"id": tc.id, "input": tc.input},
-                            lambda tc=tc: self._call_tool(tc.name, tc.input),
-                        )
-                    ctx.add_tool_result(tc.id, tc.name, result)
-                continue  # let the model observe tool results
+                if resp.stop_reason == "tool_use" and resp.tool_calls:
+                    self._run_tools(resp.tool_calls, ctx, rec, depth)
+                    continue  # let the model observe tool results
 
-            truncated = False
-            break
+                truncated = False
+                break
 
         return resp.text, ctx, truncated
+
+    def _run_tools(self, calls: list, ctx: Context, rec: Recorder, depth: int) -> None:
+        """Execute one turn's tool calls, recording each through the boundary."""
+        plain = all(
+            not isinstance(self.tools.get(tc.name), (SubagentTool, HumanTool)) for tc in calls
+        )
+        results: "dict[str, Any] | None" = None
+        # Parallel execution is safe only for plain tools and only fully outside
+        # the replay region (otherwise tools would re-execute during replay).
+        # Results are still RECORDED in call order, so the trace stays
+        # deterministic no matter which tool finished first.
+        if self.parallel_tools and plain and len(calls) > 1 and rec.cursor >= rec.replay_until:
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=len(calls)) as pool:
+                futures = {tc.id: pool.submit(self._call_tool, tc.name, tc.input) for tc in calls}
+                results = {cid: f.result() for cid, f in futures.items()}
+
+        for tc in calls:
+            tool = self.tools.get(tc.name)
+            if isinstance(tool, SubagentTool) and tool.agent is not None:
+                # Delegate: the child records its own effects at depth+1.
+                task = str(tc.input.get("task", ""))
+                result, _child_ctx, _ = tool.agent._loop([task], rec, depth=depth + 1)
+            elif isinstance(tool, HumanTool):
+                question = str(tc.input.get("question", ""))
+                rec.depth = depth
+                result = rec.run(
+                    "human",
+                    {"question": question},
+                    lambda question=question, depth=depth: self._human(question, depth),
+                )
+            else:
+                rec.depth = depth
+                result = rec.run(
+                    f"tool:{tc.name}",
+                    {"id": tc.id, "input": tc.input},
+                    (lambda tc=tc: results[tc.id])
+                    if results is not None
+                    else (lambda tc=tc: self._call_tool(tc.name, tc.input)),
+                )
+            ctx.add_tool_result(tc.id, tc.name, result)
+
+    def _human(self, question: str, depth: int) -> str:
+        """Answer via the on_human handler, or pause the run."""
+        if self.on_human is not None:
+            return str(self.on_human(question))
+        raise HumanInputRequired(question, depth)
 
     def _call_tool(self, name: str, args: dict) -> Any:
         tool = self.tools.get(name)

@@ -77,6 +77,68 @@ branch = run.fork(at=1, edit=lambda ctx: ctx.add_user("Actually, make it Paris."
 bad_turn = run.bisect(lambda text: "error" not in text.lower())
 ```
 
+## Conversations
+
+`run.ask()` continues a conversation with full context — as one growing trace.
+The recorded history replays for free; only the new exchange runs live.
+
+```python
+run1 = agent.run("Where is order A123?")
+run2 = run1.ask("Can I get a refund?")     # knows about A123
+run3 = run2.ask("How long will it take?")  # knows everything so far
+
+run3.print_timeline()   # the whole conversation, one trace
+run3.replay()           # replays end-to-end, zero API calls
+run3.fork(at=1, ...)    # rewind the conversation itself: "what if the user had asked X?"
+```
+
+## Human-in-the-loop
+
+A human's answer is nondeterminism like any other — so Loom records it as an
+effect. Add the built-in `ask_human()` tool and you get pausable, auditable
+approval flows with no extra machinery:
+
+```python
+from loom import Agent, Run, ask_human
+
+agent = Agent(model=..., tools=[ask_human()])
+run = agent.run("Refund $500 on order A123.")
+
+run.paused              # True -- the agent asked for approval
+run.pending             # "Approve $500 refund for A123?"
+run.save("pending.loom.json")               # answer it tomorrow
+
+loaded = Run.load("pending.loom.json", agent=agent)
+done = loaded.resume("yes, approved")       # continues from exactly where it paused
+done.replay()           # the human decision is in the trace -- fully auditable
+```
+
+For interactive use, pass a handler instead: `Agent(..., on_human=input)`.
+
+## Streaming, parallel tools, async
+
+```python
+# Stream tokens as they arrive (recorded effect is still the full response;
+# replays return instantly without re-streaming).
+provider = AnthropicProvider("claude-opus-4-8", on_token=print)
+
+# Run one turn's tool calls concurrently (opt-in). Results are recorded in
+# call order, so the trace stays deterministic and replayable.
+agent = Agent(model=..., tools=[fetch_a, fetch_b], parallel_tools=True)
+
+# Embed in async apps (FastAPI etc.).
+run = await agent.arun("...")
+```
+
+## Visual traces
+
+`loom export` renders any saved trace to a single self-contained HTML page —
+no external assets, safe to attach to a bug report or email to a teammate:
+
+```
+loom export run.loom.json        # writes run.loom.html
+```
+
 ## Sweep: cheap counterfactuals
 
 `sweep` is the batch version of `fork`: test N hypotheses from the same rewind
@@ -184,6 +246,7 @@ loom run "What is 2 + 3?" --model claude-opus-4-8   # run an agent
 loom timeline trip.loom.json                        # inspect a saved trace
 loom replay trip.loom.json                          # replay offline
 loom diff yesterday.loom.json today.loom.json       # where + why two runs diverged
+loom export trip.loom.json                          # self-contained HTML trace viewer
 ```
 
 ## FAQ
@@ -218,17 +281,21 @@ import an SDK.
 
 ## Status
 
-`v0.2` — alpha. The kernel, time-travel (replay/fork/bisect), sweep, diff, and
-subagents are complete and tested. See [Roadmap](#roadmap).
+`v0.3` — alpha. Kernel, time-travel (replay/fork/bisect), sweep, diff,
+subagents, conversations, human-in-the-loop, streaming, parallel tools, and
+HTML export are complete and tested. See [Roadmap](#roadmap).
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
 - ~~OpenAI-compatible provider~~ ✅ shipped
 - ~~Sweep (batch counterfactual forks)~~ ✅ shipped
 - ~~Trace diff (`loom diff`)~~ ✅ shipped
-- Streaming
+- ~~Conversations (`run.ask`)~~ ✅ shipped
+- ~~Human-in-the-loop as an effect (pause / resume)~~ ✅ shipped
+- ~~Streaming, parallel tools, `arun`~~ ✅ shipped
+- ~~HTML trace export~~ ✅ shipped
 - Provenance-based context-rot warnings
-- Human-in-the-loop as an effect (pause / approve / resume)
+- Effect-level caching (same inputs → reuse recorded results)
 
 ## License
 
