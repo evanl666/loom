@@ -139,6 +139,26 @@ no external assets, safe to attach to a bug report or email to a teammate:
 loom export run.loom.json        # writes run.loom.html
 ```
 
+## Durable runs (crash recovery)
+
+With a journal, every effect hits disk the moment it's recorded — one JSON
+line per effect, flushed immediately. If the process dies mid-run (crash,
+kill, deploy), nothing you paid for is lost:
+
+```python
+agent = Agent(model=..., tools=[...], journal="task.jsonl")
+agent.run("Migrate the database.")     # 💥 process dies at turn 17
+
+# later, any process:
+run = Run.recover("task.jsonl", agent=agent)
+```
+
+The journaled prefix replays for free; only the unfinished tail runs live.
+Model calls and tool side effects that already happened are **never
+re-executed** — the same exactly-once guarantee replay gives, extended across
+process death. Recovery is idempotent: recovering a finished run just replays
+it. A torn final line (crash mid-write) is detected and ignored.
+
 ## Context-rot detection — and self-healing
 
 Context rot (stale, bloated, unused context) is the leading cause of agent
@@ -304,10 +324,10 @@ import an SDK.
 
 ## Status
 
-`v0.4` — alpha. Kernel, time-travel (replay/fork/bisect), sweep, diff,
+`v0.5` — alpha. Kernel, time-travel (replay/fork/bisect), sweep, diff,
 subagents, conversations, human-in-the-loop, streaming, parallel tools, HTML
-export, and context-rot checkup/heal are complete and tested. See
-[Roadmap](#roadmap).
+export, context-rot checkup/heal, and durable runs are complete and tested.
+See [Roadmap](#roadmap).
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
@@ -319,6 +339,7 @@ export, and context-rot checkup/heal are complete and tested. See
 - ~~Streaming, parallel tools, `arun`~~ ✅ shipped
 - ~~HTML trace export~~ ✅ shipped
 - ~~Context-rot checkup + self-healing (`run.heal`)~~ ✅ shipped
+- ~~Durable runs (write-ahead journal + `Run.recover`)~~ ✅ shipped
 - Effect-level caching (same inputs → reuse recorded results)
 - PyPI release
 

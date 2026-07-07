@@ -31,3 +31,4 @@ jobs:
           python examples/06_conversation.py
           python examples/07_human_in_the_loop.py
           python examples/08_checkup_heal.py
+          python examples/09_durable_runs.py

@@ -154,6 +154,33 @@ class Run:
         run._loaded_system = data.get("system", "")
         return run
 
+    @classmethod
+    def recover(cls, journal_path: str, agent: Any, resume: bool = True) -> "Run":
+        """Recover a run from its write-ahead journal after a crash.
+
+        The journaled prefix replays for free (no API calls, no re-executed
+        tools), then the run continues live from the exact crash point. This is
+        idempotent: recovering a journal of a run that actually finished simply
+        replays it to the same result. Pass ``resume=False`` to get the partial
+        run back for inspection without continuing it.
+        """
+        from .journal import Journal
+
+        header, log = Journal.read(journal_path)
+        episodes = list(header.get("episodes") or [""])
+        if not resume:
+            return cls(
+                agent=agent,
+                recorder=Recorder.replay(log),
+                context=Context(),
+                prompt=episodes[0],
+                output="",
+                truncated=True,
+                episodes=episodes,
+            )
+        rec = Recorder.fork(log, at=len(log))
+        return agent.run(episodes, recorder=rec)
+
     # -- time travel ------------------------------------------------------
 
     def replay(self) -> "Run":

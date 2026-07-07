@@ -107,6 +107,7 @@ class Agent:
         name: str = "agent",
         on_human: "Callable[[str], str] | None" = None,
         parallel_tools: bool = False,
+        journal: "str | None" = None,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -117,6 +118,7 @@ class Agent:
         self.name = name
         self.on_human = on_human
         self.parallel_tools = parallel_tools
+        self.journal = journal  # write-ahead journal path; see loom/journal.py
 
     # -- delegation -------------------------------------------------------
 
@@ -160,6 +162,17 @@ class Agent:
             [str(p) for p in prompt] if isinstance(prompt, (list, tuple)) else [str(prompt)]
         )
         rec = recorder or Recorder.record()
+        if self.journal and rec.allow_live:
+            # Write-ahead journal: header + any replayed prefix now, then every
+            # new effect the moment it records. Pure replays never journal.
+            from .journal import Journal
+
+            j = Journal(self.journal)
+            j.start(
+                {"version": 1, "model": self.model, "system": self.system, "episodes": episodes},
+                rec.log[: rec.replay_until],
+            )
+            rec.journal = j
         try:
             output, ctx, truncated = self._loop(
                 episodes, rec, depth=0, edit=_edit, edit_at_turn=_edit_at_turn

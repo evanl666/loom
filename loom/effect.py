@@ -86,6 +86,7 @@ class Recorder:
         self.allow_live = allow_live
         self._cursor = 0
         self.depth = 0  # current nesting depth; agents set this before recording
+        self.journal = None  # optional write-ahead Journal; set by the agent
 
     # -- constructors -----------------------------------------------------
 
@@ -140,6 +141,8 @@ class Recorder:
         # Forking overwrites the tail of the original log from this point on.
         del self.log[seq:]
         self.log.append(entry)
+        if self.journal is not None:
+            self.journal.append(entry)  # write-ahead: on disk before we move on
         self._cursor += 1
         return result
 
