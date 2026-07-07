@@ -70,6 +70,20 @@ def test_schema_lists_required_fields():
     assert schema["properties"]["temp_c"] == {"type": "number"}
 
 
+def test_pydantic_model_when_installed():
+    pydantic = pytest.importorskip("pydantic")
+
+    class Invoice(pydantic.BaseModel):
+        total: float
+        paid: bool
+
+    inv = parse_as(Invoice, '{"total": 99.5, "paid": false}')
+    assert inv.total == 99.5
+    assert schema_for(Invoice)["required"] == ["total", "paid"]
+    with pytest.raises(OutputInvalid):
+        parse_as(Invoice, '{"total": "lots"}')
+
+
 # -- the agent loop ----------------------------------------------------------
 
 
