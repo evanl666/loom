@@ -87,6 +87,7 @@ class Recorder:
         self._cursor = 0
         self.depth = 0  # current nesting depth; agents set this before recording
         self.journal = None  # optional write-ahead Journal; set by the agent
+        self.cache = None  # optional EffectCache; set by the agent
 
     # -- constructors -----------------------------------------------------
 
@@ -134,10 +135,22 @@ class Recorder:
                 f"replay log exhausted at seq {seq} (kind={kind!r}); the run diverged"
             )
 
-        result = fn()
-        entry = EffectEntry(
-            seq=seq, kind=kind, key=_key([kind, payload]), result=encode(result), depth=self.depth
-        )
+        key = _key([kind, payload])
+
+        # Effect cache: identical inputs reuse an earlier run's encoded result.
+        cached = None
+        if self.cache is not None and self.cache.wants(kind):
+            cached = self.cache.get(key)
+
+        if cached is not None:
+            encoded, result = cached, decode(cached)
+        else:
+            result = fn()
+            encoded = encode(result)
+            if self.cache is not None and self.cache.wants(kind):
+                self.cache.put(key, encoded)
+
+        entry = EffectEntry(seq=seq, kind=kind, key=key, result=encoded, depth=self.depth)
         # Forking overwrites the tail of the original log from this point on.
         del self.log[seq:]
         self.log.append(entry)
@@ -151,6 +164,12 @@ class Recorder:
     @property
     def cursor(self) -> int:
         return self._cursor
+
+    def peek_kind(self) -> "str | None":
+        """Kind of the next entry to be replayed, or None outside the replay region."""
+        if self._cursor < self.replay_until:
+            return self.log[self._cursor].kind
+        return None
 
     def model_seqs(self, depth: "int | None" = 0) -> list[int]:
         """Seq indices of model calls -- the turn boundaries.

@@ -32,3 +32,4 @@ jobs:
           python examples/07_human_in_the_loop.py
           python examples/08_checkup_heal.py
           python examples/09_durable_runs.py
+          python examples/10_policy.py

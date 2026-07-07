@@ -139,6 +139,47 @@ no external assets, safe to attach to a bug report or email to a teammate:
 loom export run.loom.json        # writes run.loom.html
 ```
 
+## Policy: control the agent before it acts
+
+Every tool call flows through one chokepoint, so one policy gates them all:
+
+```python
+agent = Agent(model=..., tools=[...], policy=Policy(
+    allow=["read_*", "search_*"],    # run freely
+    confirm=["delete_*", "send_*"],  # pause for human approval (reuses resume())
+    deny=["drop_db"],                # blocked outright, never executed
+    budget_tokens=50_000,            # hard spend cap; run stops resumably
+))
+
+run = agent.run("clean up old data")
+run.intents()      # [{"tool": "delete_orders", "status": "blocked"}, ...]
+run.proceed()      # continue a budget-stopped run after raising the cap
+```
+
+`Policy(dry_run=True)` stubs every non-allowlisted tool with a
+"would call ..." marker — audit what an agent *would* do before granting real
+access. Approvals are recorded human effects, so approved runs replay
+deterministically and every decision is auditable in the trace.
+
+## Effect cache: iterate without paying twice
+
+```python
+cache = EffectCache("dev-cache.jsonl")     # persistent (or EffectCache() in-memory)
+agent = Agent(model=..., cache=cache)
+agent.run("same prompt")    # pays for the model call
+agent.run("same prompt")    # zero API calls -- served by input hash
+```
+
+Only `model` effects are cached by default (tools have side effects); opt in
+with `kinds=("model", "tool:*")`.
+
+## Model A/B: rerun and diff
+
+```python
+run_b = run.rerun(model="claude-haiku-4-5")   # same conversation, same tools
+print(run.diff(run_b).summary())              # where and why the models diverged
+```
+
 ## Durable runs (crash recovery)
 
 With a journal, every effect hits disk the moment it's recorded — one JSON
@@ -340,7 +381,11 @@ See [Roadmap](#roadmap).
 - ~~HTML trace export~~ ✅ shipped
 - ~~Context-rot checkup + self-healing (`run.heal`)~~ ✅ shipped
 - ~~Durable runs (write-ahead journal + `Run.recover`)~~ ✅ shipped
-- Effect-level caching (same inputs → reuse recorded results)
+- ~~Policy at the boundary (deny/confirm/dry-run/budget) + `intents()`~~ ✅ shipped
+- ~~Effect-level caching~~ ✅ shipped
+- ~~Model A/B (`run.rerun`) + edits persisted as effects~~ ✅ shipped
+- `loom test` (fixture regression suite) & `loom watch` (live journal tail)
+- Trace memory (agents that learn from their own history) & context compaction
 - PyPI release
 
 ## License

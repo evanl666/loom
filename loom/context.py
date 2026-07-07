@@ -32,6 +32,31 @@ class Item:
     tool_call_id: str = ""
     name: str = ""
 
+    def to_dict(self) -> dict:
+        return {
+            "role": self.role,
+            "content": self.content,
+            "source": self.source,
+            "pinned": self.pinned,
+            "tokens": self.tokens,
+            "tool_calls": [tc.to_dict() for tc in self.tool_calls],
+            "tool_call_id": self.tool_call_id,
+            "name": self.name,
+        }
+
+    @staticmethod
+    def from_dict(d: dict) -> "Item":
+        return Item(
+            role=d["role"],
+            content=d["content"],
+            source=d.get("source", ""),
+            pinned=d.get("pinned", False),
+            tokens=d.get("tokens", 0),
+            tool_calls=[ToolCall.from_dict(t) for t in d.get("tool_calls", [])],
+            tool_call_id=d.get("tool_call_id", ""),
+            name=d.get("name", ""),
+        )
+
 
 class Context:
     """An ordered list of provenance-tracked items plus a system prompt."""

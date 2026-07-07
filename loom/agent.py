@@ -12,10 +12,20 @@ import json
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from .context import Context
+from .context import Context, Item
 from .effect import Recorder
 from .providers.base import ModelProvider, ModelResponse
 from .tools import Tool
+
+
+def _tokens_spent(rec: Recorder) -> int:
+    """Total tokens across every model call recorded so far (all depths)."""
+    total = 0
+    for e in rec.log:
+        if e.kind == "model":
+            usage = e.result.get("usage", {}) if isinstance(e.result, dict) else {}
+            total += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+    return total
 
 
 @dataclass
@@ -108,6 +118,8 @@ class Agent:
         on_human: "Callable[[str], str] | None" = None,
         parallel_tools: bool = False,
         journal: "str | None" = None,
+        policy: "Any | None" = None,
+        cache: "Any | None" = None,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -119,6 +131,8 @@ class Agent:
         self.on_human = on_human
         self.parallel_tools = parallel_tools
         self.journal = journal  # write-ahead journal path; see loom/journal.py
+        self.policy = policy  # tool rules + token budget; see loom/policy.py
+        self.cache = cache  # effect cache; see loom/cache.py
 
     # -- delegation -------------------------------------------------------
 
@@ -173,8 +187,10 @@ class Agent:
                 rec.log[: rec.replay_until],
             )
             rec.journal = j
+        if self.cache is not None and rec.allow_live:
+            rec.cache = self.cache
         try:
-            output, ctx, truncated = self._loop(
+            output, ctx, truncated, stop_reason = self._loop(
                 episodes, rec, depth=0, edit=_edit, edit_at_turn=_edit_at_turn
             )
         except HumanInputRequired as e:
@@ -200,6 +216,7 @@ class Agent:
             output=output,
             truncated=truncated,
             episodes=episodes,
+            stop_reason=stop_reason,
         )
 
     async def arun(self, prompt: "str | list[str]", **kwargs: Any) -> "Run":
@@ -215,7 +232,7 @@ class Agent:
         depth: int = 0,
         edit: "Callable[[Context], None] | None" = None,
         edit_at_turn: int = -1,
-    ) -> "tuple[str, Context, bool]":
+    ) -> "tuple[str, Context, bool, str]":
         """The core agent loop. Shared by top-level runs and nested subagents.
 
         ``episodes`` is the conversation: each entry is one user message, run
@@ -225,15 +242,31 @@ class Agent:
         tool_schemas = [t.schema() for t in self.tools.values()]
         resp = ModelResponse()
         truncated = True
+        stop_reason = ""
         turn = 0  # model calls at this depth, counted across all episodes
 
         for episode in episodes:
             ctx.add_user(episode)
             truncated = True
             for _ in range(self.max_steps):
-                # Fork intervention applies only at the top level, before this turn.
+                # Replay any recorded context edits (from earlier forks) first,
+                # so rebuilt context reproduces past surgery exactly.
+                while depth == 0 and rec.peek_kind() == "edit":
+                    rec.depth = depth
+                    snapshot = rec.run("edit", {"turn": turn}, lambda: None)
+                    ctx.items[:] = [Item.from_dict(d) for d in snapshot]
+
+                # Fork intervention applies only at the top level, before this
+                # turn -- and is recorded as an "edit" effect (a full context
+                # snapshot), so the fork is self-describing in the trace.
                 if edit is not None and depth == 0 and turn == edit_at_turn:
                     edit(ctx)
+                    rec.depth = depth
+                    rec.run(
+                        "edit",
+                        {"turn": turn},
+                        lambda ctx=ctx: [it.to_dict() for it in ctx.items],
+                    )
 
                 rec.depth = depth
                 messages = ctx.messages()
@@ -249,26 +282,51 @@ class Agent:
                 ctx.add_assistant(resp)
                 turn += 1
 
+                # Hard token budget: stop cleanly in a resumable state.
+                if (
+                    depth == 0
+                    and self.policy is not None
+                    and self.policy.budget_tokens is not None
+                    and _tokens_spent(rec) >= self.policy.budget_tokens
+                ):
+                    stop_reason = "budget"
+                    truncated = True
+                    break
+
                 if resp.stop_reason == "tool_use" and resp.tool_calls:
                     self._run_tools(resp.tool_calls, ctx, rec, depth)
                     continue  # let the model observe tool results
 
                 truncated = False
                 break
+            if stop_reason:
+                break
 
-        return resp.text, ctx, truncated
+        return resp.text, ctx, truncated, stop_reason
 
     def _run_tools(self, calls: list, ctx: Context, rec: Recorder, depth: int) -> None:
         """Execute one turn's tool calls, recording each through the boundary."""
-        plain = all(
-            not isinstance(self.tools.get(tc.name), (SubagentTool, HumanTool)) for tc in calls
-        )
+        decisions: dict[str, str] = {}
+        for tc in calls:
+            tool = self.tools.get(tc.name)
+            if isinstance(tool, (SubagentTool, HumanTool)):
+                decisions[tc.id] = "special"  # handled by their own paths below
+            elif self.policy is None:
+                decisions[tc.id] = "allow"
+            else:
+                decisions[tc.id] = self.policy.decide(tc.name)
+
         results: "dict[str, Any] | None" = None
-        # Parallel execution is safe only for plain tools and only fully outside
-        # the replay region (otherwise tools would re-execute during replay).
-        # Results are still RECORDED in call order, so the trace stays
-        # deterministic no matter which tool finished first.
-        if self.parallel_tools and plain and len(calls) > 1 and rec.cursor >= rec.replay_until:
+        # Parallel execution is safe only when EVERY call in the turn is a plain
+        # allowed tool, fully outside the replay region (otherwise tools would
+        # re-execute during replay, or policy gates would be bypassed). Results
+        # are still RECORDED in call order, so the trace stays deterministic.
+        if (
+            self.parallel_tools
+            and len(calls) > 1
+            and all(d == "allow" for d in decisions.values())
+            and rec.cursor >= rec.replay_until
+        ):
             from concurrent.futures import ThreadPoolExecutor
 
             with ThreadPoolExecutor(max_workers=len(calls)) as pool:
@@ -277,10 +335,11 @@ class Agent:
 
         for tc in calls:
             tool = self.tools.get(tc.name)
+            decision = decisions[tc.id]
             if isinstance(tool, SubagentTool) and tool.agent is not None:
                 # Delegate: the child records its own effects at depth+1.
                 task = str(tc.input.get("task", ""))
-                result, _child_ctx, _ = tool.agent._loop([task], rec, depth=depth + 1)
+                result, _child_ctx, _, _ = tool.agent._loop([task], rec, depth=depth + 1)
             elif isinstance(tool, HumanTool):
                 question = str(tc.input.get("question", ""))
                 rec.depth = depth
@@ -290,14 +349,32 @@ class Agent:
                     lambda question=question, depth=depth: self._human(question, depth),
                 )
             else:
+                if decision == "confirm":
+                    # Approval is nondeterminism -> a recorded human effect.
+                    # No handler -> the run pauses; resume("yes") continues it.
+                    from .policy import affirmative
+
+                    q = f"Approve tool call {tc.name}({json.dumps(tc.input)})? Reply yes or no."
+                    rec.depth = depth
+                    answer = rec.run(
+                        "human", {"question": q}, lambda q=q, depth=depth: self._human(q, depth)
+                    )
+                    decision = "allow" if affirmative(answer) else "rejected"
+
+                if decision == "deny":
+                    fn = lambda tc=tc: f"BLOCKED: {tc.name} denied by policy"  # noqa: E731
+                elif decision == "rejected":
+                    fn = lambda tc=tc: f"BLOCKED: {tc.name} rejected by operator"  # noqa: E731
+                elif decision == "stub":
+                    fn = (  # noqa: E731
+                        lambda tc=tc: f"DRY-RUN: would call {tc.name}({json.dumps(tc.input)})"
+                    )
+                elif results is not None:
+                    fn = lambda tc=tc: results[tc.id]  # noqa: E731
+                else:
+                    fn = lambda tc=tc: self._call_tool(tc.name, tc.input)  # noqa: E731
                 rec.depth = depth
-                result = rec.run(
-                    f"tool:{tc.name}",
-                    {"id": tc.id, "input": tc.input},
-                    (lambda tc=tc: results[tc.id])
-                    if results is not None
-                    else (lambda tc=tc: self._call_tool(tc.name, tc.input)),
-                )
+                result = rec.run(f"tool:{tc.name}", {"id": tc.id, "input": tc.input}, fn)
             ctx.add_tool_result(tc.id, tc.name, result)
 
     def _human(self, question: str, depth: int) -> str:

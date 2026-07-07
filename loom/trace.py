@@ -31,6 +31,7 @@ class Run:
         paused: bool = False,
         pending: "str | None" = None,
         pending_depth: int = 0,
+        stop_reason: str = "",
     ):
         self.agent = agent
         self.recorder = recorder
@@ -42,6 +43,7 @@ class Run:
         self.paused = paused
         self.pending = pending
         self.pending_depth = pending_depth
+        self.stop_reason = stop_reason  # "" | "budget" -- why the run stopped early
         self.healed_by: "str | None" = None  # set on branches returned by heal()
 
     # -- inspection -------------------------------------------------------
@@ -123,6 +125,7 @@ class Run:
             "paused": self.paused,
             "pending": self.pending,
             "pending_depth": self.pending_depth,
+            "stop_reason": self.stop_reason,
             "log": [e.to_dict() for e in self.log],
         }
 
@@ -149,6 +152,7 @@ class Run:
             paused=data.get("paused", False),
             pending=data.get("pending"),
             pending_depth=data.get("pending_depth", 0),
+            stop_reason=data.get("stop_reason", ""),
         )
         run._loaded_model = data.get("model")
         run._loaded_system = data.get("system", "")
@@ -274,6 +278,57 @@ class Run:
         from .diff import diff_logs
 
         return diff_logs(self.log, other.log)
+
+    def intents(self) -> list[dict]:
+        """What the agent did (or tried to do) with tools, with policy outcomes.
+
+        Statuses: ``executed`` | ``stubbed`` (dry-run) | ``blocked`` (denied or
+        rejected). This is how you audit a dry run before granting real access.
+        """
+        out: list[dict] = []
+        for e in self.log:
+            if not e.kind.startswith("tool:"):
+                continue
+            status = "executed"
+            if isinstance(e.result, str):
+                if e.result.startswith("DRY-RUN:"):
+                    status = "stubbed"
+                elif e.result.startswith("BLOCKED:"):
+                    status = "blocked"
+            out.append({"tool": e.kind[5:], "status": status, "seq": e.seq})
+        return out
+
+    def proceed(self) -> "Run":
+        """Continue an interrupted run (budget stop, max_steps truncation).
+
+        Replays the whole recorded prefix for free and picks up live from the
+        stopping point -- raise the agent's policy budget or max_steps first,
+        or it will stop again at the same limit.
+        """
+        self._require_agent("proceed")
+        rec = Recorder.fork(self.log, at=len(self.log))
+        return self.agent.run(self.episodes, recorder=rec)
+
+    def rerun(self, model: Any = None, system: "str | None" = None) -> "Run":
+        """Re-run the same conversation live on a different model or system prompt.
+
+        Same tools, same episodes, fresh trace -- then ``run.diff(other)`` shows
+        exactly where and why the two models diverged. A/B testing for agents.
+        """
+        from .agent import Agent
+
+        agent = Agent(
+            model=model if model is not None else self.agent.provider,
+            tools=list(self.agent.tools.values()),
+            system=self.agent.system if system is None else system,
+            max_steps=self.agent.max_steps,
+            budget=self.agent.budget,
+            name=self.agent.name,
+            on_human=self.agent.on_human,
+            parallel_tools=self.agent.parallel_tools,
+            policy=self.agent.policy,
+        )
+        return agent.run(self.episodes)
 
     def checkup(self) -> Any:
         """Inspect this run's context for rot (oversized/unused/duplicate items).
