@@ -88,6 +88,7 @@ class Recorder:
         self.depth = 0  # current nesting depth; agents set this before recording
         self.journal = None  # optional write-ahead Journal; set by the agent
         self.cache = None  # optional EffectCache; set by the agent
+        self.executing = False  # True while an effect's thunk runs (see loom/ambient.py)
 
     # -- constructors -----------------------------------------------------
 
@@ -145,7 +146,11 @@ class Recorder:
         if cached is not None:
             encoded, result = cached, decode(cached)
         else:
-            result = fn()
+            self.executing = True
+            try:
+                result = fn()
+            finally:
+                self.executing = False
             encoded = encode(result)
             if self.cache is not None and self.cache.wants(kind):
                 self.cache.put(key, encoded)

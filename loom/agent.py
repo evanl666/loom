@@ -125,6 +125,7 @@ class Agent:
         compact_keep: int = 4,
         output_type: "Any | None" = None,
         output_retries: int = 2,
+        clock: bool = False,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -150,6 +151,7 @@ class Agent:
         self.memory = memory  # trace memory; see loom/memory.py
         self.compact_after = compact_after  # summarize history past this many tokens
         self.compact_keep = compact_keep  # recent items kept verbatim after compaction
+        self.clock = clock  # tell the model today's date via a recorded time effect
 
     # -- delegation -------------------------------------------------------
 
@@ -206,6 +208,9 @@ class Agent:
             rec.journal = j
         if self.cache is not None and rec.allow_live:
             rec.cache = self.cache
+        from .ambient import _activate, _deactivate
+
+        ambient_token = _activate(rec)  # loom.now()/loom.random() route here
         try:
             output, ctx, truncated, stop_reason = self._loop(
                 episodes, rec, depth=0, edit=_edit, edit_at_turn=_edit_at_turn
@@ -225,6 +230,8 @@ class Agent:
                 pending=e.question,
                 pending_depth=e.depth,
             )
+        finally:
+            _deactivate(ambient_token)
         run_obj = Run(
             agent=self,
             recorder=rec,
@@ -272,6 +279,18 @@ class Agent:
         turn = 0  # model calls at this depth, counted across all episodes
 
         for ep_index, episode in enumerate(episodes):
+            # The clock: today's date as a recorded "time" effect, so the model
+            # knows when "now" is and replays still see the original moment.
+            if ep_index == 0 and depth == 0 and self.clock:
+                import time as _time
+                from datetime import datetime, timezone
+
+                rec.depth = depth
+                ts = rec.run("time", {}, _time.time)
+                stamp = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+                ctx.add_user(f"Current datetime: {stamp}", source="clock")
             ctx.add_user(episode)
             # Trace memory: recall similar past runs once, at conversation start.
             # The store changes over time, so recall is a recorded effect.

@@ -291,6 +291,19 @@ deterministically:
 agent = Agent(model=..., compact_after=8000, compact_keep=4)
 ```
 
+## The clock is an effect too
+
+```python
+agent = Agent(model=..., clock=True)   # the model knows today's date
+run = agent.run("What day is it tomorrow?")
+run.replay()                           # ...and the replay sees the ORIGINAL date
+```
+
+`loom.now()` and `loom.random()` complete the promise: at harness level they
+are recorded effects (replays serve the recorded value); inside a tool they
+return real values on purpose — a tool either runs live (fresh time is
+correct) or not at all (its recorded result already embeds the time it saw).
+
 ## Impact: change your prompt without fear
 
 Every team has the same fear: touch the system prompt and something,
@@ -519,6 +532,7 @@ analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
 - ~~Impact analysis (`loom impact` — snapshot testing for config changes)~~ ✅ shipped
 - ~~Heal-to-test (`heal(regression_dir=)` — every bug becomes a test)~~ ✅ shipped
 - ~~MCP servers as tools (`loom-harness[mcp]`)~~ ✅ shipped
+- ~~Clock & randomness as effects (`loom.now`, `loom.random`, `Agent(clock=True)`)~~ ✅ shipped
 - `loom fuzz` — chaos engineering for agents (fault injection at any effect)
 - `loom proxy` — record any framework's runs through an API-compatible proxy
 

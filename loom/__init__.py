@@ -19,6 +19,7 @@ Quickstart:
 """
 
 from .agent import Agent, HumanInputRequired, HumanTool, SubagentTool, ask_human
+from .ambient import now, random
 from .context import Context, Item
 from .diff import StepDiff, TraceDiff, diff_logs
 from .effect import EffectEntry, Recorder, ReplayExhausted, ReplayMismatch
@@ -69,6 +70,8 @@ __all__ = [
     "Impact",
     "verify_trace",
     "verify_replay",
+    "now",
+    "random",
     "ModelProvider",
     "ModelResponse",
     "ToolCall",
