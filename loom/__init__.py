@@ -25,6 +25,7 @@ from .effect import EffectEntry, Recorder, ReplayExhausted, ReplayMismatch
 from .export import trace_to_html
 from .cache import EffectCache
 from .health import Finding, HealthReport
+from .impact import Impact
 from .journal import Journal
 from .memory import TraceMemory
 from .policy import Policy
@@ -65,6 +66,7 @@ __all__ = [
     "OutputInvalid",
     "parse_as",
     "schema_for",
+    "Impact",
     "verify_trace",
     "verify_replay",
     "ModelProvider",

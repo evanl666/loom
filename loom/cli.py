@@ -80,17 +80,9 @@ def _cmd_replay(args: argparse.Namespace) -> int:
 
 def _cmd_test(args: argparse.Namespace) -> int:
     """Verify a suite of saved traces; exit 1 if any fail."""
-    import glob
-    import os
-
     from .testing import verify_trace
 
-    paths: list[str] = []
-    for target in args.paths:
-        if os.path.isdir(target):
-            paths.extend(sorted(glob.glob(os.path.join(target, "*.loom.json"))))
-        else:
-            paths.append(target)
+    paths = _expand_trace_paths(args.paths)
     if not paths:
         print("no traces found", file=sys.stderr)
         return 1
@@ -176,6 +168,47 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     return 0 if d.identical else 1
 
 
+def _expand_trace_paths(targets: list[str]) -> list[str]:
+    import glob
+    import os
+
+    paths: list[str] = []
+    for target in targets:
+        if os.path.isdir(target):
+            paths.extend(sorted(glob.glob(os.path.join(target, "*.loom.json"))))
+        else:
+            paths.append(target)
+    return paths
+
+
+def _cmd_impact(args: argparse.Namespace) -> int:
+    """Replay a trace corpus against a changed agent config; exit 1 if any run is affected."""
+    import importlib
+    import os
+
+    from .impact import assess, report
+
+    sys.path.insert(0, os.getcwd())
+    module_name, _, attr = args.agent.partition(":")
+    if not attr:
+        print("loom: --agent must look like module:attr", file=sys.stderr)
+        return 2
+    try:
+        obj = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as e:
+        print(f"loom: could not load agent {args.agent!r}: {e}", file=sys.stderr)
+        return 2
+    agent = obj() if callable(obj) and not hasattr(obj, "run") else obj
+
+    paths = _expand_trace_paths(args.paths)
+    if not paths:
+        print("no traces found", file=sys.stderr)
+        return 2
+    impacts = assess(paths, agent, live=args.live)
+    print(report(impacts))
+    return 1 if any(i.changed for i in impacts) else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom", description="Read, replay, and rewind agent runs.")
     p.add_argument("--version", action="version", version=f"loom {__version__}")
@@ -214,6 +247,20 @@ def build_parser() -> argparse.ArgumentParser:
     ts = sub.add_parser("test", help="verify a suite of saved traces")
     ts.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
     ts.set_defaults(func=_cmd_test)
+
+    im = sub.add_parser("impact", help="which recorded runs does a config change affect?")
+    im.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
+    im.add_argument(
+        "--agent",
+        required=True,
+        help="where to find the (re)configured agent: module:attr, an Agent or a zero-arg factory",
+    )
+    im.add_argument(
+        "--live",
+        action="store_true",
+        help="re-run affected conversations to show HOW outputs change (costs API calls)",
+    )
+    im.set_defaults(func=_cmd_impact)
 
     wa = sub.add_parser("watch", help="follow a run's journal live")
     wa.add_argument("path")
