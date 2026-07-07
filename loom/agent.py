@@ -126,6 +126,10 @@ class Agent:
         output_type: "Any | None" = None,
         output_retries: int = 2,
         clock: bool = False,
+        critic: Any = None,
+        critic_threshold: float = 0.6,
+        critic_retries: int = 1,
+        deliberate: int = 1,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -152,6 +156,17 @@ class Agent:
         self.compact_after = compact_after  # summarize history past this many tokens
         self.compact_keep = compact_keep  # recent items kept verbatim after compaction
         self.clock = clock  # tell the model today's date via a recorded time effect
+        # Self-correction: a (usually cheaper) critic model scores final answers
+        # as recorded "critic" effects; a low score rewinds the turn with the
+        # critique in context. deliberate=N samples N candidate answers and lets
+        # the critic pick ("sample"/"choose" effects) -- inference-time scaling
+        # that stays fully replayable.
+        self.critic_provider = _resolve_provider(critic, None) if critic is not None else None
+        self.critic_threshold = critic_threshold
+        self.critic_retries = critic_retries
+        self.deliberate = max(1, deliberate)
+        if self.deliberate > 1 and self.critic_provider is None:
+            raise ValueError("deliberate=N needs a critic to pick the winner: Agent(critic=...)")
 
     # -- delegation -------------------------------------------------------
 
@@ -305,6 +320,7 @@ class Agent:
                     ctx.add_user(recalled, source="memory")
             truncated = True
             format_retries = 0  # validation retries used in this episode
+            critic_rounds = 0  # critic-triggered rewinds used in this episode
             for _ in range(self.max_steps):
                 # Replay any recorded context edits (from earlier forks) first,
                 # so rebuilt context reproduces past surgery exactly.
@@ -369,6 +385,36 @@ class Agent:
                     self._run_tools(resp.tool_calls, ctx, rec, depth)
                     continue  # let the model observe tool results
 
+                # Deliberate: sample extra candidate answers and let the critic
+                # pick. Samples are "sample" effects, NOT "model" effects, so
+                # turn semantics (fork points, num_turns) are untouched.
+                if self.deliberate > 1 and depth == 0:
+                    candidates = [resp.text]
+                    for i in range(self.deliberate - 1):
+                        rec.depth = depth
+                        alt = rec.run(
+                            "sample",
+                            {"turn": turn, "i": i},
+                            lambda messages=messages: self.provider.complete(
+                                self.system, messages, tool_schemas
+                            ),
+                            encode=lambda r: r.to_dict(),
+                            decode=ModelResponse.from_dict,
+                        )
+                        candidates.append(alt.text)
+                    rec.depth = depth
+                    choice = rec.run(
+                        "choose",
+                        {"turn": turn, "candidates": candidates},
+                        lambda episode=episode, candidates=candidates: self._choose(
+                            episode, candidates
+                        ),
+                    )
+                    best = candidates[choice.get("best", 0) % len(candidates)]
+                    if best != resp.text:
+                        resp.text = best
+                        ctx.items[-1].content = best  # the assistant item just added
+
                 # Structured output: validate the final answer at the boundary.
                 # Validation is a pure function of the recorded text, so replays
                 # deterministically walk the same retry path.
@@ -387,6 +433,33 @@ class Agent:
                             )
                             continue
                         stop_reason = "invalid_output"
+
+                # Critic gate: a (cheaper) reviewer scores the final answer as a
+                # recorded effect; a low score rewinds the turn with the
+                # critique in context. The failed attempt, the verdict, and the
+                # retry all stay in the trace -- self-correction you can replay.
+                if (
+                    self.critic_provider is not None
+                    and depth == 0
+                    and not stop_reason
+                ):
+                    rec.depth = depth
+                    verdict = rec.run(
+                        "critic",
+                        {"turn": turn, "text": resp.text},
+                        lambda episode=episode, text=resp.text: self._critique(episode, text),
+                    )
+                    if (
+                        verdict.get("score", 1.0) < self.critic_threshold
+                        and critic_rounds < self.critic_retries
+                    ):
+                        critic_rounds += 1
+                        ctx.add_user(
+                            f"A reviewer scored your answer {verdict.get('score')}/1.0: "
+                            f"{verdict.get('critique', '')} Improve your answer.",
+                            source="critique",
+                        )
+                        continue
 
                 truncated = False
                 break
@@ -467,6 +540,50 @@ class Agent:
                 rec.depth = depth
                 result = rec.run(f"tool:{tc.name}", {"id": tc.id, "input": tc.input}, fn)
             ctx.add_tool_result(tc.id, tc.name, result)
+
+    def _critique(self, question: str, text: str) -> dict:
+        """Ask the critic to score an answer. Fails open (score 1.0) on junk replies."""
+        from .structured import extract_json
+
+        resp = self.critic_provider.complete(
+            'You are a strict reviewer. Reply ONLY with JSON: {"score": <0.0-1.0>, "critique": "<one sentence>"}.',
+            [
+                {
+                    "role": "user",
+                    "content": f"Question:\n{question}\n\nAnswer:\n{text}\n\nScore this answer.",
+                }
+            ],
+            [],
+        )
+        try:
+            data = extract_json(resp.text)
+            return {
+                "score": float(data.get("score", 1.0)),
+                "critique": str(data.get("critique", ""))[:500],
+            }
+        except Exception:
+            return {"score": 1.0, "critique": "unparseable critic reply; letting the answer pass"}
+
+    def _choose(self, question: str, candidates: list[str]) -> dict:
+        """Ask the critic to pick the best candidate. Falls back to the first."""
+        from .structured import extract_json
+
+        numbered = "\n\n".join(f"[{i}] {c}" for i, c in enumerate(candidates))
+        resp = self.critic_provider.complete(
+            'You judge candidate answers. Reply ONLY with JSON: {"best": <index>, "why": "<one sentence>"}.',
+            [
+                {
+                    "role": "user",
+                    "content": f"Question:\n{question}\n\nCandidates:\n{numbered}\n\nWhich index is best?",
+                }
+            ],
+            [],
+        )
+        try:
+            data = extract_json(resp.text)
+            return {"best": int(data.get("best", 0)), "why": str(data.get("why", ""))[:500]}
+        except Exception:
+            return {"best": 0, "why": "unparseable critic reply; kept the first candidate"}
 
     def _human(self, question: str, depth: int) -> str:
         """Answer via the on_human handler, or pause the run."""

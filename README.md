@@ -291,6 +291,34 @@ deterministically:
 agent = Agent(model=..., compact_after=8000, compact_keep=4)
 ```
 
+## Self-correction: a critic at the boundary
+
+Give the agent a (cheaper) reviewer. Every final answer is scored as a
+recorded `"critic"` effect — a low score rewinds the turn with the critique in
+context, and the model tries again. The failed attempt, the verdict, and the
+retry are all in the trace: **self-correction you can replay and audit**.
+
+```python
+agent = Agent(model="claude-opus-4-8", critic="claude-haiku-4-5", critic_threshold=0.6)
+run = agent.run("Capital of France?")
+run.print_timeline()
+#  [0] model   The capital of France is Lyon.
+#  [1] critic  {"score": 0.2, "critique": "Lyon is not the capital."}
+#  [2] model   The capital of France is Paris.      <- caught by its own reviewer
+#  [3] critic  {"score": 0.95, "critique": "Correct."}
+```
+
+And when the answer really matters, deliberate: sample N candidates and let
+the critic pick. Samples are `"sample"` effects, not turns — fork and bisect
+semantics stay intact:
+
+```python
+agent = Agent(model="claude-opus-4-8", critic="claude-haiku-4-5", deliberate=3)
+```
+
+Spend compute exactly where you need confidence — and replay the whole
+deliberation later for free.
+
 ## The clock is an effect too
 
 ```python
@@ -533,6 +561,7 @@ analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
 - ~~Heal-to-test (`heal(regression_dir=)` — every bug becomes a test)~~ ✅ shipped
 - ~~MCP servers as tools (`loom-harness[mcp]`)~~ ✅ shipped
 - ~~Clock & randomness as effects (`loom.now`, `loom.random`, `Agent(clock=True)`)~~ ✅ shipped
+- ~~Critic gate + deliberate mode (replayable self-correction)~~ ✅ shipped
 - `loom fuzz` — chaos engineering for agents (fault injection at any effect)
 - `loom proxy` — record any framework's runs through an API-compatible proxy
 
