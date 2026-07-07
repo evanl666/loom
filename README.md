@@ -18,9 +18,11 @@ One primitive. Five superpowers:
 | **Cost accounting** | Every model call is metered at the boundary. |
 
 ```
-pip install loom-agent            # zero dependencies
-pip install "loom-agent[anthropic]"   # + live Claude models
+pip install loom-harness            # zero dependencies
+pip install "loom-harness[anthropic]"   # + live Claude models
 ```
+
+> The package installs as `loom-harness`, imports as `loom` (like `beautifulsoup4` / `bs4`).
 
 ## Quickstart (works offline, no API key)
 
@@ -328,8 +330,8 @@ class MyProvider:
 Ships with:
 
 - `ScriptedProvider`, `RuleProvider` — offline, no deps (used in all examples)
-- `AnthropicProvider` — `pip install "loom-agent[anthropic]"`, needs `ANTHROPIC_API_KEY`
-- `OpenAIProvider` — `pip install "loom-agent[openai]"`; works with OpenAI **and**
+- `AnthropicProvider` — `pip install "loom-harness[anthropic]"`, needs `ANTHROPIC_API_KEY`
+- `OpenAIProvider` — `pip install "loom-harness[openai]"`; works with OpenAI **and**
   any OpenAI-compatible server via `base_url` (vLLM, Ollama, LM Studio, Together,
   Groq, OpenRouter, …):
 

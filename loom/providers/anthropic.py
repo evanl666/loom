@@ -1,6 +1,6 @@
 """Live provider for Anthropic's Claude models (optional).
 
-Install with ``pip install "loom-agent[anthropic]"`` and set ``ANTHROPIC_API_KEY``.
+Install with ``pip install "loom-harness[anthropic]"`` and set ``ANTHROPIC_API_KEY``.
 The kernel does not import this module unless you use it, so the anthropic SDK
 stays an optional dependency.
 """
@@ -33,7 +33,7 @@ class AnthropicProvider:
         except ImportError as e:  # pragma: no cover - import guard
             raise ImportError(
                 "AnthropicProvider requires the anthropic SDK. "
-                'Install it with: pip install "loom-agent[anthropic]"'
+                'Install it with: pip install "loom-harness[anthropic]"'
             ) from e
         self._client = anthropic.Anthropic(api_key=api_key)
         self.model = model

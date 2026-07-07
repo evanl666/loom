@@ -4,7 +4,7 @@ Works with OpenAI and the many servers that speak the same protocol -- vLLM,
 Ollama, LM Studio, Together, Groq, OpenRouter, and more -- by pointing
 ``base_url`` at them.
 
-    pip install "loom-agent[openai]"
+    pip install "loom-harness[openai]"
 
     # OpenAI
     Agent(provider=OpenAIProvider("gpt-4o"))
@@ -34,7 +34,7 @@ class OpenAIProvider:
         except ImportError as e:  # pragma: no cover - import guard
             raise ImportError(
                 "OpenAIProvider requires the openai SDK. "
-                'Install it with: pip install "loom-agent[openai]"'
+                'Install it with: pip install "loom-harness[openai]"'
             ) from e
         self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
         self.model = model

@@ -1,6 +1,6 @@
 """Run a real Claude agent, then replay the trace for free.
 
-Requires:  pip install "loom-agent[anthropic]"  and  ANTHROPIC_API_KEY set.
+Requires:  pip install "loom-harness[anthropic]"  and  ANTHROPIC_API_KEY set.
 
     python examples/03_live_anthropic.py
 """
