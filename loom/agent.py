@@ -120,6 +120,9 @@ class Agent:
         journal: "str | None" = None,
         policy: "Any | None" = None,
         cache: "Any | None" = None,
+        memory: "Any | None" = None,
+        compact_after: "int | None" = None,
+        compact_keep: int = 4,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -133,6 +136,9 @@ class Agent:
         self.journal = journal  # write-ahead journal path; see loom/journal.py
         self.policy = policy  # tool rules + token budget; see loom/policy.py
         self.cache = cache  # effect cache; see loom/cache.py
+        self.memory = memory  # trace memory; see loom/memory.py
+        self.compact_after = compact_after  # summarize history past this many tokens
+        self.compact_keep = compact_keep  # recent items kept verbatim after compaction
 
     # -- delegation -------------------------------------------------------
 
@@ -208,7 +214,7 @@ class Agent:
                 pending=e.question,
                 pending_depth=e.depth,
             )
-        return Run(
+        run_obj = Run(
             agent=self,
             recorder=rec,
             context=ctx,
@@ -218,6 +224,15 @@ class Agent:
             episodes=episodes,
             stop_reason=stop_reason,
         )
+        # Trace memory auto-store: completed live runs become future experience.
+        if (
+            self.memory is not None
+            and getattr(self.memory, "auto_store", False)
+            and rec.allow_live
+            and not truncated
+        ):
+            self.memory.add(run_obj)
+        return run_obj
 
     async def arun(self, prompt: "str | list[str]", **kwargs: Any) -> "Run":
         """Async convenience wrapper: runs the (synchronous) loop in a thread."""
@@ -245,8 +260,19 @@ class Agent:
         stop_reason = ""
         turn = 0  # model calls at this depth, counted across all episodes
 
-        for episode in episodes:
+        for ep_index, episode in enumerate(episodes):
             ctx.add_user(episode)
+            # Trace memory: recall similar past runs once, at conversation start.
+            # The store changes over time, so recall is a recorded effect.
+            if ep_index == 0 and depth == 0 and self.memory is not None:
+                rec.depth = depth
+                recalled = rec.run(
+                    "memory",
+                    {"query": episode},
+                    lambda episode=episode: self.memory.recall_text(episode),
+                )
+                if recalled:
+                    ctx.add_user(recalled, source="memory")
             truncated = True
             for _ in range(self.max_steps):
                 # Replay any recorded context edits (from earlier forks) first,
@@ -267,6 +293,21 @@ class Agent:
                         {"turn": turn},
                         lambda ctx=ctx: [it.to_dict() for it in ctx.items],
                     )
+
+                # Compaction: when history outgrows the threshold, summarize it
+                # into one pinned item. The summary is a model call = an effect,
+                # so compacted runs replay deterministically.
+                if (
+                    self.compact_after is not None
+                    and depth == 0
+                    and ctx.total_tokens() > self.compact_after
+                    and len(ctx.items) > self.compact_keep
+                ):
+                    rec.depth = depth
+                    summary = rec.run(
+                        "compact", {"turn": turn}, lambda ctx=ctx: self._summarize(ctx)
+                    )
+                    self._compact(ctx, summary)
 
                 rec.depth = depth
                 messages = ctx.messages()
@@ -382,6 +423,35 @@ class Agent:
         if self.on_human is not None:
             return str(self.on_human(question))
         raise HumanInputRequired(question, depth)
+
+    def _summarize(self, ctx: Context) -> str:
+        """Ask the model to compress the history that compaction will drop."""
+        old = ctx.items[: -self.compact_keep] if self.compact_keep else list(ctx.items)
+        transcript = "\n".join(f"[{it.role}] {it.content}" for it in old if it.content)
+        resp = self.provider.complete(
+            "You compress conversation history. Keep facts, decisions, IDs, and open tasks.",
+            [{"role": "user", "content": f"Summarize this history concisely:\n\n{transcript}"}],
+            [],
+        )
+        return resp.text
+
+    def _compact(self, ctx: Context, summary: str) -> None:
+        """Replace old history with a pinned summary + the most recent items."""
+        from .context import estimate_tokens
+
+        tail = list(ctx.items[-self.compact_keep :]) if self.compact_keep else []
+        while tail and tail[0].role == "tool":
+            tail.pop(0)  # never leave an orphaned tool result at the front
+        head = ctx.items[: len(ctx.items) - len(tail)] if tail else list(ctx.items)
+        pinned = [it for it in head if it.pinned]
+        summary_item = Item(
+            "user",
+            f"Summary of earlier conversation: {summary}",
+            "compaction",
+            pinned=True,
+            tokens=estimate_tokens(summary),
+        )
+        ctx.items[:] = pinned + [summary_item] + tail
 
     def _call_tool(self, name: str, args: dict) -> Any:
         tool = self.tools.get(name)

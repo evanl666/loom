@@ -222,6 +222,45 @@ each one becomes a **fork** that redacts it → only the divergent tail re-runs
 → the first branch that passes your check wins. Diagnosis to *verified* fix,
 automatically. Also available for any saved trace: `loom doctor run.loom.json`.
 
+## Trace memory: agents that learn from their own history
+
+Every run leaves a complete trace — so a directory of traces is recallable
+experience. Before a run starts, the most similar past runs (with their
+outcomes) are injected into context, recorded as a `"memory"` effect so
+replays reproduce exactly what was recalled:
+
+```python
+memory = TraceMemory("runs/", auto_store=True)   # completed runs become experience
+agent = Agent(model=..., tools=[...], memory=memory)
+agent.run("Migrate the staging database.")       # walks in knowing what worked last time
+```
+
+## Compaction: long-horizon runs that don't rot
+
+When history outgrows a threshold, it's summarized into one pinned item — and
+the summarization is itself a recorded effect, so compacted runs replay
+deterministically:
+
+```python
+agent = Agent(model=..., compact_after=8000, compact_keep=4)
+```
+
+## Agent CI: `loom test` and `loom watch`
+
+```
+loom test fixtures/            # verify a suite of saved traces (exit 1 on failure)
+loom watch task.jsonl          # follow a running agent's journal live (tail -f)
+```
+
+For full behavioral regression in your test suite (zero API calls):
+
+```python
+from loom import verify_replay
+def test_agent_fixtures():
+    for path in glob("fixtures/*.loom.json"):
+        verify_replay(path, agent=build_agent())
+```
+
 ## Sweep: cheap counterfactuals
 
 `sweep` is the batch version of `fork`: test N hypotheses from the same rewind
@@ -384,8 +423,8 @@ See [Roadmap](#roadmap).
 - ~~Policy at the boundary (deny/confirm/dry-run/budget) + `intents()`~~ ✅ shipped
 - ~~Effect-level caching~~ ✅ shipped
 - ~~Model A/B (`run.rerun`) + edits persisted as effects~~ ✅ shipped
-- `loom test` (fixture regression suite) & `loom watch` (live journal tail)
-- Trace memory (agents that learn from their own history) & context compaction
+- ~~`loom test` & `loom watch`~~ ✅ shipped
+- ~~Trace memory + context compaction~~ ✅ shipped
 - PyPI release
 
 ## License

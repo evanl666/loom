@@ -78,6 +78,69 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_test(args: argparse.Namespace) -> int:
+    """Verify a suite of saved traces; exit 1 if any fail."""
+    import glob
+    import os
+
+    from .testing import verify_trace
+
+    paths: list[str] = []
+    for target in args.paths:
+        if os.path.isdir(target):
+            paths.extend(sorted(glob.glob(os.path.join(target, "*.loom.json"))))
+        else:
+            paths.append(target)
+    if not paths:
+        print("no traces found", file=sys.stderr)
+        return 1
+
+    failed = 0
+    for p in paths:
+        problems = verify_trace(p)
+        if problems:
+            failed += 1
+            print(f"FAIL {p}")
+            for problem in problems:
+                print(f"     - {problem}")
+        else:
+            print(f"PASS {p}")
+    print(f"\n{len(paths) - failed}/{len(paths)} traces passed")
+    return 1 if failed else 0
+
+
+def _cmd_watch(args: argparse.Namespace) -> int:
+    """Follow a run's journal live (like tail -f for an agent)."""
+    import time
+
+    from .journal import Journal
+
+    seen = 0
+    shown_header = False
+    while True:
+        try:
+            header, entries = Journal.read(args.path)
+        except FileNotFoundError:
+            if args.once:
+                print(f"no journal at {args.path}", file=sys.stderr)
+                return 1
+            time.sleep(args.interval)
+            continue
+        if header and not shown_header:
+            episodes = header.get("episodes") or []
+            print(f"model: {header.get('model')}  |  prompt: {episodes[0] if episodes else '?'}")
+            shown_header = True
+        for e in entries[seen:]:
+            result = e.result if isinstance(e.result, str) else json.dumps(e.result)
+            detail = (result[:100] + "...") if len(result) > 100 else result
+            indent = "  " * e.depth
+            print(f"  [{e.seq:>3}] {indent}{e.kind:<14} {detail}")
+        seen = len(entries)
+        if args.once:
+            return 0
+        time.sleep(args.interval)
+
+
 def _cmd_doctor(args: argparse.Namespace) -> int:
     """Check a saved trace for context rot; exit 1 if findings exist."""
     from .health import analyze
@@ -147,6 +210,16 @@ def build_parser() -> argparse.ArgumentParser:
     dr = sub.add_parser("doctor", help="check a saved trace for context rot")
     dr.add_argument("path")
     dr.set_defaults(func=_cmd_doctor)
+
+    ts = sub.add_parser("test", help="verify a suite of saved traces")
+    ts.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
+    ts.set_defaults(func=_cmd_test)
+
+    wa = sub.add_parser("watch", help="follow a run's journal live")
+    wa.add_argument("path")
+    wa.add_argument("--interval", type=float, default=0.5)
+    wa.add_argument("--once", action="store_true", help="print current state and exit")
+    wa.set_defaults(func=_cmd_watch)
     return p
 
 
