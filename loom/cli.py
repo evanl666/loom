@@ -78,6 +78,17 @@ def _cmd_replay(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_diff(args: argparse.Namespace) -> int:
+    """Compare two saved traces; exit 0 if identical, 1 if they diverge."""
+    from .diff import diff_logs
+
+    log_a, _ = _load_log(args.a)
+    log_b, _ = _load_log(args.b)
+    d = diff_logs(log_a, log_b)
+    print(d.summary())
+    return 0 if d.identical else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom", description="Read, replay, and rewind agent runs.")
     p.add_argument("--version", action="version", version=f"loom {__version__}")
@@ -98,6 +109,11 @@ def build_parser() -> argparse.ArgumentParser:
     rp = sub.add_parser("replay", help="replay a saved trace offline")
     rp.add_argument("path")
     rp.set_defaults(func=_cmd_replay)
+
+    df = sub.add_parser("diff", help="compare two saved traces at the effect level")
+    df.add_argument("a")
+    df.add_argument("b")
+    df.set_defaults(func=_cmd_diff)
     return p
 
 

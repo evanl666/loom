@@ -86,11 +86,15 @@ class Run:
                 f"  [{row['step']:>2}] {indent}{marker}{row['kind']:<14} {row['detail']}"
             )
 
-    def cost(self) -> dict:
-        """Aggregate token usage across all model calls."""
+    def cost(self, since: int = 0) -> dict:
+        """Aggregate token usage across model calls.
+
+        ``since`` restricts the sum to effects at seq >= since -- useful to
+        measure only what a fork spent after its divergence point.
+        """
         inp = out = 0
         for e in self.log:
-            if e.kind == "model":
+            if e.kind == "model" and e.seq >= since:
                 u = ModelResponse.from_dict(e.result).usage
                 inp += u.get("input_tokens", 0)
                 out += u.get("output_tokens", 0)
@@ -161,6 +165,39 @@ class Run:
         rec = Recorder.fork(self.log, replay_until)
         return self.agent.run(self.prompt, recorder=rec, _edit=edit, _edit_at_turn=at)
 
+    def sweep(
+        self,
+        at: int,
+        variants: "list[Callable[[Context], None] | None]",
+        labels: "list[str] | None" = None,
+    ) -> "SweepResult":
+        """Fork this run once per variant and compare the branches side by side.
+
+        Every branch replays turns 0..at-1 from the log for free; only each
+        divergent tail runs live. That makes counterfactual experiments cheap:
+        N variants of a 20-turn run forked at turn 18 pay for N x 2 turns, not
+        N x 20. Pass ``None`` as a variant for a no-edit control branch.
+        """
+        self._require_agent("sweep")
+        seqs = self.recorder.model_seqs()
+        if at < 0 or at >= len(seqs):
+            raise IndexError(f"sweep turn {at} out of range (run has {len(seqs)} turns)")
+        if labels is not None and len(labels) != len(variants):
+            raise ValueError(f"{len(labels)} labels for {len(variants)} variants")
+        runs = [self.fork(at=at, edit=v) for v in variants]
+        return SweepResult(
+            base=self,
+            runs=runs,
+            labels=list(labels) if labels else [f"v{i}" for i in range(len(variants))],
+            fork_seq=seqs[at],
+        )
+
+    def diff(self, other: "Run") -> Any:
+        """Compare this run's effect log with another's. See ``loom.diff``."""
+        from .diff import diff_logs
+
+        return diff_logs(self.log, other.log)
+
     def bisect(self, check: Callable[[str], bool]) -> int:
         """Find the first turn whose assistant text fails ``check``.
 
@@ -184,4 +221,53 @@ class Run:
         if self.agent is None:
             raise ValueError(
                 f"{op}() needs the agent; load the trace with Run.load(path, agent=<agent>)"
+            )
+
+
+class SweepResult:
+    """The branches produced by ``Run.sweep``, with comparison helpers."""
+
+    def __init__(self, base: Run, runs: list[Run], labels: list[str], fork_seq: int):
+        self.base = base
+        self.runs = runs
+        self.labels = labels
+        self.fork_seq = fork_seq
+
+    def __iter__(self):
+        return iter(zip(self.labels, self.runs))
+
+    def compare(self) -> list[dict]:
+        """One row per branch (base first): output, turns, live spend, divergence."""
+        from .diff import diff_logs
+
+        rows = [
+            {
+                "label": "base",
+                "output": self.base.output,
+                "turns": self.base.num_turns,
+                "live_tokens": 0,  # the base is already recorded; branches spend anew
+                "diverged_at": None,
+            }
+        ]
+        for label, run in zip(self.labels, self.runs):
+            rows.append(
+                {
+                    "label": label,
+                    "output": run.output,
+                    "turns": run.num_turns,
+                    # Only what this branch spent after the fork point.
+                    "live_tokens": run.cost(since=self.fork_seq)["total_tokens"],
+                    "diverged_at": diff_logs(self.base.log, run.log).first_divergence,
+                }
+            )
+        return rows
+
+    def print_compare(self) -> None:
+        for row in self.compare():
+            out = row["output"]
+            out = (out[:56] + "...") if len(out) > 56 else out
+            div = row["diverged_at"] if row["diverged_at"] is not None else "-"
+            print(
+                f"  {row['label']:<10} turns={row['turns']:<3} "
+                f"live_tokens={row['live_tokens']:<6} diverged_at={div:<4} {out}"
             )

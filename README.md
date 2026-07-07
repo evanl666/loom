@@ -77,6 +77,50 @@ branch = run.fork(at=1, edit=lambda ctx: ctx.add_user("Actually, make it Paris."
 bad_turn = run.bisect(lambda text: "error" not in text.lower())
 ```
 
+## Sweep: cheap counterfactuals
+
+`sweep` is the batch version of `fork`: test N hypotheses from the same rewind
+point in one call. Every branch replays the shared prefix **for free** — you
+only pay for each divergent tail. Ten variants of a 20-turn run forked at turn
+18 cost 10×2 turns, not 10×20.
+
+```python
+sweep = run.sweep(at=3, variants=[
+    None,                                   # control (no edit)
+    lambda ctx: ctx.items.pop(2),           # hypothesis: drop the stale item
+    lambda ctx: setattr(ctx, "budget", 2000),  # hypothesis: tighten the budget
+], labels=["control", "drop-stale", "tight-budget"])
+
+sweep.print_compare()
+#   base         turns=5  live_tokens=0     diverged_at=-  ...ERROR...
+#   control      turns=5  live_tokens=812   diverged_at=-  ...ERROR...
+#   drop-stale   turns=4  live_tokens=655   diverged_at=6  The answer is 42.   <- fixed!
+#   tight-budget turns=5  live_tokens=790   diverged_at=6  ...ERROR...
+```
+
+## Diff: "it worked yesterday"
+
+`loom diff` compares two runs **at the effect level** and tells you not just
+*where* they diverged but *why* — because every recorded step carries a hash of
+its inputs:
+
+- `kinds-differ` — control flow diverged (a different action was taken)
+- `inputs-differ` — same action, but the context drifted
+- `results-differ` — same action, same inputs, different outcome
+
+```python
+d = run.diff(other_run)
+print(d.summary())
+# identical prefix: 5 step(s)
+# first divergence:
+#   step 5 [inputs-differ]
+#     a model: calls search({"q": "order status"})
+#     b model: I don't have access to orders.
+```
+
+Record a fixture suite, re-run against a new model or prompt, diff — that's
+regression testing for agents.
+
 ## Why the Effect boundary?
 
 The kernel routes **every** model call, tool call, and side effect through one
@@ -139,6 +183,7 @@ The parent only ever sees the delegated *result*, not the child's internal steps
 loom run "What is 2 + 3?" --model claude-opus-4-8   # run an agent
 loom timeline trip.loom.json                        # inspect a saved trace
 loom replay trip.loom.json                          # replay offline
+loom diff yesterday.loom.json today.loom.json       # where + why two runs diverged
 ```
 
 ## Status
@@ -149,9 +194,11 @@ loom replay trip.loom.json                          # replay offline
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
 - ~~OpenAI-compatible provider~~ ✅ shipped
+- ~~Sweep (batch counterfactual forks)~~ ✅ shipped
+- ~~Trace diff (`loom diff`)~~ ✅ shipped
 - Streaming
 - Provenance-based context-rot warnings
-- `loom bisect` binary search over turns
+- Human-in-the-loop as an effect (pause / approve / resume)
 
 ## License
 
