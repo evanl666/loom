@@ -157,6 +157,41 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _build_shield(args: argparse.Namespace):
+    """Turn --deny/--confirm/--allow flags into a Shield (or None)."""
+    if not (args.deny or args.confirm or args.allow):
+        return None
+    from .shield import Shield
+
+    return Shield(
+        deny=args.deny or [],
+        confirm=args.confirm or [],
+        allow=args.allow or [],
+        timeout=args.confirm_timeout,
+        webhook=args.webhook,
+    )
+
+
+def _shield_notifier(port: int):
+    """Console printer for pending approvals, with the exact command to run."""
+
+    def notify(p) -> None:
+        print(
+            f"\nloom shield: CONFIRM [{p.id}] {p.tool}({json.dumps(p.input, sort_keys=True, default=str)})\n"
+            f"  approve:  loom approve {p.id} --port {port}\n"
+            f"  deny:     loom approve {p.id} --deny --port {port}",
+            file=sys.stderr,
+        )
+
+    return notify
+
+
+def _print_shield_rules(shield) -> None:
+    for action, patterns in (("deny", shield.deny), ("confirm", shield.confirm), ("allow", shield.allow)):
+        for pat in patterns:
+            print(f"  shield {action:7s} {pat}", file=sys.stderr)
+
+
 def _cmd_record(args: argparse.Namespace) -> int:
     """Black-box a real agent session: proxy up, env var set, command run."""
     import os
@@ -172,7 +207,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
         print("loom: record needs a command, e.g. loom record -- claude -p 'hi'", file=sys.stderr)
         return 2
 
-    server = ProxyServer(port=args.port, target=args.target, save_path=args.save)
+    shield = _build_shield(args)
+    server = ProxyServer(port=args.port, target=args.target, save_path=args.save, shield=shield)
+    if shield is not None:
+        shield.notify = _shield_notifier(server.port)
+        _print_shield_rules(shield)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     env = dict(os.environ)
     base = f"http://127.0.0.1:{server.port}"
@@ -203,6 +242,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
             f"\nrecorded {len(log)} step(s), {inp + out} tokens -> {args.save}",
             file=sys.stderr,
         )
+        blocked = [e for e in data.get("shield_events", []) if e.get("action") == "deny"]
+        if blocked:
+            print(f"  shield blocked {len(blocked)} tool call(s):", file=sys.stderr)
+            for e in blocked:
+                print(f"    {e.get('tool')}({json.dumps(e.get('input', {}), sort_keys=True, default=str)})", file=sys.stderr)
         print(f"  replay it:  loom replay {args.save}", file=sys.stderr)
         print(f"  inspect it: loom studio {args.save}", file=sys.stderr)
     except (OSError, json.JSONDecodeError):
@@ -350,19 +394,70 @@ def _cmd_impact(args: argparse.Namespace) -> int:
 def _cmd_proxy(args: argparse.Namespace) -> int:
     from .proxy import ProxyServer
 
+    shield = _build_shield(args)
     server = ProxyServer(
         port=args.port,
         target=args.target,
         save_path=args.save if not args.replay else None,
         replay_path=args.replay or None,
+        shield=shield if not args.replay else None,
     )
     mode = f"replaying {args.replay}" if args.replay else f"recording -> {args.save}"
     print(f"loom proxy on http://127.0.0.1:{server.port} ({mode})")
     print(f"  export ANTHROPIC_BASE_URL=http://127.0.0.1:{server.port}")
+    if shield is not None and not args.replay:
+        shield.notify = _shield_notifier(server.port)
+        _print_shield_rules(shield)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    return 0
+
+
+def _cmd_approvals(args: argparse.Namespace) -> int:
+    """List a running proxy's pending shield approvals."""
+    import urllib.error
+    import urllib.request
+
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{args.port}/loom/shield/pending", timeout=10
+        ) as r:
+            pending = json.load(r).get("pending", [])
+    except (urllib.error.URLError, OSError) as e:
+        print(f"loom: no shielded proxy on port {args.port} ({e})", file=sys.stderr)
+        return 2
+    if not pending:
+        print("no pending approvals")
+        return 0
+    for p in pending:
+        print(f"[{p['id']}] {p['tool']}({json.dumps(p.get('input', {}), sort_keys=True, default=str)})"
+              f"  rule={p.get('rule', '')!r}  waiting {p.get('age_s', 0)}s")
+    return 0
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    """Decide a pending shield approval on a running proxy."""
+    import urllib.error
+    import urllib.request
+
+    decision = "deny" if args.deny else "approve"
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{args.port}/loom/shield/decide",
+        data=json.dumps({"id": args.id, "decision": decision}).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10).close()
+    except urllib.error.HTTPError as e:
+        print(f"loom: {json.load(e).get('error', e.reason)}", file=sys.stderr)
+        return 1
+    except (urllib.error.URLError, OSError) as e:
+        print(f"loom: no shielded proxy on port {args.port} ({e})", file=sys.stderr)
+        return 2
+    print(f"{decision}d [{args.id}]")
     return 0
 
 
@@ -419,12 +514,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     im.set_defaults(func=_cmd_impact)
 
+    def shield_flags(sp) -> None:
+        sp.add_argument("--deny", action="append", default=[], metavar="PATTERN",
+                        help="block tool calls matching this glob, e.g. 'Read(*.env*)' (repeatable)")
+        sp.add_argument("--confirm", action="append", default=[], metavar="PATTERN",
+                        help="hold matching tool calls for approval (loom approve <id>)")
+        sp.add_argument("--allow", action="append", default=[], metavar="PATTERN",
+                        help="bypass confirm for matching tool calls")
+        sp.add_argument("--confirm-timeout", type=float, default=300.0,
+                        help="seconds to wait for approval before denying (default 300)")
+        sp.add_argument("--webhook", default="",
+                        help="POST pending approvals to this URL (approval inbox)")
+
     rc = sub.add_parser("record", help="black-box a real agent session: loom record -- <command>")
     rc.add_argument("command", nargs=argparse.REMAINDER, help="the agent command to run")
     rc.add_argument("--save", default="session.loom.json")
     rc.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream API (use https://api.openai.com for OpenAI agents)")
     rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
+    shield_flags(rc)
     rc.set_defaults(func=_cmd_record)
 
     he = sub.add_parser("heal", help="diagnose a failed run, try repairs, save the fix as a test")
@@ -452,7 +560,18 @@ def build_parser() -> argparse.ArgumentParser:
     px.add_argument("--target", default="https://api.anthropic.com")
     px.add_argument("--save", default="session.loom.json", help="trace written after every exchange")
     px.add_argument("--replay", default="", help="serve recorded responses from this trace instead")
+    shield_flags(px)
     px.set_defaults(func=_cmd_proxy)
+
+    av = sub.add_parser("approvals", help="list pending shield approvals on a running proxy")
+    av.add_argument("--port", type=int, default=8788)
+    av.set_defaults(func=_cmd_approvals)
+
+    ap = sub.add_parser("approve", help="approve (or --deny) a pending shield tool call")
+    ap.add_argument("id")
+    ap.add_argument("--deny", action="store_true", help="deny instead of approving")
+    ap.add_argument("--port", type=int, default=8788)
+    ap.set_defaults(func=_cmd_approve)
 
     wa = sub.add_parser("watch", help="follow a run's journal live")
     wa.add_argument("path")

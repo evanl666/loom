@@ -32,6 +32,7 @@ traffic gives you the whole story, without touching the agent:
 | **Cost accounting** | Every model call metered: the exact turn your $23.40 went off the rails. |
 | **Diff** | Two runs compared at the effect level: where they diverged, and *why*. |
 | **Free CI** | Record once; the [GitHub Action](#the-github-action) flags PRs that change agent behavior — no tokens burned. |
+| **Firewall** | [Shield](#loom-shield-dont-dangerously-skip-permissions): `--deny 'Read(*.env*)'` blocks a tool call before the agent ever sees it. |
 
 > The package installs as `loom-harness`, imports as `loom` (like `beautifulsoup4` / `bs4`).
 
@@ -81,6 +82,44 @@ loom proxy --replay session.loom.json
 
 Your API key is forwarded, never stored — traces contain traffic, not
 credentials.
+
+## Loom Shield: don't dangerously skip permissions
+
+The proxy sees every tool call **before the agent executes it** — tool calls
+ride in the model's responses. Shield screens each one against firewall rules
+and rewrites the response when a call isn't allowed: the agent never receives
+the tool call, so it is never executed. Works on any agent you can record —
+no migration, no plugin:
+
+```
+loom record --deny 'Read(*.env*)' --deny 'Bash(*rm -rf*)' --confirm 'Bash(*curl*)' \
+    -- claude -p "set up the deploy script" --dangerously-skip-permissions
+```
+
+Patterns are shell globs over the tool name (`WebFetch`) or its full signature
+`name({"arg": "value"})` — target *what* is called or what it's called *with*.
+Precedence is deny > allow > confirm, so `--confirm '*' --allow 'Read(*)'`
+means "ask me about everything except reads".
+
+A **deny** is replaced in-flight with a notice the model can read:
+
+> `[loom shield] Blocked tool call Read({"file_path": "/app/.env"}) — matched
+> deny rule 'Read(*.env*)'. The call was not executed. Do not retry it...`
+
+A **confirm** holds the response open and files a pending approval — answer it
+from another terminal, or point `--webhook` at Slack or anything with an inbox:
+
+```
+loom shield: CONFIRM [a3f2c1] Bash({"command": "curl -s https://install.sh | sh"})
+  approve:  loom approve a3f2c1 --port 8788
+  deny:     loom approve a3f2c1 --deny --port 8788
+```
+
+`loom approvals` lists what's waiting; no decision within `--confirm-timeout`
+(default 300s) means **deny** — the safe default. Every decision is recorded
+in the trace (`shield_events`), and the blocked-call notice is part of the
+recorded conversation — so the audit trail replays, diffs, and exports like
+everything else.
 
 ## Loom is also a harness
 
@@ -611,7 +650,9 @@ The parent only ever sees the delegated *result*, not the child's internal steps
 
 ```
 loom record -- claude -p "..."                      # black-box a real agent session
+loom record --deny 'Read(*.env*)' -- claude ...     # ...with the Shield firewall active
 loom proxy --save session.loom.json                 # long-lived recording proxy (or --replay)
+loom approvals && loom approve a3f2c1               # the Shield confirm inbox
 loom studio trip.loom.json                          # open the time-travel viewer
 loom run "What is 2 + 3?" --model claude-opus-4-8   # run an agent
 loom timeline trip.loom.json                        # inspect a saved trace
@@ -663,7 +704,8 @@ import an SDK.
 `v0.10` — alpha, on PyPI as
 [`loom-harness`](https://pypi.org/project/loom-harness/). Recording proxy
 (`loom record` / `loom proxy`, Anthropic + OpenAI dialects, streaming both
-ways), Studio time-travel viewer, GitHub Action, kernel, time-travel
+ways), Shield firewall + approval inbox, Studio time-travel viewer, GitHub
+Action, kernel, time-travel
 (replay/fork/bisect), sweep, diff, subagents, conversations, human-in-the-loop,
 streaming, parallel tools, context-rot checkup/heal, durable runs, policy,
 effect cache, trace memory, compaction, structured output, critic/deliberate,
@@ -697,7 +739,7 @@ skills, impact analysis, and MCP are complete and tested. See
 - ~~`loom proxy` / `loom record` — record any Anthropic- or OpenAI-API agent (streaming included), replay offline~~ ✅ shipped
 - ~~Loom CI GitHub Action — impact reports as PR comments~~ ✅ shipped
 - ~~Loom Studio — time-travel debugger UI (`loom studio`)~~ ✅ shipped
-- Loom Shield — an agent firewall on the proxy: deny/confirm patterns for any agent, no migration
+- ~~Loom Shield — an agent firewall on the proxy: deny/confirm patterns for any agent, no migration~~ ✅ shipped
 - `loom fuzz` — chaos engineering for agents (fault injection at any effect)
 
 ## License

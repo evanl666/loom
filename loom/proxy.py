@@ -56,6 +56,7 @@ class WireRecorder:
     def __init__(self):
         self.log: list[EffectEntry] = []
         self.wire: list[dict] = []  # raw responses, for byte-identical replay
+        self.shield_events: list[dict] = []  # firewall decisions, in order
         self.episodes: list[str] = []
         self.model = ""
         self.system = ""
@@ -190,6 +191,7 @@ class WireRecorder:
             "stop_reason": "",
             "log": [e.to_dict() for e in self.log],
             "wire": self.wire,
+            "shield_events": self.shield_events,
         }
 
     def save(self, path: str) -> None:
@@ -374,9 +376,11 @@ class ProxyServer(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, port: int = 8788, target: str = DEFAULT_TARGET,
-                 save_path: "str | None" = None, replay_path: "str | None" = None):
+                 save_path: "str | None" = None, replay_path: "str | None" = None,
+                 shield=None):
         self.target = target.rstrip("/")
         self.save_path = save_path
+        self.shield = shield  # loom.shield.Shield, screens tool calls in responses
         self.recorder = WireRecorder()
         self.lock = threading.Lock()
         self.replay_wire: "list[dict] | None" = None
@@ -430,6 +434,16 @@ class _Handler(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(length) or b"{}")
         wants_stream = bool(request.get("stream"))
 
+        if self.path == "/loom/shield/decide":
+            shield = self.server.shield
+            if shield is None:
+                self._send_json(404, {"error": "no shield active on this proxy"})
+            elif shield.decide_pending(str(request.get("id", "")), request.get("decision") == "approve"):
+                self._send_json(200, {"ok": True})
+            else:
+                self._send_json(404, {"error": f"no pending approval {request.get('id')!r}"})
+            return
+
         if self.server.replay_wire is not None:
             with self.server.lock:
                 if self.server.replay_index >= len(self.server.replay_wire):
@@ -462,9 +476,10 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(e.code, {"error": body.decode("utf-8", "replace")})
             return
 
+        shield = self.server.shield
         with upstream:
             streamed = upstream.headers.get("content-type", "").startswith("text/event-stream")
-            if streamed:
+            if streamed and shield is None:
                 # Relay the stream as it arrives; reconstruct the message after.
                 self.send_response(200)
                 self.send_header("content-type", "text/event-stream")
@@ -483,8 +498,24 @@ class _Handler(BaseHTTPRequestHandler):
                     response = reconstruct_openai_sse(raw)
                 else:
                     response = reconstruct_sse(raw)
+            elif streamed:
+                # A shield must see the whole response BEFORE the client does,
+                # so buffer the upstream stream and synthesize one afterwards.
+                raw = upstream.read().decode("utf-8", "replace")
+                if "chat/completions" in self.path:
+                    response = reconstruct_openai_sse(raw)
+                else:
+                    response = reconstruct_sse(raw)
             else:
                 response = json.loads(upstream.read())
+
+        if shield is not None:
+            # May block awaiting a human decision on a confirm rule; the
+            # client sees (and the trace records) only the screened response.
+            response, events = shield.screen(response)
+            if events:
+                with self.server.lock:
+                    self.server.recorder.shield_events.extend(events)
 
         # Record BEFORE answering: when the client sees the reply, the trace
         # is already on disk (otherwise a fast client can read a torn file).
@@ -492,11 +523,21 @@ class _Handler(BaseHTTPRequestHandler):
             self.server.recorder.record(request, response)
             if self.server.save_path:
                 self.server.recorder.save(self.server.save_path)
-        if not streamed:
+        if streamed and shield is not None:
+            synth = synthesize_openai_sse if "choices" in response else synthesize_sse
+            self._send_sse(synth(response))
+        elif not streamed:
             self._send_json(200, response)
 
     def do_GET(self) -> None:
         """Pass non-messages endpoints through untouched (models list, health...)."""
+        if self.path == "/loom/shield/pending":
+            shield = self.server.shield
+            if shield is None:
+                self._send_json(404, {"error": "no shield active on this proxy"})
+            else:
+                self._send_json(200, {"pending": shield.pending_list()})
+            return
         if self.server.replay_wire is not None:
             self._send_json(404, {"error": "replay mode serves recorded POSTs only"})
             return
