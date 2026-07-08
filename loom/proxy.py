@@ -33,6 +33,8 @@ _FORWARD_HEADERS = {
     "authorization",
     "anthropic-version",
     "anthropic-beta",
+    "openai-organization",
+    "openai-project",
     "accept",
 }
 
@@ -63,10 +65,14 @@ class WireRecorder:
 
     def record(self, request: dict, response: dict) -> None:
         self.model = request.get("model", self.model)
-        system = _flatten(request.get("system", ""))
-        self.system = system or self.system
-        self._absorb_request(request)
-        self._absorb_response(response)
+        if "choices" in response:  # OpenAI chat-completions dialect
+            self._absorb_request_openai(request)
+            self._absorb_response_openai(response)
+        else:  # Anthropic messages dialect
+            system = _flatten(request.get("system", ""))
+            self.system = system or self.system
+            self._absorb_request(request)
+            self._absorb_response(response)
         self.wire.append(response)
 
     def _append(self, kind: str, payload, result) -> None:
@@ -117,6 +123,54 @@ class WireRecorder:
             },
         }
         self._append("model", {"n": len(self.wire)}, result)
+        if text:
+            self.output = text
+
+    def _absorb_request_openai(self, request: dict) -> None:
+        messages = request.get("messages", [])
+        for m in messages[self._seen_messages :]:
+            role = m.get("role")
+            if role == "system":
+                self.system = _flatten(m.get("content", "")) or self.system
+            elif role == "tool":
+                name = self._tool_names.get(m.get("tool_call_id", ""), "tool")
+                self._append(
+                    f"tool:{name}",
+                    {"id": m.get("tool_call_id", "")},
+                    _flatten(m.get("content", "")),
+                )
+            elif role == "user":
+                text = _flatten(m.get("content", ""))
+                if text:
+                    self.episodes.append(text)
+        self._seen_messages = len(messages)
+
+    def _absorb_response_openai(self, response: dict) -> None:
+        message = (response.get("choices") or [{}])[0].get("message", {}) or {}
+        text = _flatten(message.get("content") or "")
+        tool_calls = []
+        for tc in message.get("tool_calls") or []:
+            fn = tc.get("function", {}) or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            self._tool_names[tc.get("id", "")] = fn.get("name", "tool")
+            tool_calls.append({"id": tc.get("id", ""), "name": fn.get("name", ""), "input": args})
+        usage = response.get("usage", {}) or {}
+        self._append(
+            "model",
+            {"n": len(self.wire)},
+            {
+                "text": text,
+                "tool_calls": tool_calls,
+                "stop_reason": "tool_use" if tool_calls else "end_turn",
+                "usage": {
+                    "input_tokens": usage.get("prompt_tokens", 0),
+                    "output_tokens": usage.get("completion_tokens", 0),
+                },
+            },
+        )
         if text:
             self.output = text
 
@@ -246,6 +300,74 @@ def synthesize_sse(message: dict) -> bytes:
     return b"".join(out)
 
 
+def reconstruct_openai_sse(raw: str) -> dict:
+    """Rebuild the final chat completion from an OpenAI SSE transcript."""
+    text = ""
+    tool_calls: dict[int, dict] = {}
+    finish_reason = None
+    usage: dict = {}
+    model = ""
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        if payload == "[DONE]":
+            break
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        model = event.get("model") or model
+        if event.get("usage"):
+            usage = event["usage"]
+        for choice in event.get("choices") or []:
+            finish_reason = choice.get("finish_reason") or finish_reason
+            delta = choice.get("delta", {}) or {}
+            text += delta.get("content") or ""
+            for tc in delta.get("tool_calls") or []:
+                slot = tool_calls.setdefault(
+                    tc.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                )
+                slot["id"] = tc.get("id") or slot["id"]
+                fn = tc.get("function", {}) or {}
+                slot["function"]["name"] = fn.get("name") or slot["function"]["name"]
+                slot["function"]["arguments"] += fn.get("arguments") or ""
+    message: dict = {"role": "assistant", "content": text or None}
+    if tool_calls:
+        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    return {
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason or "stop"}],
+        "usage": usage,
+    }
+
+
+def synthesize_openai_sse(response: dict) -> bytes:
+    """Render a recorded chat completion as an OpenAI SSE stream, for replay."""
+    choice = (response.get("choices") or [{}])[0]
+    message = choice.get("message", {}) or {}
+    base = {"object": "chat.completion.chunk", "model": response.get("model", "")}
+
+    def chunk(delta: dict, finish=None) -> bytes:
+        body = {**base, "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
+        return f"data: {json.dumps(body)}\n\n".encode()
+
+    out = [chunk({"role": "assistant"})]
+    if message.get("content"):
+        out.append(chunk({"content": message["content"]}))
+    for i, tc in enumerate(message.get("tool_calls") or []):
+        out.append(chunk({"tool_calls": [{"index": i, "id": tc.get("id"), "type": "function",
+                                          "function": tc.get("function", {})}]}))
+    out.append(chunk({}, finish=choice.get("finish_reason", "stop")))
+    if response.get("usage"):
+        out.append(
+            f"data: {json.dumps({**base, 'choices': [], 'usage': response['usage']})}\n\n".encode()
+        )
+    out.append(b"data: [DONE]\n\n")
+    return b"".join(out)
+
+
 class ProxyServer(ThreadingHTTPServer):
     """The recording (or replaying) proxy. Bind port 0 to pick a free port."""
 
@@ -316,7 +438,8 @@ class _Handler(BaseHTTPRequestHandler):
                 response = self.server.replay_wire[self.server.replay_index]
                 self.server.replay_index += 1
             if wants_stream:
-                self._send_sse(synthesize_sse(response))
+                synth = synthesize_openai_sse if "choices" in response else synthesize_sse
+                self._send_sse(synth(response))
             else:
                 self._send_json(200, response)
             return
@@ -354,7 +477,11 @@ class _Handler(BaseHTTPRequestHandler):
                     chunks.append(chunk)
                     self.wfile.write(chunk)
                     self.wfile.flush()
-                response = reconstruct_sse(b"".join(chunks).decode("utf-8", "replace"))
+                raw = b"".join(chunks).decode("utf-8", "replace")
+                if "chat/completions" in self.path:
+                    response = reconstruct_openai_sse(raw)
+                else:
+                    response = reconstruct_sse(raw)
             else:
                 data = upstream.read()
                 response = json.loads(data)

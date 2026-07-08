@@ -240,6 +240,135 @@ def test_replay_synthesizes_sse_for_streaming_clients(recorded_trace):
     proxy.shutdown()
 
 
+OPENAI_TOOL_RESPONSE = {
+    "object": "chat.completion",
+    "model": "gpt-4o",
+    "choices": [
+        {
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "get_weather", "arguments": '{"city": "Berlin"}'},
+                    }
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+    ],
+    "usage": {"prompt_tokens": 11, "completion_tokens": 6},
+}
+OPENAI_FINAL = {
+    "object": "chat.completion",
+    "model": "gpt-4o",
+    "choices": [
+        {
+            "index": 0,
+            "message": {"role": "assistant", "content": "Rainy in Berlin."},
+            "finish_reason": "stop",
+        }
+    ],
+    "usage": {"prompt_tokens": 25, "completion_tokens": 5},
+}
+
+
+def test_openai_dialect_records_a_loom_trace(tmp_path):
+    upstream = _serve(_FakeUpstream([OPENAI_TOOL_RESPONSE, OPENAI_FINAL]))
+    path = str(tmp_path / "openai.loom.json")
+    proxy = _serve(
+        ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}", save_path=path)
+    )
+    _post(
+        proxy.port,
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Weather in Berlin?"},
+            ],
+        },
+    )
+    _post(
+        proxy.port,
+        {
+            "model": "gpt-4o",
+            "messages": [
+                {"role": "system", "content": "You are helpful."},
+                {"role": "user", "content": "Weather in Berlin?"},
+                {"role": "assistant", "tool_calls": OPENAI_TOOL_RESPONSE["choices"][0]["message"]["tool_calls"]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "rain, 12C"},
+            ],
+        },
+    )
+    with open(path) as f:
+        data = json.load(f)
+    assert data["system"] == "You are helpful."
+    assert data["episodes"] == ["Weather in Berlin?"]
+    assert [e["kind"] for e in data["log"]] == ["model", "tool:get_weather", "model"]
+    assert data["log"][0]["result"]["tool_calls"][0]["input"] == {"city": "Berlin"}
+    assert data["log"][0]["result"]["usage"] == {"input_tokens": 11, "output_tokens": 6}
+    assert data["output"] == "Rainy in Berlin."
+    assert verify_trace(path) == []
+    proxy.shutdown()
+    upstream.shutdown()
+
+
+def test_openai_sse_reconstruction_and_synthesis_roundtrip():
+    from loom.proxy import reconstruct_openai_sse, synthesize_openai_sse
+
+    raw = "\n".join(
+        [
+            'data: {"object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]}',
+            'data: {"object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_9", "function": {"name": "add", "arguments": "{\\"a\\""}}]}, "finish_reason": null}]}',
+            'data: {"object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": ": 1}"}}]}, "finish_reason": null}]}',
+            'data: {"object": "chat.completion.chunk", "model": "gpt-4o", "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}',
+            "data: [DONE]",
+        ]
+    )
+    msg = reconstruct_openai_sse(raw)
+    tc = msg["choices"][0]["message"]["tool_calls"][0]
+    assert tc["function"] == {"name": "add", "arguments": '{"a": 1}'}
+    assert msg["choices"][0]["finish_reason"] == "tool_calls"
+
+    # And a recorded completion synthesizes back into a parseable stream.
+    stream = synthesize_openai_sse(OPENAI_FINAL).decode()
+    assert "Rainy in Berlin." in stream and stream.rstrip().endswith("data: [DONE]")
+    assert reconstruct_openai_sse(stream)["choices"][0]["message"]["content"] == "Rainy in Berlin."
+
+
+def test_real_openai_sdk_through_the_proxy(tmp_path):
+    openai = pytest.importorskip("openai")
+
+    upstream = _serve(_FakeUpstream([OPENAI_FINAL]))
+    path = str(tmp_path / "sdk.loom.json")
+    proxy = _serve(
+        ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}", save_path=path)
+    )
+    client = openai.OpenAI(base_url=f"http://127.0.0.1:{proxy.port}/v1", api_key="sk-fake")
+    reply = client.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": "Weather?"}]
+    )
+    assert reply.choices[0].message.content == "Rainy in Berlin."
+    with open(path) as f:
+        assert json.load(f)["output"] == "Rainy in Berlin."
+
+    # Now replay through the SDK, streaming, with the fake upstream GONE.
+    upstream.shutdown()
+    replayer = _serve(ProxyServer(port=0, replay_path=path))
+    client2 = openai.OpenAI(base_url=f"http://127.0.0.1:{replayer.port}/v1", api_key="sk-fake")
+    stream = client2.chat.completions.create(
+        model="gpt-4o", messages=[{"role": "user", "content": "Weather?"}], stream=True
+    )
+    text = "".join(c.choices[0].delta.content or "" for c in stream if c.choices)
+    assert text == "Rainy in Berlin."
+    proxy.shutdown()
+    replayer.shutdown()
+
+
 def test_sse_reconstruction():
     raw = "\n".join(
         [

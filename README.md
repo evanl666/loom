@@ -58,14 +58,23 @@ run.print_timeline()       # step-by-step trace
 ## Record ANY agent — no migration
 
 You don't have to build on Loom to use Loom. `loom proxy` records any agent
-that speaks the Anthropic API — Claude Code, LangGraph, a raw SDK script —
-through one environment variable:
+that speaks the Anthropic **or OpenAI** API — Claude Code, LangGraph, CrewAI,
+a raw SDK script — through one environment variable:
 
 ```
 loom proxy --save session.loom.json
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8788
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8788      # Claude Code & friends
+# or, for OpenAI-API agents:
+loom proxy --save session.loom.json --target https://api.openai.com
+export OPENAI_BASE_URL=http://127.0.0.1:8788/v1
 # ...run your agent exactly as before
 ```
+
+Verified end-to-end: a real Claude Code session recorded through the proxy
+(its internal calls included, every token accounted), then **replayed offline
+with a fake API key**. Streaming works both ways — SSE is relayed live while
+the trace gets the complete message, and replays synthesize a well-formed
+stream for streaming clients.
 
 Everything the agent does is visible in its API traffic (tool calls ride in
 the responses, tool results in the next request), so the proxy reconstructs a
