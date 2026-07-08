@@ -1,0 +1,99 @@
+name: 'Loom Agent CI'
+description: >-
+  Snapshot testing for AI agents: replay recorded traces against the changed
+  configuration and post the impact report on the PR. Dry mode is free (no
+  API calls) -- it detects exactly which recorded runs your change touches.
+author: 'evanl666'
+branding:
+  icon: 'rewind'
+  color: 'purple'
+
+inputs:
+  traces:
+    description: 'Trace files or directories of *.loom.json (space-separated)'
+    required: true
+  agent:
+    description: 'Where to find the agent: module:attr (an Agent instance or a zero-arg factory)'
+    required: true
+  live:
+    description: 'Re-run affected conversations to show HOW outputs change (costs API calls)'
+    default: 'false'
+  comment:
+    description: 'Post (and keep updating) the impact report as a PR comment'
+    default: 'true'
+  install:
+    description: 'pip install loom-harness first (set false if an earlier step already installed it)'
+    default: 'true'
+  fail-on-impact:
+    description: 'Fail the check when any recorded run is affected'
+    default: 'true'
+
+outputs:
+  affected:
+    description: '"true" when any recorded run is affected by the change'
+    value: ${{ steps.impact.outputs.affected }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install loom-harness
+      if: inputs.install == 'true'
+      shell: bash
+      run: pip install --quiet loom-harness
+
+    - name: Replay recorded traces against the new configuration
+      id: impact
+      shell: bash
+      env:
+        TRACES: ${{ inputs.traces }}
+        AGENT: ${{ inputs.agent }}
+        LIVE: ${{ inputs.live }}
+      run: |
+        set +e
+        args=(impact)
+        for t in $TRACES; do args+=("$t"); done
+        args+=(--agent "$AGENT")
+        if [ "$LIVE" = "true" ]; then args+=(--live); fi
+        loom "${args[@]}" > loom-impact-report.txt 2>&1
+        code=$?
+        cat loom-impact-report.txt
+        if [ $code -eq 1 ]; then echo "affected=true" >> "$GITHUB_OUTPUT"; else echo "affected=false" >> "$GITHUB_OUTPUT"; fi
+        if [ $code -gt 1 ]; then exit $code; fi
+
+    - name: Post the report on the PR
+      if: inputs.comment == 'true' && github.event_name == 'pull_request'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        AFFECTED: ${{ steps.impact.outputs.affected }}
+        REPO: ${{ github.repository }}
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        marker='<!-- loom-impact-report -->'
+        if [ "$AFFECTED" = "true" ]; then
+          head='### ❌ Loom: this change affects recorded agent runs'
+        else
+          head='### ✅ Loom: no recorded agent runs affected'
+        fi
+        {
+          echo "$marker"
+          echo "$head"
+          echo
+          echo '```'
+          cat loom-impact-report.txt
+          echo '```'
+        } > loom-comment.md
+        existing=$(gh api "repos/$REPO/issues/$PR/comments" \
+          --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id" 2>/dev/null || true)
+        if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+          gh api -X PATCH "repos/$REPO/issues/comments/$existing" -F body=@loom-comment.md > /dev/null
+        else
+          gh pr comment "$PR" --repo "$REPO" --body-file loom-comment.md
+        fi
+
+    - name: Fail when recorded runs are affected
+      if: inputs.fail-on-impact == 'true' && steps.impact.outputs.affected == 'true'
+      shell: bash
+      run: |
+        echo "Recorded agent runs are affected by this change (see report above)."
+        exit 1

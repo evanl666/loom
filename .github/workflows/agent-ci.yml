@@ -1,0 +1,28 @@
+# Dogfood: run the Loom Agent CI action (./action.yml) against the demo
+# traces on every PR. Change examples/ci/agent.py's system prompt in a PR and
+# watch the check fail with an impact report.
+name: Agent CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  impact:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install loom from this checkout
+        run: pip install -e .
+      - uses: ./
+        with:
+          traces: examples/ci/traces
+          agent: examples.ci.agent:build
+          install: 'false'

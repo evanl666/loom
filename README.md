@@ -410,6 +410,37 @@ reports the first divergence. Add `--live` to re-run affected conversations
 and see **how** the outputs change, not just where. Exit code 1 when anything
 is affected — drop it straight into CI. Python API: `loom.impact.assess`.
 
+### The GitHub Action
+
+Lock recorded behavior into every PR — the impact report lands as a comment
+and the check fails when a prompt/config change touches recorded runs:
+
+```yaml
+jobs:
+  agent-ci:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - uses: evanl666/loom@main
+        with:
+          traces: tests/agent_traces
+          agent: myapp.agents:build_agent
+```
+
+> ### ❌ Loom: this change affects recorded agent runs
+> ```
+> inputs-differ    tests/agent_traces/refund.loom.json (first at seq 0)
+>     3 effect(s) see different inputs, starting with 'model'
+> 1 of 2 recorded run(s) affected
+> ```
+
+Dry mode costs nothing (no API calls). Add `live: 'true'` to also show *how*
+outputs change. This repo dogfoods the action on its own demo traces
+(`.github/workflows/agent-ci.yml`).
+
 ## Agent CI: `loom test` and `loom watch`
 
 ```
