@@ -157,6 +157,17 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_studio(args: argparse.Namespace) -> int:
+    """Export a trace to the Studio viewer and open it in the default browser."""
+    import webbrowser
+
+    code = _cmd_export(args)
+    if code == 0:
+        out = args.output or (args.path.rsplit(".json", 1)[0] + ".html")
+        webbrowser.open(f"file://{__import__('os').path.abspath(out)}")
+    return code
+
+
 def _cmd_diff(args: argparse.Namespace) -> int:
     """Compare two saved traces; exit 0 if identical, 1 if they diverge."""
     from .diff import diff_logs
@@ -284,6 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-run affected conversations to show HOW outputs change (costs API calls)",
     )
     im.set_defaults(func=_cmd_impact)
+
+    st = sub.add_parser("studio", help="export a trace to the Studio viewer and open it")
+    st.add_argument("path")
+    st.add_argument("-o", "--output", default="", help="output path (default: <trace>.html)")
+    st.set_defaults(func=_cmd_studio)
 
     px = sub.add_parser("proxy", help="record any Anthropic-API agent through a local proxy")
     px.add_argument("--port", type=int, default=8788)
