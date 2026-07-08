@@ -157,6 +157,139 @@ def _cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_record(args: argparse.Namespace) -> int:
+    """Black-box a real agent session: proxy up, env var set, command run."""
+    import os
+    import subprocess
+    import threading
+
+    from .proxy import ProxyServer
+
+    command = list(args.command)
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("loom: record needs a command, e.g. loom record -- claude -p 'hi'", file=sys.stderr)
+        return 2
+
+    server = ProxyServer(port=args.port, target=args.target, save_path=args.save)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    env = dict(os.environ)
+    base = f"http://127.0.0.1:{server.port}"
+    if "openai" in args.target:
+        env["OPENAI_BASE_URL"] = base + "/v1"
+    else:
+        env["ANTHROPIC_BASE_URL"] = base
+    print(f"loom record: proxying {args.target} on {base}", file=sys.stderr)
+
+    code = subprocess.call(command, env=env)
+    server.shutdown()
+
+    try:
+        with open(args.save) as f:
+            data = json.load(f)
+        log = data.get("log", [])
+        inp = sum(
+            e["result"].get("usage", {}).get("input_tokens", 0)
+            for e in log
+            if e.get("kind") == "model"
+        )
+        out = sum(
+            e["result"].get("usage", {}).get("output_tokens", 0)
+            for e in log
+            if e.get("kind") == "model"
+        )
+        print(
+            f"\nrecorded {len(log)} step(s), {inp + out} tokens -> {args.save}",
+            file=sys.stderr,
+        )
+        print(f"  replay it:  loom replay {args.save}", file=sys.stderr)
+        print(f"  inspect it: loom studio {args.save}", file=sys.stderr)
+    except (OSError, json.JSONDecodeError):
+        print("\nno traffic recorded (did the agent talk to the API?)", file=sys.stderr)
+    return code
+
+
+def _load_agent(spec: str) -> "tuple[Any, str] | tuple[None, str]":
+    """Resolve module:attr to an Agent (or factory). Returns (agent, error)."""
+    import importlib
+    import os
+
+    sys.path.insert(0, os.getcwd())
+    module_name, _, attr = spec.partition(":")
+    if not attr:
+        return None, "--agent must look like module:attr"
+    try:
+        obj = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as e:
+        return None, f"could not load agent {spec!r}: {e}"
+    return (obj() if callable(obj) and not hasattr(obj, "run") else obj), ""
+
+
+def _cmd_heal(args: argparse.Namespace) -> int:
+    """Diagnose a failed run, try repairs, optionally save the fix as a test."""
+    from .trace import Run
+
+    if not args.forbid and not args.require:
+        print("loom: heal needs --forbid and/or --require to know what 'fixed' means", file=sys.stderr)
+        return 2
+    agent, err = _load_agent(args.agent)
+    if agent is None:
+        print(f"loom: {err}", file=sys.stderr)
+        return 2
+
+    run = Run.load(args.path, agent=agent)
+    report = run.checkup()
+    print(report.summary())
+
+    def check(text: str) -> bool:
+        ok = True
+        if args.forbid:
+            ok = ok and args.forbid not in text
+        if args.require:
+            ok = ok and args.require in text
+        return ok
+
+    if check(run.output):
+        print("\nrun already passes the check; nothing to heal")
+        return 0
+    healed = run.heal(check, regression_dir=args.save_regression or None)
+    if healed is None:
+        print("\nno repair fixed the run")
+        return 1
+    print(f"\n✅ healed by: {healed.healed_by}")
+    print(f"   output now: {healed.output[:100]}")
+    if healed.regression_path:
+        print(f"   saved regression: {healed.regression_path}")
+    return 0
+
+
+def _cmd_skills(args: argparse.Namespace) -> int:
+    """Mine proven tool sequences from a trace corpus into a skill library."""
+    from .skills import mine, save
+    from .trace import Run
+
+    paths = _expand_trace_paths(args.paths)
+    if not paths:
+        print("no traces found", file=sys.stderr)
+        return 2
+    runs = [Run.load(p) for p in paths]
+    skills = mine(runs, min_support=args.min_support)
+    if not skills:
+        print(f"no sequences seen in >= {args.min_support} successful runs")
+        return 1
+    for s in skills:
+        print(f"skill: {s.name}   (support: {s.support} runs)")
+        for i, step in enumerate(s.steps, 1):
+            print(f"  {i}. {step['tool']}({json.dumps(step['args'])})")
+        if s.params:
+            print(f"  parameters: {', '.join(s.params)}")
+    if args.save:
+        save(skills, args.save)
+        print(f"\nsaved {len(skills)} skill(s) -> {args.save}")
+    return 0
+
+
 def _cmd_studio(args: argparse.Namespace) -> int:
     """Export a trace to the Studio viewer and open it in the default browser."""
     import webbrowser
@@ -194,22 +327,12 @@ def _expand_trace_paths(targets: list[str]) -> list[str]:
 
 def _cmd_impact(args: argparse.Namespace) -> int:
     """Replay a trace corpus against a changed agent config; exit 1 if any run is affected."""
-    import importlib
-    import os
-
     from .impact import assess, report
 
-    sys.path.insert(0, os.getcwd())
-    module_name, _, attr = args.agent.partition(":")
-    if not attr:
-        print("loom: --agent must look like module:attr", file=sys.stderr)
+    agent, err = _load_agent(args.agent)
+    if agent is None:
+        print(f"loom: {err}", file=sys.stderr)
         return 2
-    try:
-        obj = getattr(importlib.import_module(module_name), attr)
-    except (ImportError, AttributeError) as e:
-        print(f"loom: could not load agent {args.agent!r}: {e}", file=sys.stderr)
-        return 2
-    agent = obj() if callable(obj) and not hasattr(obj, "run") else obj
 
     paths = _expand_trace_paths(args.paths)
     if not paths:
@@ -295,6 +418,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-run affected conversations to show HOW outputs change (costs API calls)",
     )
     im.set_defaults(func=_cmd_impact)
+
+    rc = sub.add_parser("record", help="black-box a real agent session: loom record -- <command>")
+    rc.add_argument("command", nargs=argparse.REMAINDER, help="the agent command to run")
+    rc.add_argument("--save", default="session.loom.json")
+    rc.add_argument("--target", default="https://api.anthropic.com",
+                    help="upstream API (use https://api.openai.com for OpenAI agents)")
+    rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
+    rc.set_defaults(func=_cmd_record)
+
+    he = sub.add_parser("heal", help="diagnose a failed run, try repairs, save the fix as a test")
+    he.add_argument("path")
+    he.add_argument("--agent", required=True, help="module:attr (Agent or zero-arg factory)")
+    he.add_argument("--forbid", default="", help="healed when the output no longer contains this")
+    he.add_argument("--require", default="", help="healed when the output contains this")
+    he.add_argument("--save-regression", default="", dest="save_regression",
+                    help="directory to save the healed run as a golden trace")
+    he.set_defaults(func=_cmd_heal)
+
+    sk = sub.add_parser("skills", help="mine proven tool sequences from traces into skills")
+    sk.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
+    sk.add_argument("--min-support", type=int, default=2, dest="min_support")
+    sk.add_argument("--save", default="", help="write the skill library to this JSON file")
+    sk.set_defaults(func=_cmd_skills)
 
     st = sub.add_parser("studio", help="export a trace to the Studio viewer and open it")
     st.add_argument("path")
