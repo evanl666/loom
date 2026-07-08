@@ -463,7 +463,8 @@ class _Handler(BaseHTTPRequestHandler):
             return
 
         with upstream:
-            if upstream.headers.get("content-type", "").startswith("text/event-stream"):
+            streamed = upstream.headers.get("content-type", "").startswith("text/event-stream")
+            if streamed:
                 # Relay the stream as it arrives; reconstruct the message after.
                 self.send_response(200)
                 self.send_header("content-type", "text/event-stream")
@@ -483,14 +484,16 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     response = reconstruct_sse(raw)
             else:
-                data = upstream.read()
-                response = json.loads(data)
-                self._send_json(200, response)
+                response = json.loads(upstream.read())
 
+        # Record BEFORE answering: when the client sees the reply, the trace
+        # is already on disk (otherwise a fast client can read a torn file).
         with self.server.lock:
             self.server.recorder.record(request, response)
             if self.server.save_path:
                 self.server.recorder.save(self.server.save_path)
+        if not streamed:
+            self._send_json(200, response)
 
     def do_GET(self) -> None:
         """Pass non-messages endpoints through untouched (models list, health...)."""
