@@ -506,6 +506,15 @@ jobs:
 >     3 effect(s) see different inputs, starting with 'model'
 > 1 of 2 recorded run(s) affected
 > ```
+>
+> 💸 this change makes your agent 12.0% more expensive in input tokens
+> (~12,380 -> ~13,860 across 2 recorded run(s))
+
+The cost line is a real regression check, still with **zero API calls**: the
+action sizes every recorded conversation's model inputs under the PR branch
+*and* under the base branch (same ~4 chars/token estimator on both sides, so
+the delta is apples-to-apples) and reports the difference. Prompt bloat shows
+up in review, priced, before it ships.
 
 Dry mode costs nothing (no API calls). Add `live: 'true'` to also show *how*
 outputs change. This repo dogfoods the action on its own demo traces

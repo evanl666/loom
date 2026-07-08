@@ -371,7 +371,7 @@ def _expand_trace_paths(targets: list[str]) -> list[str]:
 
 def _cmd_impact(args: argparse.Namespace) -> int:
     """Replay a trace corpus against a changed agent config; exit 1 if any run is affected."""
-    from .impact import assess, report
+    from .impact import assess, report, to_json
 
     agent, err = _load_agent(args.agent)
     if agent is None:
@@ -387,6 +387,9 @@ def _cmd_impact(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError) as e:
         print(f"loom: could not read traces: {e}", file=sys.stderr)
         return 2
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump(to_json(impacts), f, indent=2)
     print(report(impacts))
     return 1 if any(i.changed for i in impacts) else 0
 
@@ -506,6 +509,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--agent",
         required=True,
         help="where to find the (re)configured agent: module:attr, an Agent or a zero-arg factory",
+    )
+    im.add_argument(
+        "--json",
+        default="",
+        metavar="FILE",
+        help="also write a machine-readable report (used for cost comparison across branches)",
     )
     im.add_argument(
         "--live",

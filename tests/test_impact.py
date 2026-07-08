@@ -1,7 +1,9 @@
 """Impact analysis: replay the corpus against a changed config, free."""
 
+import json
+
 from loom import Agent, tool
-from loom.impact import assess, assess_trace, report
+from loom.impact import assess, assess_trace, cost_delta, cost_delta_files, report, to_json
 from loom.providers import ModelResponse, RuleProvider, ToolCall
 
 
@@ -83,6 +85,85 @@ def test_report_counts_affected(tmp_path):
     impacts = assess([p1, p2], build_agent(system="New instructions."))
     text = report(impacts)
     assert "2 of 2 recorded run(s) affected" in text
+
+
+def test_dry_mode_sizes_model_inputs(tmp_path):
+    path = record_trace(tmp_path)
+    small = assess_trace(path, build_agent())
+    big = assess_trace(path, build_agent(system="You are helpful. " * 200))
+    assert small.est_input_tokens and small.est_input_tokens > 0
+    assert big.est_input_tokens > small.est_input_tokens  # bigger prompt = more expensive
+    assert small.verdict == "unchanged" and big.verdict == "inputs-differ"
+
+
+def test_structure_differs_is_not_sized(tmp_path):
+    path = record_trace(tmp_path)
+    compacting = build_agent()
+    compacting.compact_after = 1
+    compacting.compact_keep = 0
+    assert assess_trace(path, compacting).est_input_tokens is None
+
+
+def test_live_mode_reports_actual_input_tokens(tmp_path):
+    path = record_trace(tmp_path)
+    impact = assess_trace(path, build_agent(), live=True)
+    # RuleProvider reports no usage, so live spend is honestly None here --
+    # the point is the field is filled from actual cost, not the estimator.
+    from loom import Run
+
+    assert impact.est_input_tokens == (Run.load(path, agent=build_agent()).cost()["input_tokens"] or None)
+
+
+def test_cost_delta_compares_common_sized_runs():
+    base = [
+        {"path": "a", "est_input_tokens": 1000},
+        {"path": "b", "est_input_tokens": None},  # unsized on base: excluded
+        {"path": "gone", "est_input_tokens": 50},  # absent on head: excluded
+    ]
+    head = [
+        {"path": "a", "est_input_tokens": 1120},
+        {"path": "b", "est_input_tokens": 400},
+        {"path": "new", "est_input_tokens": 70},  # absent on base: excluded
+    ]
+    line = cost_delta(base, head)
+    assert "12.0% more expensive" in line
+    assert "~1,000 -> ~1,120" in line and "1 recorded run(s)" in line
+    assert cost_delta(base, []) == ""
+    assert "unchanged" in cost_delta(head, head)
+
+
+def test_cli_json_report_and_cost_delta_files(tmp_path, monkeypatch):
+    from loom.cli import main
+
+    record_trace(tmp_path, "a.loom.json")
+    agent_mod = tmp_path / "myagent_cost.py"
+    agent_mod.write_text(
+        "from tests.test_impact import build_agent\n"
+        "same = build_agent()\n"
+        "pricier = build_agent(system='You are helpful. ' * 200)\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    assert main(["impact", str(tmp_path), "--agent", "myagent_cost:same",
+                 "--json", "base.json"]) == 0
+    assert main(["impact", str(tmp_path), "--agent", "myagent_cost:pricier",
+                 "--json", "head.json"]) == 1
+    with open("base.json") as f:
+        base = json.load(f)
+    assert base["total"] == 1 and base["affected"] == 0
+    assert base["est_input_tokens"] > 0
+    assert base["impacts"][0]["verdict"] == "unchanged"
+
+    line = cost_delta_files("base.json", "head.json")
+    assert "more expensive" in line
+
+
+def test_report_includes_input_volume_line(tmp_path):
+    path = record_trace(tmp_path)
+    text = report(assess([path], build_agent()))
+    assert "input volume under this config" in text
+    data = to_json(assess([path], build_agent()))
+    assert data["est_input_tokens"] == data["impacts"][0]["est_input_tokens"]
 
 
 def test_cli_missing_trace_is_exit_2_not_impact(tmp_path, monkeypatch, capsys):
