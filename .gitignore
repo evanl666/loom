@@ -30,3 +30,6 @@ htmlcov/
 
 # Loom traces produced by examples/tests
 *.loom.json
+
+# CI fixture traces are committed on purpose
+!examples/ci/traces/*.loom.json

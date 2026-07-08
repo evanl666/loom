@@ -204,7 +204,11 @@ def _cmd_impact(args: argparse.Namespace) -> int:
     if not paths:
         print("no traces found", file=sys.stderr)
         return 2
-    impacts = assess(paths, agent, live=args.live)
+    try:
+        impacts = assess(paths, agent, live=args.live)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"loom: could not read traces: {e}", file=sys.stderr)
+        return 2
     print(report(impacts))
     return 1 if any(i.changed for i in impacts) else 0
 

@@ -85,6 +85,17 @@ def test_report_counts_affected(tmp_path):
     assert "2 of 2 recorded run(s) affected" in text
 
 
+def test_cli_missing_trace_is_exit_2_not_impact(tmp_path, monkeypatch, capsys):
+    from loom.cli import main
+
+    agent_mod = tmp_path / "myagent.py"
+    agent_mod.write_text("from tests.test_impact import build_agent\nsame = build_agent()\n")
+    monkeypatch.chdir(tmp_path)
+    code = main(["impact", str(tmp_path / "nope.loom.json"), "--agent", "myagent:same"])
+    assert code == 2  # unreadable corpus is an error, not "affected"
+    assert "could not read" in capsys.readouterr().err
+
+
 def test_cli_impact_exit_codes(tmp_path, monkeypatch, capsys):
     from loom.cli import main
 

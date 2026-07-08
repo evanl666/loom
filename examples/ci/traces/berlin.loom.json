@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "model": "rule",
+  "system": "You are a city inspector.",
+  "prompt": "How is Berlin doing?",
+  "episodes": [
+    "How is Berlin doing?"
+  ],
+  "output": "Berlin looks fine.",
+  "truncated": false,
+  "paused": false,
+  "pending": null,
+  "pending_depth": 0,
+  "stop_reason": "",
+  "log": [
+    {
+      "seq": 0,
+      "kind": "model",
+      "key": "30f99962b7a9",
+      "result": {
+        "text": "",
+        "tool_calls": [
+          {
+            "id": "t1",
+            "name": "lookup",
+            "input": {
+              "city": "Berlin"
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {}
+      },
+      "depth": 0
+    },
+    {
+      "seq": 1,
+      "kind": "tool:lookup",
+      "key": "96955705dfff",
+      "result": "Berlin: ok",
+      "depth": 0
+    },
+    {
+      "seq": 2,
+      "kind": "model",
+      "key": "c6ebf2f78a7a",
+      "result": {
+        "text": "Berlin looks fine.",
+        "tool_calls": [],
+        "stop_reason": "end_turn",
+        "usage": {}
+      },
+      "depth": 0
+    }
+  ]
+}
