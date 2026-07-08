@@ -5,31 +5,93 @@
 [![Python](https://img.shields.io/pypi/pyversions/loom-harness)](https://pypi.org/project/loom-harness/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**The agent harness you can read, replay, and rewind.**
+**The black box recorder for AI agents.**
+
+Record Claude Code, Codex, LangGraph — any agent that speaks the Anthropic or
+OpenAI API — with **one command and zero code changes**. Replay failures with
+zero API calls. Diff prompt changes before merging. Turn every agent bug into
+a regression test.
+
+```
+pip install loom-harness                       # zero dependencies
+
+loom record -- claude -p "fix the failing test"   # record a real Claude Code session
+loom studio session.loom.json                     # time-travel through it in your browser
+loom proxy --replay session.loom.json             # serve it back -- zero API calls, fake key works
+```
 
 ![Loom demo: record, read, replay, rewind](docs/demo.gif)
 
-Every other agent framework asks you to trust a black box. Loom's entire kernel
-is a few hundred lines you can read in an afternoon — and because every
-nondeterministic step flows through a single **Effect boundary**, any agent run
-becomes reproducible, forkable, and debuggable.
+Everything an agent does is visible in its API traffic — so recording that
+traffic gives you the whole story, without touching the agent:
 
-One primitive. Five superpowers:
-
-| Superpower | What it means |
+| You get | What it means |
 |---|---|
-| **Replay** | Re-run any recorded run with **zero API calls** — identical output. |
-| **Fork** | Rewind to any turn, edit the context, and take a different branch. |
-| **Bisect** | Walk the recorded turns to find exactly where a run went wrong. |
-| **Free CI tests** | Record once; replay in CI forever without burning tokens. |
-| **Cost accounting** | Every model call is metered at the boundary. |
-
-```
-pip install loom-harness            # zero dependencies
-pip install "loom-harness[anthropic]"   # + live Claude models
-```
+| **Replay** | Re-serve any recorded session with **zero API calls** — byte-identical. |
+| **Time travel** | `loom studio` — scrub through the run, see the context at every step. |
+| **Cost accounting** | Every model call metered: the exact turn your $23.40 went off the rails. |
+| **Diff** | Two runs compared at the effect level: where they diverged, and *why*. |
+| **Free CI** | Record once; the [GitHub Action](#the-github-action) flags PRs that change agent behavior — no tokens burned. |
 
 > The package installs as `loom-harness`, imports as `loom` (like `beautifulsoup4` / `bs4`).
+
+## Record any agent — no migration
+
+`loom record` black-boxes a single session: it starts a recording proxy on a
+free port, points `ANTHROPIC_BASE_URL` (or `OPENAI_BASE_URL` with
+`--target https://api.openai.com`) at it, runs your command unchanged, and
+writes the trace:
+
+```
+$ loom record -- claude -p "what does loom/effect.py do?"
+loom record: proxying https://api.anthropic.com on http://127.0.0.1:52104
+...your agent runs exactly as normal...
+
+recorded 3 step(s), 1841 tokens -> session.loom.json
+  replay it:  loom replay session.loom.json
+  inspect it: loom studio session.loom.json
+```
+
+For anything longer-lived than one command, run the proxy yourself:
+
+```
+loom proxy --save session.loom.json
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8788      # Claude Code & friends
+# or, for OpenAI-API agents:
+loom proxy --save session.loom.json --target https://api.openai.com
+export OPENAI_BASE_URL=http://127.0.0.1:8788/v1
+# ...run your agent exactly as before
+```
+
+Verified end-to-end: a real Claude Code session recorded through the proxy
+(its internal calls included, every token accounted), then **replayed offline
+with a fake API key**. Streaming works both ways — SSE is relayed live while
+the trace gets the complete message, and replays synthesize a well-formed
+stream for streaming clients.
+
+Tool calls ride in the responses and tool results in the next request, so the
+proxy reconstructs a **full loom trace**: `loom timeline`, `loom studio`,
+`loom doctor`, cost accounting, and diff all work on a session recorded from
+someone else's framework. And replay serves the recorded responses back
+byte-identical, no upstream, no API key:
+
+```
+loom proxy --replay session.loom.json
+```
+
+Your API key is forwarded, never stored — traces contain traffic, not
+credentials.
+
+## Loom is also a harness
+
+Recording is the front door. Underneath is a full agent framework whose kernel
+is a few hundred lines you can read in an afternoon — every nondeterministic
+step (model calls, tools, human input, even the clock) flows through a single
+**Effect boundary**, so agents *built on* Loom get superpowers traces alone
+can't give you: **fork** a run at any turn and take a different branch,
+**sweep** counterfactuals in batch, **bisect** to the turn that went wrong,
+and **heal** — automatically find and verify the context repair that fixes a
+failed run.
 
 ## Quickstart (works offline, no API key)
 
@@ -54,41 +116,6 @@ run = agent.run("What is 2 + 3?")
 print(run.output)          # -> The answer is 5.
 run.print_timeline()       # step-by-step trace
 ```
-
-## Record ANY agent — no migration
-
-You don't have to build on Loom to use Loom. `loom proxy` records any agent
-that speaks the Anthropic **or OpenAI** API — Claude Code, LangGraph, CrewAI,
-a raw SDK script — through one environment variable:
-
-```
-loom proxy --save session.loom.json
-export ANTHROPIC_BASE_URL=http://127.0.0.1:8788      # Claude Code & friends
-# or, for OpenAI-API agents:
-loom proxy --save session.loom.json --target https://api.openai.com
-export OPENAI_BASE_URL=http://127.0.0.1:8788/v1
-# ...run your agent exactly as before
-```
-
-Verified end-to-end: a real Claude Code session recorded through the proxy
-(its internal calls included, every token accounted), then **replayed offline
-with a fake API key**. Streaming works both ways — SSE is relayed live while
-the trace gets the complete message, and replays synthesize a well-formed
-stream for streaming clients.
-
-Everything the agent does is visible in its API traffic (tool calls ride in
-the responses, tool results in the next request), so the proxy reconstructs a
-**full loom trace**: `loom timeline`, `loom export`, `loom doctor`, cost
-accounting, and bisect all work on a session you recorded from someone else's
-framework. And replay serves the recorded responses back byte-identical, no
-upstream, no API key:
-
-```
-loom proxy --replay session.loom.json
-```
-
-Your API key is forwarded, never stored — traces contain traffic, not
-credentials.
 
 ## Use a real model
 
@@ -200,13 +227,17 @@ agent = Agent(model=..., tools=[fetch_a, fetch_b], parallel_tools=True)
 run = await agent.arun("...")
 ```
 
-## Visual traces
+## Loom Studio: visual time travel
 
-`loom export` renders any saved trace to a single self-contained HTML page —
-no external assets, safe to attach to a bug report or email to a teammate:
+`loom studio` opens any saved trace as a self-contained HTML time-travel
+viewer — scrub (or press play) to watch the run unfold, see the exact context
+the model saw at every step, hover the cost strip to find the expensive turns,
+and copy a ready-made fork snippet from any effect. No external assets, safe
+to attach to a bug report or email to a teammate:
 
 ```
-loom export run.loom.json        # writes run.loom.html
+loom studio run.loom.json        # writes run.loom.html and opens it
+loom export run.loom.json        # just write the file
 ```
 
 ## Policy: control the agent before it acts
@@ -579,31 +610,41 @@ The parent only ever sees the delegated *result*, not the child's internal steps
 ## CLI
 
 ```
+loom record -- claude -p "..."                      # black-box a real agent session
+loom proxy --save session.loom.json                 # long-lived recording proxy (or --replay)
+loom studio trip.loom.json                          # open the time-travel viewer
 loom run "What is 2 + 3?" --model claude-opus-4-8   # run an agent
 loom timeline trip.loom.json                        # inspect a saved trace
 loom replay trip.loom.json                          # replay offline
 loom diff yesterday.loom.json today.loom.json       # where + why two runs diverged
 loom export trip.loom.json                          # self-contained HTML trace viewer
 loom doctor trip.loom.json                          # check a trace for context rot
+loom heal run.loom.json --agent app:agent --forbid ERROR --save-regression tests/regressions
+loom impact fixtures/ --agent app:agent             # which recorded runs a change affects
+loom skills mine runs/ --save skills.json           # crystallize proven tool sequences
+loom test fixtures/                                 # verify saved traces (CI)
+loom watch task.jsonl                               # follow a running agent's journal
 ```
 
 ## FAQ
 
-**Is Loom a harness or a debugging plugin?**
+**Can I use Loom with my existing Claude Code / LangGraph / CrewAI / OpenAI-SDK agent?**
 
-A harness — you build your agent *on* Loom, and the debugging superpowers come
-built in. They can't be bolted onto another framework: replay/fork/sweep work
-because *every* nondeterministic step flows through the Effect boundary and gets
-recorded. An agent built elsewhere never passed through that chokepoint, so
-there is nothing to replay. Think Git, not a browser extension: Git can diff
-and bisect your history because your commits live in it from day one.
+Yes — that's the front door. `loom record -- <your command>` (or `loom proxy`)
+records any agent that speaks the Anthropic or OpenAI API with zero code
+changes, and everything that works on a trace works on that recording: replay,
+Studio, timeline, diff, doctor, cost accounting.
 
-**Can I use Loom to debug my existing LangGraph / CrewAI / OpenAI-SDK agent?**
+**Then why would I build on the harness?**
 
-Not in place — but migrating is deliberately cheap. Loom's `Agent` is a thin
-loop and tools are plain decorated functions, so porting an agent is usually a
-dozen lines: bring your system prompt, re-declare each tool with `@tool`, pick
-a provider. From then on every run is recorded, replayable, and diffable.
+Recording captures what *did* happen; the harness can also run what *didn't*.
+Fork, sweep, heal, live rerun, and resume all need Loom to re-execute the
+divergent tail of a run — that requires your agent's loop and tools to live
+inside the Effect boundary. A recorded trace of someone else's agent has no
+loop to hand control back to. Think Git: `git log` works on any history you
+import, but branching needs your work to happen in the repo. Migrating is
+deliberately cheap — tools are plain decorated functions, the `Agent` is a
+thin loop, so porting is usually a dozen lines.
 
 **Do I pay for replays?**
 
@@ -619,12 +660,15 @@ import an SDK.
 
 ## Status
 
-`v0.8` — alpha, on PyPI as
-[`loom-harness`](https://pypi.org/project/loom-harness/). Kernel, time-travel
+`v0.10` — alpha, on PyPI as
+[`loom-harness`](https://pypi.org/project/loom-harness/). Recording proxy
+(`loom record` / `loom proxy`, Anthropic + OpenAI dialects, streaming both
+ways), Studio time-travel viewer, GitHub Action, kernel, time-travel
 (replay/fork/bisect), sweep, diff, subagents, conversations, human-in-the-loop,
-streaming, parallel tools, HTML export, context-rot checkup/heal, durable runs,
-policy, effect cache, trace memory, compaction, structured output, impact
-analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
+streaming, parallel tools, context-rot checkup/heal, durable runs, policy,
+effect cache, trace memory, compaction, structured output, critic/deliberate,
+skills, impact analysis, and MCP are complete and tested. See
+[Roadmap](#roadmap).
 
 ### Roadmap
 - ~~Subagents (isolated context, nested traces)~~ ✅ shipped
@@ -650,10 +694,11 @@ analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
 - ~~Clock & randomness as effects (`loom.now`, `loom.random`, `Agent(clock=True)`)~~ ✅ shipped
 - ~~Critic gate + deliberate mode (replayable self-correction)~~ ✅ shipped
 - ~~Skill crystallization (`loom.skills.mine` — proven sequences become tools)~~ ✅ shipped
-- ~~`loom proxy` — record any Anthropic-API agent, replay offline~~ ✅ shipped (SSE/OpenAI-compat next)
+- ~~`loom proxy` / `loom record` — record any Anthropic- or OpenAI-API agent (streaming included), replay offline~~ ✅ shipped
+- ~~Loom CI GitHub Action — impact reports as PR comments~~ ✅ shipped
+- ~~Loom Studio — time-travel debugger UI (`loom studio`)~~ ✅ shipped
+- Loom Shield — an agent firewall on the proxy: deny/confirm patterns for any agent, no migration
 - `loom fuzz` — chaos engineering for agents (fault injection at any effect)
-- Loom CI GitHub Action — impact reports as PR comments
-- Loom Studio — time-travel debugger UI on top of trace export
 
 ## License
 
