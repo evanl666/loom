@@ -148,6 +148,7 @@ def reconstruct_sse(raw: str) -> dict:
     blocks: dict[int, dict] = {}
     partial: dict[int, str] = {}
     usage: dict = {}
+    envelope: dict = {}
     stop_reason = None
     for line in raw.splitlines():
         if not line.startswith("data:"):
@@ -158,7 +159,9 @@ def reconstruct_sse(raw: str) -> dict:
             continue
         etype = event.get("type")
         if etype == "message_start":
-            usage.update(event.get("message", {}).get("usage", {}) or {})
+            message = event.get("message", {}) or {}
+            envelope = {k: v for k, v in message.items() if k not in ("content", "usage")}
+            usage.update(message.get("usage", {}) or {})
         elif etype == "content_block_start":
             blocks[event["index"]] = dict(event.get("content_block", {}))
             partial[event["index"]] = ""
@@ -182,7 +185,65 @@ def reconstruct_sse(raw: str) -> dict:
             except json.JSONDecodeError:
                 b["input"] = {}
         content.append(b)
-    return {"content": content, "stop_reason": stop_reason, "usage": usage}
+    return {**envelope, "content": content, "stop_reason": stop_reason, "usage": usage}
+
+
+def synthesize_sse(message: dict) -> bytes:
+    """Render a recorded message as an Anthropic SSE stream, for replay clients."""
+
+    def event(etype: str, payload: dict) -> bytes:
+        return f"event: {etype}\ndata: {json.dumps({'type': etype, **payload})}\n\n".encode()
+
+    envelope = {k: v for k, v in message.items() if k not in ("content", "stop_reason", "usage")}
+    envelope.setdefault("type", "message")
+    envelope.setdefault("role", "assistant")
+    envelope.setdefault("id", "msg_replay")
+    usage = message.get("usage", {}) or {}
+    out = [
+        event(
+            "message_start",
+            {"message": {**envelope, "content": [], "stop_reason": None, "usage": usage}},
+        )
+    ]
+    for i, block in enumerate(message.get("content", [])):
+        if block.get("type") == "tool_use":
+            start = {k: block.get(k) for k in ("type", "id", "name")}
+            start["input"] = {}
+            out.append(event("content_block_start", {"index": i, "content_block": start}))
+            out.append(
+                event(
+                    "content_block_delta",
+                    {
+                        "index": i,
+                        "delta": {
+                            "type": "input_json_delta",
+                            "partial_json": json.dumps(block.get("input", {})),
+                        },
+                    },
+                )
+            )
+        else:
+            out.append(
+                event("content_block_start", {"index": i, "content_block": {"type": "text", "text": ""}})
+            )
+            out.append(
+                event(
+                    "content_block_delta",
+                    {"index": i, "delta": {"type": "text_delta", "text": block.get("text", "")}},
+                )
+            )
+        out.append(event("content_block_stop", {"index": i}))
+    out.append(
+        event(
+            "message_delta",
+            {
+                "delta": {"stop_reason": message.get("stop_reason"), "stop_sequence": None},
+                "usage": {"output_tokens": usage.get("output_tokens", 0)},
+            },
+        )
+    )
+    out.append(event("message_stop", {}))
+    return b"".join(out)
 
 
 class ProxyServer(ThreadingHTTPServer):
@@ -234,9 +295,18 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse(self, payload: bytes) -> None:
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def do_POST(self) -> None:
         length = int(self.headers.get("content-length", 0))
         request = json.loads(self.rfile.read(length) or b"{}")
+        wants_stream = bool(request.get("stream"))
 
         if self.server.replay_wire is not None:
             with self.server.lock:
@@ -245,13 +315,13 @@ class _Handler(BaseHTTPRequestHandler):
                     return
                 response = self.server.replay_wire[self.server.replay_index]
                 self.server.replay_index += 1
-            self._send_json(200, response)
+            if wants_stream:
+                self._send_sse(synthesize_sse(response))
+            else:
+                self._send_json(200, response)
             return
 
-        request.pop("stream", None)  # record the complete message; MVP: no SSE passthrough
-        headers = {
-            k: v for k, v in self.headers.items() if k.lower() in _FORWARD_HEADERS
-        }
+        headers = {k: v for k, v in self.headers.items() if k.lower() in _FORWARD_HEADERS}
         headers["content-type"] = "application/json"
         upstream_req = urllib.request.Request(
             self.server.target + self.path,
@@ -260,14 +330,59 @@ class _Handler(BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            with urllib.request.urlopen(upstream_req, timeout=600) as upstream:
-                response = json.loads(upstream.read())
+            upstream = urllib.request.urlopen(upstream_req, timeout=600)
         except urllib.error.HTTPError as e:
-            self._send_json(e.code, json.loads(e.read() or b"{}"))
+            body = e.read()
+            try:
+                self._send_json(e.code, json.loads(body or b"{}"))
+            except json.JSONDecodeError:
+                self._send_json(e.code, {"error": body.decode("utf-8", "replace")})
             return
+
+        with upstream:
+            if upstream.headers.get("content-type", "").startswith("text/event-stream"):
+                # Relay the stream as it arrives; reconstruct the message after.
+                self.send_response(200)
+                self.send_header("content-type", "text/event-stream")
+                self.send_header("cache-control", "no-cache")
+                self.end_headers()
+                chunks: list[bytes] = []
+                while True:
+                    chunk = upstream.read(1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                response = reconstruct_sse(b"".join(chunks).decode("utf-8", "replace"))
+            else:
+                data = upstream.read()
+                response = json.loads(data)
+                self._send_json(200, response)
 
         with self.server.lock:
             self.server.recorder.record(request, response)
             if self.server.save_path:
                 self.server.recorder.save(self.server.save_path)
-        self._send_json(200, response)
+
+    def do_GET(self) -> None:
+        """Pass non-messages endpoints through untouched (models list, health...)."""
+        if self.server.replay_wire is not None:
+            self._send_json(404, {"error": "replay mode serves recorded POSTs only"})
+            return
+        headers = {k: v for k, v in self.headers.items() if k.lower() in _FORWARD_HEADERS}
+        try:
+            with urllib.request.urlopen(
+                urllib.request.Request(self.server.target + self.path, headers=headers),
+                timeout=60,
+            ) as upstream:
+                body = upstream.read()
+                self.send_response(upstream.status)
+                self.send_header(
+                    "content-type", upstream.headers.get("content-type", "application/json")
+                )
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+        except urllib.error.HTTPError as e:
+            self._send_json(e.code, {"error": e.reason})

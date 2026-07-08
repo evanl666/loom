@@ -161,6 +161,85 @@ def test_api_key_never_lands_in_the_trace(recorded_trace):
         assert "sk-test" not in f.read()
 
 
+SSE_STREAM = (
+    'data: {"type": "message_start", "message": {"id": "msg_1", "type": "message", '
+    '"role": "assistant", "model": "claude-opus-4-8", "usage": {"input_tokens": 4}}}\n\n'
+    'data: {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}\n\n'
+    'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Streamed hello."}}\n\n'
+    'data: {"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 3}}\n\n'
+    'data: {"type": "message_stop"}\n\n'
+)
+
+
+class _FakeSSEUpstream(_FakeUpstream):
+    """Serves the canned SSE stream to any POST."""
+
+
+class _FakeSSEHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("content-length", 0)))
+        body = SSE_STREAM.encode()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_sse_passthrough_relays_and_records(tmp_path):
+    upstream = _FakeUpstream([])
+    upstream.RequestHandlerClass = _FakeSSEHandler
+    _serve(upstream)
+    path = str(tmp_path / "sse.loom.json")
+    proxy = _serve(
+        ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}", save_path=path)
+    )
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{proxy.port}/v1/messages",
+        data=json.dumps(
+            {"model": "claude-opus-4-8", "stream": True,
+             "messages": [{"role": "user", "content": "hi"}]}
+        ).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        raw = r.read().decode()
+    assert "Streamed hello." in raw  # the client saw the live stream
+
+    with open(path) as f:
+        data = json.load(f)
+    assert data["output"] == "Streamed hello."  # ...and the trace got the whole message
+    assert data["wire"][0]["model"] == "claude-opus-4-8"  # envelope preserved
+    proxy.shutdown()
+    upstream.shutdown()
+
+
+def test_replay_synthesizes_sse_for_streaming_clients(recorded_trace):
+    proxy = _serve(ProxyServer(port=0, replay_path=recorded_trace))
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{proxy.port}/v1/messages",
+        data=json.dumps({"stream": True, "messages": []}).encode(),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        assert r.headers["content-type"].startswith("text/event-stream")
+        raw = r.read().decode()
+    # The recorded tool_use response comes back as a well-formed event stream.
+    assert "message_start" in raw and "message_stop" in raw
+    assert '"name": "get_weather"' in raw
+    from loom.proxy import reconstruct_sse
+
+    round_tripped = reconstruct_sse(raw)
+    assert round_tripped["content"][1]["input"] == {"city": "Berlin"}
+    proxy.shutdown()
+
+
 def test_sse_reconstruction():
     raw = "\n".join(
         [
