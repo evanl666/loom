@@ -36,7 +36,7 @@ from .providers.base import ModelProvider, ModelResponse, ToolCall
 from .tools import Tool, tool
 from .trace import Run, SweepResult
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 __all__ = [
     "Agent",

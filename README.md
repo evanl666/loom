@@ -33,6 +33,7 @@ traffic gives you the whole story, without touching the agent:
 | **Diff** | Two runs compared at the effect level: where they diverged, and *why*. |
 | **Free CI** | Record once; the [GitHub Action](#the-github-action) flags PRs that change agent behavior — no tokens burned. |
 | **Firewall** | [Shield](#loom-shield-dont-dangerously-skip-permissions): `--deny 'Read(*.env*)'` blocks a tool call before the agent ever sees it. |
+| **Ask the trace** | `loom why trace.json "why did it read my .env?"` — a debugger agent investigates and answers, citing exact steps. |
 
 > The package installs as `loom-harness`, imports as `loom` (like `beautifulsoup4` / `bs4`).
 
@@ -120,6 +121,55 @@ loom shield: CONFIRM [a3f2c1] Bash({"command": "curl -s https://install.sh | sh"
 in the trace (`shield_events`), and the blocked-call notice is part of the
 recorded conversation — so the audit trail replays, diffs, and exports like
 everything else.
+
+Three ways to run it beyond static rules:
+
+```
+# Allowlist mode: nothing runs unless a rule says so.
+loom record --shield-default deny --allow 'Read(*)' --allow 'Bash(*pytest*)' -- ...
+
+# LLM as judge: a cheap model risk-scores calls no rule matched;
+# risky ones (score >= --judge-threshold) go to the approval inbox.
+loom record --judge claude-haiku-4-5-20251001 -- ...
+
+# Trust ratchet: after 5 consecutive approvals, a tool's confirms
+# auto-approve. One deny demotes it. `loom trust` shows the ledger —
+# every promotion links to the approval ids that earned it.
+loom record --confirm 'Bash*' --trust-after 5 -- ...
+```
+
+The judge's verdict lands in `shield_events` whether it escalates or not, so
+even "the AI said it was fine" is on the record. Autonomy you can audit.
+
+## Share traces, not secrets
+
+Traces record everything the agent saw — which can include the API key it
+read out of a config file. Before a trace leaves your machine:
+
+```
+loom scrub session.loom.json            # -> session.scrubbed.loom.json
+loom scrub session.loom.json --check    # CI gate: exit 1 if secrets found
+loom record --scrub -- ...              # redact at write time: credentials never touch disk
+```
+
+Detection covers known key shapes (Anthropic, OpenAI, GitHub, AWS, Slack,
+JWTs, PEM blocks, `DB_PASSWORD=...` assignments); `--aggressive` adds an
+entropy detector. With `--scrub` the agent still sees real values — only the
+stored trace is redacted.
+
+## Ask the trace what happened
+
+```
+loom why session.loom.json "why did it install the wrong package?"
+# At seq 4 the model ran pip install requests-html because the tool result
+# at seq 3 truncated the error message; the actual failure was...
+```
+
+`loom why` spins up a debugger agent whose tools read the trace — timeline,
+individual effects, per-turn token costs, context-health checkup, shield
+decisions — and answers with seq numbers you can jump to in `loom studio`,
+fork, or bisect. The diagnosis is itself a loom run: save it, replay it, ask
+why about the why.
 
 ## Loom is also a harness
 
