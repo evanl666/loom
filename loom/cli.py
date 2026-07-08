@@ -209,6 +209,25 @@ def _cmd_impact(args: argparse.Namespace) -> int:
     return 1 if any(i.changed for i in impacts) else 0
 
 
+def _cmd_proxy(args: argparse.Namespace) -> int:
+    from .proxy import ProxyServer
+
+    server = ProxyServer(
+        port=args.port,
+        target=args.target,
+        save_path=args.save if not args.replay else None,
+        replay_path=args.replay or None,
+    )
+    mode = f"replaying {args.replay}" if args.replay else f"recording -> {args.save}"
+    print(f"loom proxy on http://127.0.0.1:{server.port} ({mode})")
+    print(f"  export ANTHROPIC_BASE_URL=http://127.0.0.1:{server.port}")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom", description="Read, replay, and rewind agent runs.")
     p.add_argument("--version", action="version", version=f"loom {__version__}")
@@ -261,6 +280,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-run affected conversations to show HOW outputs change (costs API calls)",
     )
     im.set_defaults(func=_cmd_impact)
+
+    px = sub.add_parser("proxy", help="record any Anthropic-API agent through a local proxy")
+    px.add_argument("--port", type=int, default=8788)
+    px.add_argument("--target", default="https://api.anthropic.com")
+    px.add_argument("--save", default="session.loom.json", help="trace written after every exchange")
+    px.add_argument("--replay", default="", help="serve recorded responses from this trace instead")
+    px.set_defaults(func=_cmd_proxy)
 
     wa = sub.add_parser("watch", help="follow a run's journal live")
     wa.add_argument("path")

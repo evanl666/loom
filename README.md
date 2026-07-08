@@ -55,6 +55,32 @@ print(run.output)          # -> The answer is 5.
 run.print_timeline()       # step-by-step trace
 ```
 
+## Record ANY agent — no migration
+
+You don't have to build on Loom to use Loom. `loom proxy` records any agent
+that speaks the Anthropic API — Claude Code, LangGraph, a raw SDK script —
+through one environment variable:
+
+```
+loom proxy --save session.loom.json
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8788
+# ...run your agent exactly as before
+```
+
+Everything the agent does is visible in its API traffic (tool calls ride in
+the responses, tool results in the next request), so the proxy reconstructs a
+**full loom trace**: `loom timeline`, `loom export`, `loom doctor`, cost
+accounting, and bisect all work on a session you recorded from someone else's
+framework. And replay serves the recorded responses back byte-identical, no
+upstream, no API key:
+
+```
+loom proxy --replay session.loom.json
+```
+
+Your API key is forwarded, never stored — traces contain traffic, not
+credentials.
+
 ## Use a real model
 
 ```python
@@ -584,8 +610,10 @@ analysis, and MCP are complete and tested. See [Roadmap](#roadmap).
 - ~~Clock & randomness as effects (`loom.now`, `loom.random`, `Agent(clock=True)`)~~ ✅ shipped
 - ~~Critic gate + deliberate mode (replayable self-correction)~~ ✅ shipped
 - ~~Skill crystallization (`loom.skills.mine` — proven sequences become tools)~~ ✅ shipped
+- ~~`loom proxy` — record any Anthropic-API agent, replay offline~~ ✅ shipped (SSE/OpenAI-compat next)
 - `loom fuzz` — chaos engineering for agents (fault injection at any effect)
-- `loom proxy` — record any framework's runs through an API-compatible proxy
+- Loom CI GitHub Action — impact reports as PR comments
+- Loom Studio — time-travel debugger UI on top of trace export
 
 ## License
 
