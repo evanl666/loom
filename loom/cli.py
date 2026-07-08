@@ -158,17 +158,31 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 
 def _build_shield(args: argparse.Namespace):
-    """Turn --deny/--confirm/--allow flags into a Shield (or None)."""
-    if not (args.deny or args.confirm or args.allow):
+    """Turn --deny/--confirm/--allow/--judge flags into a Shield (or None)."""
+    if not (args.deny or args.confirm or args.allow or args.judge
+            or args.shield_default != "allow"):
         return None
-    from .shield import Shield
+    from .shield import Shield, TrustLedger
 
+    trust = None
+    if args.trust_after > 0:
+        import os
+
+        ledger_path = args.trust_ledger or os.path.join(
+            os.path.expanduser("~"), ".loom", "trust.json"
+        )
+        trust = TrustLedger(ledger_path)
     return Shield(
         deny=args.deny or [],
         confirm=args.confirm or [],
         allow=args.allow or [],
+        default=args.shield_default,
         timeout=args.confirm_timeout,
         webhook=args.webhook,
+        judge=args.judge or None,
+        judge_threshold=args.judge_threshold,
+        trust=trust,
+        trust_after=args.trust_after,
     )
 
 
@@ -192,6 +206,24 @@ def _print_shield_rules(shield) -> None:
             print(f"  shield {action:7s} {pat}", file=sys.stderr)
 
 
+def _recover_wirelog(save: str) -> None:
+    """A leftover .wirelog means the last session crashed mid-run: salvage it."""
+    import os
+
+    wirelog = save + ".wirelog"
+    if not os.path.exists(wirelog):
+        return
+    from .proxy import compact_wirelog
+
+    if save.endswith(".loom.json"):
+        recovered = save[: -len(".loom.json")] + ".recovered.loom.json"
+    else:
+        recovered = save + ".recovered"
+    compact_wirelog(wirelog, recovered)
+    os.remove(wirelog)
+    print(f"loom: recovered a crashed session's wirelog -> {recovered}", file=sys.stderr)
+
+
 def _cmd_record(args: argparse.Namespace) -> int:
     """Black-box a real agent session: proxy up, env var set, command run."""
     import os
@@ -199,6 +231,8 @@ def _cmd_record(args: argparse.Namespace) -> int:
     import threading
 
     from .proxy import ProxyServer
+
+    _recover_wirelog(args.save)
 
     command = list(args.command)
     if command and command[0] == "--":
@@ -208,7 +242,8 @@ def _cmd_record(args: argparse.Namespace) -> int:
         return 2
 
     shield = _build_shield(args)
-    server = ProxyServer(port=args.port, target=args.target, save_path=args.save, shield=shield)
+    server = ProxyServer(port=args.port, target=args.target, save_path=args.save,
+                         shield=shield, scrub=args.scrub)
     if shield is not None:
         shield.notify = _shield_notifier(server.port)
         _print_shield_rules(shield)
@@ -223,6 +258,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
 
     code = subprocess.call(command, env=env)
     server.shutdown()
+    server.finalize()
 
     try:
         with open(args.save) as f:
@@ -397,6 +433,8 @@ def _cmd_impact(args: argparse.Namespace) -> int:
 def _cmd_proxy(args: argparse.Namespace) -> int:
     from .proxy import ProxyServer
 
+    if not args.replay:
+        _recover_wirelog(args.save)
     shield = _build_shield(args)
     server = ProxyServer(
         port=args.port,
@@ -404,6 +442,7 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
         save_path=args.save if not args.replay else None,
         replay_path=args.replay or None,
         shield=shield if not args.replay else None,
+        scrub=args.scrub,
     )
     mode = f"replaying {args.replay}" if args.replay else f"recording -> {args.save}"
     print(f"loom proxy on http://127.0.0.1:{server.port} ({mode})")
@@ -415,7 +454,17 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        server.finalize()
     return 0
+
+
+def _control_headers(port: int) -> dict:
+    """Auth header for a shielded proxy's control endpoints (loom approve...)."""
+    from .proxy import control_token_for
+
+    token = control_token_for(port)
+    return {"x-loom-token": token} if token else {}
 
 
 def _cmd_approvals(args: argparse.Namespace) -> int:
@@ -423,11 +472,16 @@ def _cmd_approvals(args: argparse.Namespace) -> int:
     import urllib.error
     import urllib.request
 
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{args.port}/loom/shield/pending",
+        headers=_control_headers(args.port),
+    )
     try:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{args.port}/loom/shield/pending", timeout=10
-        ) as r:
+        with urllib.request.urlopen(req, timeout=10) as r:
             pending = json.load(r).get("pending", [])
+    except urllib.error.HTTPError as e:
+        print(f"loom: {json.load(e).get('error', e.reason)}", file=sys.stderr)
+        return 1
     except (urllib.error.URLError, OSError) as e:
         print(f"loom: no shielded proxy on port {args.port} ({e})", file=sys.stderr)
         return 2
@@ -449,7 +503,7 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     req = urllib.request.Request(
         f"http://127.0.0.1:{args.port}/loom/shield/decide",
         data=json.dumps({"id": args.id, "decision": decision}).encode(),
-        headers={"content-type": "application/json"},
+        headers={"content-type": "application/json", **_control_headers(args.port)},
         method="POST",
     )
     try:
@@ -461,6 +515,78 @@ def _cmd_approve(args: argparse.Namespace) -> int:
         print(f"loom: no shielded proxy on port {args.port} ({e})", file=sys.stderr)
         return 2
     print(f"{decision}d [{args.id}]")
+    return 0
+
+
+def _cmd_scrub(args: argparse.Namespace) -> int:
+    """Redact secrets from a saved trace (or just report them with --check)."""
+    from .scrub import scrub_trace
+
+    with open(args.path) as f:
+        data = json.load(f)
+    clean, found = scrub_trace(data, aggressive=args.aggressive)
+    total = sum(found.values())
+    for kind in sorted(found):
+        print(f"  {found[kind]:>3}x {kind}")
+
+    if args.check:
+        if total:
+            print(f"loom: {total} secret(s) in {args.path}", file=sys.stderr)
+            return 1
+        print(f"clean: {args.path}")
+        return 0
+
+    if args.in_place:
+        out = args.path
+    elif args.path.endswith(".loom.json"):
+        out = args.path[: -len(".loom.json")] + ".scrubbed.loom.json"
+    else:
+        out = args.path + ".scrubbed"
+    with open(out, "w") as f:
+        json.dump(clean, f, indent=2)
+    print(f"scrubbed {total} secret(s) -> {out}")
+    return 0
+
+
+def _cmd_why(args: argparse.Namespace) -> int:
+    """Ask a debugger agent a question about a saved trace."""
+    from .why import why
+
+    try:
+        run = why(args.path, args.question, model=args.model)
+    except Exception as e:  # surface provider/auth errors cleanly
+        print(f"loom: why failed: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    print(run.output)
+    if args.save:
+        run.save(args.save)
+        print(f"\nsaved diagnosis trace -> {args.save}", file=sys.stderr)
+    return 0
+
+
+def _cmd_trust(args: argparse.Namespace) -> int:
+    """Show (or demote entries in) the shield's trust ledger."""
+    import os
+
+    from .shield import TrustLedger
+
+    path = args.ledger or os.path.join(os.path.expanduser("~"), ".loom", "trust.json")
+    ledger = TrustLedger(path)
+    if args.demote:
+        if ledger.demote(args.demote):
+            print(f"demoted {args.demote}: streak reset to 0")
+            return 0
+        print(f"loom: no trust recorded for {args.demote!r}", file=sys.stderr)
+        return 1
+    if not ledger.data:
+        print(f"no trust recorded yet ({path})")
+        return 0
+    for tool, entry in sorted(ledger.data.items()):
+        ids = ", ".join(e.get("id", "?") for e in entry.get("evidence", [])[-5:])
+        line = f"{tool}: streak {entry.get('streak', 0)}"
+        if ids:
+            line += f"  (recent approvals: {ids})"
+        print(line)
     return 0
 
 
@@ -534,6 +660,23 @@ def build_parser() -> argparse.ArgumentParser:
                         help="seconds to wait for approval before denying (default 300)")
         sp.add_argument("--webhook", default="",
                         help="POST pending approvals to this URL (approval inbox)")
+        sp.add_argument("--shield-default", dest="shield_default", default="allow",
+                        choices=["allow", "confirm", "deny"],
+                        help="action when no rule matches (default: allow)")
+        sp.add_argument("--judge", default="", metavar="MODEL",
+                        help="risk-score unmatched tool calls with this model; "
+                             "risky ones are held for approval")
+        sp.add_argument("--judge-threshold", dest="judge_threshold", type=float, default=0.7,
+                        help="risk score at which the judge escalates to confirm (default 0.7)")
+        sp.add_argument("--trust-after", dest="trust_after", type=int, default=0, metavar="N",
+                        help="auto-approve a tool's confirms after N consecutive "
+                             "operator approvals (see: loom trust)")
+        sp.add_argument("--trust-ledger", dest="trust_ledger", default="", metavar="FILE",
+                        help="where approval streaks live (default ~/.loom/trust.json)")
+
+    def scrub_flag(sp) -> None:
+        sp.add_argument("--scrub", action="store_true",
+                        help="redact secrets (API keys, tokens...) before the trace is written")
 
     rc = sub.add_parser("record", help="black-box a real agent session: loom record -- <command>")
     rc.add_argument("command", nargs=argparse.REMAINDER, help="the agent command to run")
@@ -542,6 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
                     help="upstream API (use https://api.openai.com for OpenAI agents)")
     rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
     shield_flags(rc)
+    scrub_flag(rc)
     rc.set_defaults(func=_cmd_record)
 
     he = sub.add_parser("heal", help="diagnose a failed run, try repairs, save the fix as a test")
@@ -570,6 +714,7 @@ def build_parser() -> argparse.ArgumentParser:
     px.add_argument("--save", default="session.loom.json", help="trace written after every exchange")
     px.add_argument("--replay", default="", help="serve recorded responses from this trace instead")
     shield_flags(px)
+    scrub_flag(px)
     px.set_defaults(func=_cmd_proxy)
 
     av = sub.add_parser("approvals", help="list pending shield approvals on a running proxy")
@@ -581,6 +726,29 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
     ap.set_defaults(func=_cmd_approve)
+
+    sc = sub.add_parser("scrub", help="redact secrets from a trace before sharing it")
+    sc.add_argument("path")
+    sc.add_argument("--in-place", action="store_true", dest="in_place",
+                    help="overwrite the trace instead of writing *.scrubbed.loom.json")
+    sc.add_argument("--check", action="store_true",
+                    help="report only; exit 1 if secrets are found (CI gate)")
+    sc.add_argument("--aggressive", action="store_true",
+                    help="also redact long high-entropy tokens (may false-positive)")
+    sc.set_defaults(func=_cmd_scrub)
+
+    wy = sub.add_parser("why", help="ask a debugger agent about a saved trace")
+    wy.add_argument("path")
+    wy.add_argument("question")
+    wy.add_argument("--model", default="claude-opus-4-8")
+    wy.add_argument("--save", default="", help="record the diagnosis run to this path")
+    wy.set_defaults(func=_cmd_why)
+
+    tr = sub.add_parser("trust", help="show the shield's trust ledger (approval streaks)")
+    tr.add_argument("--ledger", default="", help="ledger file (default ~/.loom/trust.json)")
+    tr.add_argument("--demote", default="", metavar="TOOL",
+                    help="reset a tool's streak so its confirms need approval again")
+    tr.set_defaults(func=_cmd_trust)
 
     wa = sub.add_parser("watch", help="follow a run's journal live")
     wa.add_argument("path")

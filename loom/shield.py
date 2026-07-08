@@ -32,6 +32,8 @@ Stdlib only, like the rest of the kernel.
 from __future__ import annotations
 
 import json
+import os
+import re
 import threading
 import time
 import uuid
@@ -49,6 +51,11 @@ def _signature(name: str, tool_input) -> str:
     except (TypeError, ValueError):
         args = str(tool_input)
     return f"{name}({args})"
+
+
+def _normalize(sig: str) -> str:
+    """Collapse whitespace runs so ``rm   -rf`` still matches ``*rm -rf*``."""
+    return re.sub(r"\s+", " ", sig)
 
 
 def _blocked_text(name: str, tool_input, reason: str) -> str:
@@ -89,16 +96,33 @@ class Shield:
         deny: "list[str] | tuple" = (),
         confirm: "list[str] | tuple" = (),
         allow: "list[str] | tuple" = (),
+        default: str = ALLOW,
         timeout: float = 300.0,
         webhook: str = "",
         notify=None,
+        judge=None,
+        judge_threshold: float = 0.7,
+        trust=None,
+        trust_after: int = 0,
     ):
+        if default not in (ALLOW, CONFIRM, DENY):
+            raise ValueError(f"default must be allow/confirm/deny, not {default!r}")
         self.deny = list(deny)
         self.confirm = list(confirm)
         self.allow = list(allow)
+        self.default = default
         self.timeout = timeout
         self.webhook = webhook
         self.notify = notify  # callable(PendingApproval) -> None, e.g. a console printer
+        # LLM-judge: a cheap model risk-scores calls no explicit rule matched;
+        # a score >= judge_threshold escalates to the confirm flow. The verdict
+        # is recorded in shield_events either way -- auditable intelligence.
+        self.judge = judge
+        self.judge_threshold = judge_threshold
+        # Trust ratchet: after `trust_after` consecutive operator approvals a
+        # tool's confirms auto-approve (via="ratchet"); any deny demotes it.
+        self.trust = trust  # a TrustLedger
+        self.trust_after = trust_after
         self.pending: dict[str, PendingApproval] = {}
         self.lock = threading.Lock()
 
@@ -107,11 +131,12 @@ class Shield:
     def classify(self, name: str, tool_input) -> "tuple[str, str]":
         """First matching action wins, checked deny > allow > confirm."""
         sig = _signature(name, tool_input)
+        norm = _normalize(sig)
         for patterns, action in ((self.deny, DENY), (self.allow, ALLOW), (self.confirm, CONFIRM)):
             for p in patterns:
-                if fnmatch(name, p) or fnmatch(sig, p):
+                if fnmatch(name, p) or fnmatch(sig, p) or fnmatch(norm, p):
                     return action, p
-        return ALLOW, ""
+        return self.default, ""
 
     # -- approval inbox ----------------------------------------------------
 
@@ -150,7 +175,7 @@ class Shield:
         except OSError:
             pass  # the inbox is best-effort; the console + control endpoint remain
 
-    def _await_approval(self, name: str, tool_input, rule: str) -> "tuple[bool, str]":
+    def _await_approval(self, name: str, tool_input, rule: str) -> "tuple[bool, str, str]":
         """File a pending approval and block until decided or timed out."""
         p = PendingApproval(id=uuid.uuid4().hex[:6], tool=name, input=tool_input, rule=rule)
         with self.lock:
@@ -166,8 +191,8 @@ class Shield:
         with self.lock:
             self.pending.pop(p.id, None)
         if not decided:
-            return False, "timeout"
-        return p.decision == "approve", "operator"
+            return False, "timeout", p.id
+        return p.decision == "approve", "operator", p.id
 
     # -- screening ---------------------------------------------------------
 
@@ -182,11 +207,64 @@ class Shield:
         action, rule = self.classify(name, tool_input)
         base = {"ts": time.time(), "tool": name, "input": tool_input, "rule": rule}
         if action == DENY:
-            return False, {**base, "action": "deny", "via": "rule"}
+            return False, {**base, "action": "deny", "via": "rule" if rule else "default"}
         if action == CONFIRM:
-            approved, via = self._await_approval(name, tool_input, rule)
-            return approved, {**base, "action": "approve" if approved else "deny", "via": via}
+            return self._confirm_flow(name, tool_input, rule or "(shield default: confirm)", base)
+        if not rule and self.judge is not None:
+            # No explicit rule matched: let the judge model risk-score it.
+            # Explicit allow rules bypass the judge on purpose.
+            risk, reason, ok = self._assess_risk(name, tool_input)
+            base = {**base, "judge_risk": risk, "judge_reason": reason}
+            if not ok:
+                return True, {**base, "action": "allow", "via": "judge-error"}  # fail-open
+            if risk >= self.judge_threshold:
+                return self._confirm_flow(
+                    name, tool_input, f"judge({risk:.2f}): {reason}", base
+                )
+            return True, {**base, "action": "allow", "via": "judge"}
         return True, None
+
+    def _confirm_flow(self, name: str, tool_input, rule: str, base: dict) -> "tuple[bool, dict]":
+        """The confirm path: ratchet short-circuit, else wait for the operator."""
+        if self.trust is not None and 0 < self.trust_after <= self.trust.streak(name):
+            return True, {
+                **base, "action": "approve", "via": "ratchet", "streak": self.trust.streak(name)
+            }
+        approved, via, pid = self._await_approval(name, tool_input, rule)
+        if self.trust is not None and via == "operator":
+            # Only explicit human decisions move the ratchet; timeouts don't.
+            self.trust.record(name, approved, {"id": pid, "ts": base["ts"], "rule": rule})
+        return approved, {
+            **base, "id": pid, "action": "approve" if approved else "deny", "via": via
+        }
+
+    def _assess_risk(self, name: str, tool_input) -> "tuple[float, str, bool]":
+        """Ask the judge model for a 0..1 risk score. Fail-open on any trouble."""
+        judge = self.judge
+        if isinstance(judge, str):
+            from .providers import AnthropicProvider
+
+            judge = self.judge = AnthropicProvider(judge)
+        system = (
+            "You are a security reviewer for AI-agent tool calls. You will see ONE "
+            "proposed call as name({json arguments}). Reply with ONLY a JSON object "
+            '{"risk": <number 0..1>, "reason": "<one short sentence>"}. '
+            "High risk (>=0.7): destructive or irreversible actions (deleting or "
+            "overwriting data, force-pushes), reading or exfiltrating credentials "
+            "and secrets, piping downloads into a shell, sending data to unknown "
+            "hosts, privilege changes. Low risk (<0.3): read-only inspection of "
+            "ordinary project files, listing, searching, building, running tests."
+        )
+        try:
+            resp = judge.complete(
+                system, [{"role": "user", "content": _signature(name, tool_input)}], []
+            )
+            match = re.search(r"\{.*\}", getattr(resp, "text", "") or "", re.S)
+            data = json.loads(match.group(0))
+            risk = min(1.0, max(0.0, float(data["risk"])))
+            return risk, str(data.get("reason", ""))[:200], True
+        except Exception:
+            return 0.0, "judge unavailable", False
 
     def _screen_anthropic(self, response: dict) -> "tuple[dict, list[dict]]":
         events: list[dict] = []
@@ -249,6 +327,54 @@ def _reason(event: "dict | None") -> str:
     via = (event or {}).get("via", "rule")
     if via == "rule":
         return f"matched deny rule '{(event or {}).get('rule', '')}'."
+    if via == "default":
+        return "no rule matched and this shield denies by default."
     if via == "timeout":
         return "approval timed out."
     return "denied by the operator."
+
+
+class TrustLedger:
+    """Consecutive-approval streaks per tool -- the evidence for the ratchet.
+
+    Every entry links to the pending-approval ids that earned the trust, so a
+    promotion is always auditable ("Bash was auto-allowed because you approved
+    it 5 times: a3f2c1, 9b1e77, ..."). One explicit operator DENY demotes the
+    tool and clears the streak; ``loom trust --demote <tool>`` does it by hand.
+    """
+
+    def __init__(self, path: str):
+        self.path = path
+        try:
+            with open(path) as f:
+                self.data: dict = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            self.data = {}
+
+    def streak(self, tool: str) -> int:
+        return self.data.get(tool, {}).get("streak", 0)
+
+    def record(self, tool: str, approved: bool, evidence: dict) -> None:
+        entry = self.data.setdefault(tool, {"streak": 0, "evidence": []})
+        if approved:
+            entry["streak"] += 1
+            entry["evidence"].append(evidence)
+        else:
+            entry["streak"] = 0
+            entry["evidence"] = []
+            entry["demoted_at"] = time.time()
+        self._save()
+
+    def demote(self, tool: str) -> bool:
+        if tool not in self.data:
+            return False
+        self.data[tool] = {"streak": 0, "evidence": [], "demoted_at": time.time()}
+        self._save()
+        return True
+
+    def _save(self) -> None:
+        parent = os.path.dirname(self.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(self.path, "w") as f:
+            json.dump(self.data, f, indent=2)

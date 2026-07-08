@@ -221,11 +221,11 @@ def _serve(server):
     return server
 
 
-def _post(port, payload, path="/v1/messages", raw=False):
+def _post(port, payload, path="/v1/messages", raw=False, headers=None):
     req = urllib.request.Request(
         f"http://127.0.0.1:{port}{path}",
         data=json.dumps(payload).encode(),
-        headers={"content-type": "application/json", "x-api-key": "sk-test"},
+        headers={"content-type": "application/json", "x-api-key": "sk-test", **(headers or {})},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=10) as r:
@@ -294,18 +294,21 @@ def test_proxy_control_endpoints_drive_a_confirm(tmp_path):
     t = threading.Thread(target=client)
     t.start()
 
+    token = {"x-loom-token": proxy.control_token}
     pending = []
     deadline = time.time() + 5
     while not pending and time.time() < deadline:
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{proxy.port}/loom/shield/pending", timeout=5
-        ) as r:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.port}/loom/shield/pending", headers=token
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
             pending = json.load(r)["pending"]
         time.sleep(0.02)
     assert pending and pending[0]["tool"] == "Bash"
 
     approved = _post(
-        proxy.port, {"id": pending[0]["id"], "decision": "approve"}, path="/loom/shield/decide"
+        proxy.port, {"id": pending[0]["id"], "decision": "approve"},
+        path="/loom/shield/decide", headers=token,
     )
     assert approved == {"ok": True}
     t.join(timeout=5)
@@ -318,6 +321,160 @@ def test_proxy_control_endpoints_drive_a_confirm(tmp_path):
     assert data["shield_events"][0] == {
         **data["shield_events"][0], "action": "approve", "via": "operator", "tool": "Bash",
     }
+
+
+# ------------------------------------------------- default action / matching
+
+
+def test_default_deny_blocks_unmatched_calls():
+    s = Shield(allow=["get_weather*"], default=DENY)
+    assert s.classify("get_weather", {"city": "x"})[0] == ALLOW
+    assert s.classify("Bash", {"command": "ls"}) == (DENY, "")
+    out, events = s.screen(LIST_FILES)
+    assert not any(b["type"] == "tool_use" for b in out["content"])
+    assert events[0] == {**events[0], "action": "deny", "via": "default"}
+    assert "denies by default" in out["content"][0]["text"]
+
+
+def test_default_confirm_holds_unmatched_calls():
+    out, events = Shield(default=CONFIRM, timeout=0.05).screen(LIST_FILES)
+    assert events[0] == {**events[0], "action": "deny", "via": "timeout"}
+
+
+def test_invalid_default_is_rejected():
+    import pytest
+
+    with pytest.raises(ValueError):
+        Shield(default="block")
+
+
+def test_signature_matching_ignores_whitespace_runs():
+    s = Shield(deny=["Bash(*rm -rf*)"])
+    assert s.classify("Bash", {"command": "rm   -rf /"})[0] == DENY
+
+
+# -------------------------------------------------------------- LLM as judge
+
+
+class _FakeJudge:
+    """A judge provider: returns scripted texts, counts how often it's asked."""
+
+    def __init__(self, *texts):
+        self.texts = list(texts)
+        self.calls = 0
+
+    def complete(self, system, messages, tools):
+        self.calls += 1
+
+        class R:
+            text = self.texts.pop(0)
+
+        return R()
+
+
+def test_judge_escalates_risky_unmatched_calls_to_confirm():
+    judge = _FakeJudge('{"risk": 0.9, "reason": "reads credentials"}')
+    s = Shield(judge=judge, timeout=0.05)
+    out, events = s.screen(READ_ENV)
+    assert not any(b["type"] == "tool_use" for b in out["content"])
+    assert events[0]["judge_risk"] == 0.9
+    assert events[0]["judge_reason"] == "reads credentials"
+    assert events[0] == {**events[0], "action": "deny", "via": "timeout"}
+
+
+def test_judge_allows_low_risk_calls_with_an_audit_event():
+    judge = _FakeJudge('{"risk": 0.1, "reason": "read-only listing"}')
+    out, events = Shield(judge=judge).screen(LIST_FILES)
+    assert out == LIST_FILES
+    assert events[0] == {**events[0], "action": "allow", "via": "judge", "judge_risk": 0.1}
+
+
+def test_judge_fails_open_on_junk():
+    out, events = Shield(judge=_FakeJudge("I cannot answer that")).screen(LIST_FILES)
+    assert out == LIST_FILES
+    assert events[0]["via"] == "judge-error"
+
+
+def test_explicit_rules_bypass_the_judge():
+    judge = _FakeJudge()
+    s = Shield(deny=["Read(*.env*)"], allow=["Bash*"], judge=judge)
+    s.screen(READ_ENV)
+    s.screen(LIST_FILES)
+    assert judge.calls == 0
+
+
+# --------------------------------------------------------------- trust ratchet
+
+
+def _ledger(tmp_path):
+    from loom.shield import TrustLedger
+
+    return TrustLedger(str(tmp_path / "trust.json"))
+
+
+def test_trust_ledger_streaks_persist_and_deny_demotes(tmp_path):
+    from loom.shield import TrustLedger
+
+    ledger = _ledger(tmp_path)
+    ledger.record("Bash", True, {"id": "a1"})
+    ledger.record("Bash", True, {"id": "b2"})
+    assert ledger.streak("Bash") == 2
+    reloaded = TrustLedger(ledger.path)  # survives a restart
+    assert reloaded.streak("Bash") == 2
+    assert [e["id"] for e in reloaded.data["Bash"]["evidence"]] == ["a1", "b2"]
+
+    reloaded.record("Bash", False, {"id": "c3"})  # one deny resets the streak
+    assert reloaded.streak("Bash") == 0
+
+    assert reloaded.demote("Bash") is True
+    assert reloaded.demote("NeverSeen") is False
+
+
+def test_ratchet_auto_approves_after_enough_operator_approvals(tmp_path):
+    ledger = _ledger(tmp_path)
+    s = Shield(confirm=["Bash*"], trust=ledger, trust_after=2, timeout=5)
+
+    for _ in range(2):  # two human approvals build the streak
+        t = threading.Thread(target=_approve_first_pending, args=(s,))
+        t.start()
+        out, events = s.screen(LIST_FILES)
+        t.join()
+        assert events[0]["via"] == "operator"
+
+    # third time: no human needed, the ratchet approves with evidence
+    out, events = s.screen(LIST_FILES)
+    assert out == LIST_FILES
+    assert events[0] == {**events[0], "action": "approve", "via": "ratchet", "streak": 2}
+    assert s.pending_list() == []
+
+
+def _approve_first_pending(s):
+    while not s.pending_list():
+        time.sleep(0.01)
+    s.decide_pending(s.pending_list()[0]["id"], approve=True)
+
+
+def test_timeouts_do_not_move_the_ratchet(tmp_path):
+    ledger = _ledger(tmp_path)
+    Shield(confirm=["Bash*"], trust=ledger, trust_after=3, timeout=0.05).screen(LIST_FILES)
+    assert ledger.streak("Bash") == 0
+
+
+def test_operator_deny_demotes_the_tool(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.record("Bash", True, {"id": "x"})
+    s = Shield(confirm=["Bash*"], trust=ledger, trust_after=5, timeout=5)
+
+    def deny_first():
+        while not s.pending_list():
+            time.sleep(0.01)
+        s.decide_pending(s.pending_list()[0]["id"], approve=False)
+
+    t = threading.Thread(target=deny_first)
+    t.start()
+    s.screen(LIST_FILES)
+    t.join()
+    assert ledger.streak("Bash") == 0
 
 
 def test_control_endpoints_404_without_shield(tmp_path):

@@ -12,12 +12,21 @@ worked (and what failed) last time.
 
 Recall is nondeterminism (the store changes over time), so it is recorded as a
 ``"memory"`` effect -- replays reproduce exactly what was recalled at the time.
+
+Recall quality: the default is word-overlap (jaccard) -- zero dependencies,
+fine for small stores. Pass an ``embedder`` (any callable mapping a list of
+strings to a list of vectors) for semantic recall; ``OpenAIEmbedder`` wraps
+the ``[openai]`` extra, and vectors are cached next to the traces so each one
+is embedded once:
+
+    memory = TraceMemory("runs/", embedder=OpenAIEmbedder())
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from glob import glob
@@ -29,15 +38,38 @@ def _words(text: str) -> set[str]:
     return {w.lower() for w in _WORD.findall(text)}
 
 
+def _cosine(a: "list[float]", b: "list[float]") -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a)) or 1.0
+    nb = math.sqrt(sum(y * y for y in b)) or 1.0
+    return dot / (na * nb)
+
+
+class OpenAIEmbedder:
+    """Embeddings via the ``[openai]`` extra (works with any base_url clone)."""
+
+    def __init__(self, model: str = "text-embedding-3-small", **client_kwargs):
+        from openai import OpenAI  # pip install "loom-harness[openai]"
+
+        self.model = model
+        self._client = OpenAI(**client_kwargs)
+
+    def __call__(self, texts: "list[str]") -> "list[list[float]]":
+        response = self._client.embeddings.create(model=self.model, input=texts)
+        return [item.embedding for item in response.data]
+
+
 class TraceMemory:
     """Similarity recall over a directory of saved traces."""
 
-    def __init__(self, directory: str, k: int = 3, auto_store: bool = False):
+    def __init__(self, directory: str, k: int = 3, auto_store: bool = False, embedder=None):
         self.directory = directory
         self.k = k
         self.auto_store = auto_store
+        self.embedder = embedder  # callable: list[str] -> list[list[float]]
         os.makedirs(directory, exist_ok=True)
         self._index: list[dict] = []
+        self._vectors: dict = {}  # text-hash -> vector, persisted per store
         self.refresh()
 
     def refresh(self) -> None:
@@ -69,8 +101,43 @@ class TraceMemory:
         self.refresh()
         return path
 
+    # -- similarity backends ------------------------------------------------
+
+    def _vector_cache_path(self) -> str:
+        return os.path.join(self.directory, ".loom-vectors.json")
+
+    def _embed(self, texts: "list[str]") -> "list[list[float]]":
+        """Embed with a per-store cache: each distinct text is embedded once."""
+        if not self._vectors:
+            try:
+                with open(self._vector_cache_path()) as f:
+                    self._vectors = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                self._vectors = {}
+        keys = [hashlib.sha256(t.encode()).hexdigest()[:16] for t in texts]
+        missing = [(k, t) for k, t in zip(keys, texts) if k not in self._vectors]
+        if missing:
+            for (k, _), vec in zip(missing, self.embedder([t for _, t in missing])):
+                self._vectors[k] = vec
+            with open(self._vector_cache_path(), "w") as f:
+                json.dump(self._vectors, f)
+        return [self._vectors[k] for k in keys]
+
     def recall(self, query: str) -> list[dict]:
-        """Top-k most similar past runs, by word overlap with the query."""
+        """Top-k most similar past runs (cosine over embeddings when an
+        embedder is configured, word-overlap jaccard otherwise)."""
+        if not self._index:
+            return []
+        if self.embedder is not None:
+            texts = [" ".join(e["episodes"]) + " " + e["output"] for e in self._index]
+            vectors = self._embed(texts + [query])
+            query_vec, entry_vecs = vectors[-1], vectors[:-1]
+            scored = [
+                (_cosine(vec, query_vec), entry)
+                for vec, entry in zip(entry_vecs, self._index)
+            ]
+            scored.sort(key=lambda pair: -pair[0])
+            return [e for score, e in scored[: self.k] if score > 0]
         qw = _words(query)
         if not qw:
             return []

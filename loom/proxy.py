@@ -20,9 +20,12 @@ Stdlib only, like the rest of the kernel.
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .effect import EffectEntry, _key
@@ -197,6 +200,48 @@ class WireRecorder:
     def save(self, path: str) -> None:
         with open(path, "w") as f:
             json.dump(self.to_dict(), f, indent=2)
+
+
+def compact_wirelog(wirelog_path: str, save_path: str) -> "WireRecorder":
+    """Rebuild a full trace from an append-only wirelog (crash recovery).
+
+    The proxy appends one JSON line per exchange before answering the client;
+    if it dies before the periodic/final compaction, this turns what survived
+    into a normal ``.loom.json``. A torn final line (crash mid-write) is
+    ignored, like the journal's.
+    """
+    rec = WireRecorder()
+    with open(wirelog_path) as f:
+        for line in f:
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue  # torn tail
+            rec.shield_events.extend(entry.get("shield_events", []))
+            rec.record(entry["request"], entry["response"])
+    rec.save(save_path)
+    return rec
+
+
+def _runtime_dir() -> str:
+    """Per-user runtime state (control tokens): ``~/.loom/proxies``.
+
+    ``LOOM_RUNTIME_DIR`` overrides it (tests point this at a tmp dir).
+    """
+    path = os.environ.get("LOOM_RUNTIME_DIR") or os.path.join(
+        os.path.expanduser("~"), ".loom", "proxies"
+    )
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def control_token_for(port: int) -> "str | None":
+    """Read the control token a running shielded proxy registered for its port."""
+    try:
+        with open(os.path.join(_runtime_dir(), f"{port}.token")) as f:
+            return f.read().strip() or None
+    except OSError:
+        return None
 
 
 def reconstruct_sse(raw: str) -> dict:
@@ -377,14 +422,27 @@ class ProxyServer(ThreadingHTTPServer):
 
     def __init__(self, port: int = 8788, target: str = DEFAULT_TARGET,
                  save_path: "str | None" = None, replay_path: "str | None" = None,
-                 shield=None):
+                 shield=None, scrub: bool = False,
+                 save_interval: float = 5.0, eager_saves: int = 20):
         self.target = target.rstrip("/")
         self.save_path = save_path
         self.shield = shield  # loom.shield.Shield, screens tool calls in responses
+        self.scrub = scrub  # redact secrets at the persist boundary (storage only)
         self.recorder = WireRecorder()
         self.lock = threading.Lock()
         self.replay_wire: "list[dict] | None" = None
         self.replay_index = 0
+        # Persistence: every exchange is APPENDED to <save>.wirelog (flushed)
+        # before the client gets its answer -- O(1), crash-safe. The readable
+        # trace is written through for the first `eager_saves` exchanges (small
+        # sessions stay instantly inspectable), then at most every
+        # `save_interval` seconds, and finally on finalize(). Rewriting the
+        # whole JSON per exchange was O(n^2) and sat on the critical path.
+        self.save_interval = save_interval
+        self.eager_saves = eager_saves
+        self._wirelog = None
+        self._last_save = 0.0
+        self._finalized = False
         if replay_path:
             with open(replay_path) as f:
                 data = json.load(f)
@@ -392,10 +450,70 @@ class ProxyServer(ThreadingHTTPServer):
                 raise ValueError(f"{replay_path} has no wire responses (not a proxy trace)")
             self.replay_wire = data["wire"]
         super().__init__(("127.0.0.1", port), _Handler)
+        self.control_token: "str | None" = None
+        if shield is not None and replay_path is None:
+            # Without a token, any local process -- including a webpage's JS
+            # doing fetch() against 127.0.0.1, or the shielded agent itself --
+            # could approve its own pending tool calls. The token lives in a
+            # user-only file; `loom approve` picks it up automatically.
+            self.control_token = uuid.uuid4().hex
+            self._token_path = os.path.join(_runtime_dir(), f"{self.port}.token")
+            fd = os.open(self._token_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                f.write(self.control_token)
 
     @property
     def port(self) -> int:
         return self.server_address[1]
+
+    def persist(self, request: dict, response: dict, events: "list[dict]") -> None:
+        """Store one exchange durably BEFORE the client sees the response."""
+        if self.scrub:
+            from .scrub import scrub_obj
+
+            request, _ = scrub_obj(request)
+            response, _ = scrub_obj(response)
+            events, _ = scrub_obj(events)
+        with self.lock:
+            self.recorder.shield_events.extend(events)
+            self.recorder.record(request, response)
+            if not self.save_path:
+                return
+            if self._wirelog is None:
+                self._wirelog = open(self.save_path + ".wirelog", "a")
+            self._wirelog.write(
+                json.dumps({"request": request, "response": response, "shield_events": events})
+                + "\n"
+            )
+            self._wirelog.flush()
+            now = time.time()
+            if len(self.recorder.wire) <= self.eager_saves or now - self._last_save >= self.save_interval:
+                self.recorder.save(self.save_path)
+                self._last_save = now
+
+    def finalize(self) -> None:
+        """Write the final trace and clean up runtime files. Idempotent."""
+        with self.lock:
+            if self._finalized:
+                return
+            self._finalized = True
+            if self.save_path and self.recorder.wire:
+                self.recorder.save(self.save_path)
+            if self._wirelog is not None:
+                self._wirelog.close()
+                try:
+                    os.remove(self.save_path + ".wirelog")
+                except OSError:
+                    pass
+            if self.control_token:
+                try:
+                    os.remove(self._token_path)
+                except OSError:
+                    pass
+
+    def server_close(self) -> None:
+        super().server_close()
+        self.finalize()
 
     def server_bind(self) -> None:
         # HTTPServer.server_bind calls socket.getfqdn(), which can stall for
@@ -412,6 +530,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *args) -> None:  # silence per-request stderr noise
         pass
+
+    def _control_authorized(self) -> bool:
+        token = self.server.control_token
+        return bool(token) and self.headers.get("x-loom-token", "") == token
 
     def _send_json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -438,6 +560,8 @@ class _Handler(BaseHTTPRequestHandler):
             shield = self.server.shield
             if shield is None:
                 self._send_json(404, {"error": "no shield active on this proxy"})
+            elif not self._control_authorized():
+                self._send_json(403, {"error": "missing or wrong x-loom-token header"})
             elif shield.decide_pending(str(request.get("id", "")), request.get("decision") == "approve"):
                 self._send_json(200, {"ok": True})
             else:
@@ -509,20 +633,15 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 response = json.loads(upstream.read())
 
+        events: list = []
         if shield is not None:
             # May block awaiting a human decision on a confirm rule; the
             # client sees (and the trace records) only the screened response.
             response, events = shield.screen(response)
-            if events:
-                with self.server.lock:
-                    self.server.recorder.shield_events.extend(events)
 
-        # Record BEFORE answering: when the client sees the reply, the trace
-        # is already on disk (otherwise a fast client can read a torn file).
-        with self.server.lock:
-            self.server.recorder.record(request, response)
-            if self.server.save_path:
-                self.server.recorder.save(self.server.save_path)
+        # Persist BEFORE answering: when the client sees the reply, the
+        # exchange is already on disk (wirelog append + throttled trace write).
+        self.server.persist(request, response, events)
         if streamed and shield is not None:
             synth = synthesize_openai_sse if "choices" in response else synthesize_sse
             self._send_sse(synth(response))
@@ -535,6 +654,8 @@ class _Handler(BaseHTTPRequestHandler):
             shield = self.server.shield
             if shield is None:
                 self._send_json(404, {"error": "no shield active on this proxy"})
+            elif not self._control_authorized():
+                self._send_json(403, {"error": "missing or wrong x-loom-token header"})
             else:
                 self._send_json(200, {"pending": shield.pending_list()})
             return
