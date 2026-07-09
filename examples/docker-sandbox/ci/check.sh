@@ -8,6 +8,10 @@ code=0
 docker compose -f ci-compose.yml up \
     --abort-on-container-exit --exit-code-from agent || code=$?
 
+if [ "$code" -ne 0 ]; then
+    echo "--- proxy logs (for the postmortem):"
+    docker compose -f ci-compose.yml logs proxy || true
+fi
 docker compose -f ci-compose.yml down -v --remove-orphans > /dev/null 2>&1 || true
 [ "$code" -eq 0 ] || exit "$code"
 

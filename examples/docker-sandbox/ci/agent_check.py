@@ -32,15 +32,20 @@ for url in ("https://example.com", "http://fake-api:9000/v1/messages"):
         print(f"blocked as expected: {url}", flush=True)
 
 # 2. The sanctioned door must work (retry while the proxy pip-installs).
+# An HTTP status is an ANSWER, not "not up yet" -- fail fast with the body.
 deadline = time.time() + 120
 while True:
     try:
         got = post(BASE + "/v1/messages")
         break
+    except urllib.error.HTTPError as e:
+        print(f"proxy answered {e.code}: {e.read()[:300]!r}", flush=True)
+        sys.exit(1)
     except (urllib.error.URLError, OSError) as e:
         if time.time() > deadline:
             print(f"proxy never came up: {e}", flush=True)
             sys.exit(1)
+        print(f"waiting for proxy: {e}", flush=True)
         time.sleep(2)
 
 text = got["content"][0]["text"]
