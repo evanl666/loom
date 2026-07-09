@@ -238,11 +238,39 @@ def causality_tree(source: Any) -> str:
 
 # -- flakiness across repeated runs ---------------------------------------------
 
-def flakiness(traces: "list[dict]") -> dict:
-    """Where do repeated runs of the same task diverge?
+def _divergence_cause(a, b) -> str:
+    """WHY two runs first diverged at a step -- the flake's root-cause class."""
+    from .providers.base import ModelResponse
 
-    The first trace is the baseline; every other is diffed against it, and
-    the first-divergence steps make the heatmap. ``None`` = identical.
+    if a is None or b is None:
+        return "one run ended earlier"
+    if a.kind != b.kind:
+        return "control flow diverged (different action taken)"
+    if a.kind == "model":
+        ra, rb = ModelResponse.from_dict(a.result), ModelResponse.from_dict(b.result)
+        ta, tb = [c.name for c in ra.tool_calls], [c.name for c in rb.tool_calls]
+        if ta != tb:
+            return f"model chose different tools ({ta or 'none'} vs {tb or 'none'})"
+        if a.key != b.key:
+            return "model saw different context (an earlier step leaked in)"
+        return "model answered differently (sampling nondeterminism)"
+    # a tool step
+    err_a = isinstance(a.result, str) and a.result.startswith("ERROR")
+    err_b = isinstance(b.result, str) and b.result.startswith("ERROR")
+    if err_a != err_b:
+        return "a tool erred in some runs (flaky tool)"
+    if a.key != b.key:
+        return "tool called with different input"
+    return "tool returned different results (flaky tool/retrieval)"
+
+
+def flakiness(traces: "list[dict]") -> dict:
+    """Where do repeated runs of the same task diverge -- and WHY?
+
+    The first trace is the baseline; every other is diffed against it. Each
+    divergence carries a root-cause class (model sampling, different tool
+    chosen, flaky tool result, tool error, control flow) so the histogram
+    clusters by cause, not just position.
     """
     from collections import Counter
 
@@ -252,15 +280,27 @@ def flakiness(traces: "list[dict]") -> dict:
     if len(traces) < 2:
         raise ValueError("flakiness needs at least two traces of the same task")
     logs = [[EffectEntry.from_dict(e) for e in t.get("log", [])] for t in traces]
-    divergences = [diff_logs(logs[0], other).first_divergence for other in logs[1:]]
-    hist = Counter(divergences)
-    base_kinds = {e.seq: e.kind for e in logs[0]}
+    base = logs[0]
+    hist: Counter = Counter()
+    causes: dict = {}  # step -> Counter of causes
+    identical = 0
+    for other in logs[1:]:
+        step = diff_logs(base, other).first_divergence
+        if step is None:
+            identical += 1
+            continue
+        hist[step] += 1
+        a = base[step] if step < len(base) else None
+        b = other[step] if step < len(other) else None
+        causes.setdefault(step, Counter())[_divergence_cause(a, b)] += 1
+    base_kinds = {e.seq: e.kind for e in base}
     return {
         "runs": len(traces),
-        "identical": hist.pop(None, 0),
+        "identical": identical,
         "by_step": sorted(
             (step, n, base_kinds.get(step, "past-end")) for step, n in hist.items()
         ),
+        "causes": {step: dict(c) for step, c in causes.items()},
     }
 
 
@@ -273,7 +313,17 @@ def describe_flakiness(f: dict) -> str:
         for step, n, kind in f["by_step"]:
             bar = "█" * max(1, int(24 * n / peak))
             lines.append(f"  step {step:>3} ({kind:<14}) {bar} {n}")
+            for cause, cn in sorted(f.get("causes", {}).get(step, {}).items(),
+                                    key=lambda kv: -kv[1]):
+                lines.append(f"        └ {cause} ×{cn}")
         worst = max(f["by_step"], key=lambda row: row[1])
         lines.append(f"flakiest step: {worst[0]} ({worst[2]}) -- "
                      f"{worst[1]}/{total} run(s) diverged there first")
+        agg: dict = {}
+        for c in f.get("causes", {}).values():
+            for cause, n in c.items():
+                agg[cause] = agg.get(cause, 0) + n
+        if agg:
+            cause, n = max(agg.items(), key=lambda kv: kv[1])
+            lines.append(f"dominant cause: {cause} ({n}/{total} run(s))")
     return "\n".join(lines)

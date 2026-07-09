@@ -234,3 +234,22 @@ def test_evidence_coverage_and_gate(tmp_path, capsys):
     capsys.readouterr()
     assert main(["provenance", path, "--gate", "--min-coverage", "0.5"]) == 0
     assert "evidence coverage: 1/2" in capsys.readouterr().out
+
+
+def test_flakiness_clusters_causes():
+    import json as _json
+
+    base = _support_run().to_dict()
+    # variant A: the model answers differently at step 4 (same key = sampling)
+    va = _json.loads(_json.dumps(base))
+    va["log"][4]["result"]["text"] = "a different final answer"
+    # variant B: the tool at step 3 returns something else (flaky tool)
+    vb = _json.loads(_json.dumps(base))
+    vb["log"][3]["result"] = "refund FAILED try again"
+    f = flakiness([base, va, vb])
+    assert f["identical"] == 0
+    causes = {c for step in f["causes"].values() for c in step}
+    assert any("sampling nondeterminism" in c for c in causes)
+    assert any("flaky tool" in c for c in causes)
+    text = describe_flakiness(f)
+    assert "└" in text and "dominant cause:" in text
