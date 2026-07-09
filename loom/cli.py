@@ -158,8 +158,8 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 
 def _build_shield(args: argparse.Namespace):
-    """Turn --deny/--confirm/--allow/--judge flags into a Shield (or None)."""
-    if not (args.deny or args.confirm or args.allow or args.judge
+    """Turn --deny/--confirm/--allow/--judge/--rule flags into a Shield (or None)."""
+    if not (args.deny or args.confirm or args.allow or args.judge or args.rule
             or args.shield_default != "allow"):
         return None
     from .shield import Shield, TrustLedger
@@ -183,6 +183,7 @@ def _build_shield(args: argparse.Namespace):
         judge_threshold=args.judge_threshold,
         trust=trust,
         trust_after=args.trust_after,
+        sequence=args.rule or [],
     )
 
 
@@ -204,6 +205,8 @@ def _print_shield_rules(shield) -> None:
     for action, patterns in (("deny", shield.deny), ("confirm", shield.confirm), ("allow", shield.allow)):
         for pat in patterns:
             print(f"  shield {action:7s} {pat}", file=sys.stderr)
+    for rule in shield.sequence:
+        print(f"  shield rule    {rule.raw}", file=sys.stderr)
 
 
 def _recover_wirelog(save: str) -> None:
@@ -676,6 +679,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hold matching tool calls for approval (loom approve <id>)")
         sp.add_argument("--allow", action="append", default=[], metavar="PATTERN",
                         help="bypass confirm for matching tool calls")
+        sp.add_argument("--rule", action="append", default=[], metavar="RULE",
+                        help="sequence rule, e.g. 'after Read(*.env*): deny WebFetch*, "
+                             "deny Bash(*curl*)' or 'taint sk-ant-*: confirm *' (repeatable)")
         sp.add_argument("--confirm-timeout", type=float, default=300.0,
                         help="seconds to wait for approval before denying (default 300)")
         sp.add_argument("--webhook", default="",

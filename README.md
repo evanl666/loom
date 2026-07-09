@@ -141,6 +141,49 @@ loom record --confirm 'Bash*' --trust-after 5 -- ...
 The judge's verdict lands in `shield_events` whether it escalates or not, so
 even "the AI said it was fine" is on the record. Autonomy you can audit.
 
+### Sequence rules: incidents are sequences, not calls
+
+Reading `.env` is fine. Posting to the network is fine. Reading `.env` *and
+then* posting to the network is how keys get exfiltrated. Static per-call
+rules can't say that — sequence rules can:
+
+```
+# once it reads secrets, it loses network access (for the rest of the run)
+loom record --rule 'after Read(*.env*): deny WebFetch*, deny Bash(*curl*)' -- ...
+
+# once any tool RESULT contains a key shape, everything needs approval
+loom record --rule 'taint sk-ant-*: confirm *' -- ...
+```
+
+`after <call-pattern>:` arms when a matching call is allowed through — even
+mid-batch, so a response carrying `Read(.env)` + `WebFetch` together still has
+its fetch blocked. `taint <text-pattern>:` arms when a tool result matches
+(results ride the next request, which the proxy also sees). A tripped rule's
+denies **beat static allows**, its confirms never auto-approve via the trust
+ratchet, and both the arming event and every consequence land in
+`shield_events` with the rule that tripped, so the audit trail explains
+itself.
+
+### What Shield can and cannot protect you from
+
+Honest threat model, because a firewall that oversells is worse than none:
+
+**Can:** block or gate any *tool call* before the agent executes it — the
+calls ride in model responses, the proxy rewrites them out, the agent never
+sees them. Cut off classes of action after a tripwire (sequence rules). Keep
+an audit trail that replays. This is **blast-radius reduction** for agents
+you run with permissions skipped: it turns "oops" into a logged non-event.
+
+**Cannot:** stop a model from writing secrets *into its reply text* — that
+channel doesn't pass through a tool call (`--scrub` redacts stored traces,
+but the live response reaches the client). Can't see tools that never touch
+the API wire (local function calls in a framework you didn't proxy — though
+tool *calls* still ride responses, their *execution* is the client's). Can't
+out-think a deliberately adversarial model with rules alone — that's what
+`confirm`, the judge, and a human in the loop are for. If your agent handles
+payments or deletes production data, Shield is a layer, not a substitute for
+idempotency keys, RBAC, and sandboxes.
+
 ## Share traces, not secrets
 
 Traces record everything the agent saw — which can include the API key it

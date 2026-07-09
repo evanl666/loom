@@ -26,6 +26,20 @@ means deny: the safe default. Every decision lands in the trace under
 ``shield_events``, and the blocked-call notice is part of the recorded model
 response -- the audit trail replays like everything else.
 
+**Sequence rules** constrain runs, not just single calls -- real incidents are
+sequences ("it read the .env, THEN posted somewhere"):
+
+    loom record --rule 'after Read(*.env*): deny WebFetch*, deny Bash(*curl*)' -- ...
+    loom record --rule 'taint sk-ant-*: confirm *' -- ...
+
+``after <call-pattern>:`` arms when a matching tool call is allowed through;
+``taint <text-pattern>:`` arms when any tool RESULT matches (the proxy sees
+results in the next request). Once armed, the consequences (``deny <pattern>``
+/ ``confirm <pattern>``, comma-separated) apply to every later call in the
+session -- and a sequence deny beats a static allow, because "this run touched
+secrets" outranks "reads are generally fine". Sequence confirms never
+auto-approve via the trust ratchet: a tripped tripwire always gets a human.
+
 Stdlib only, like the rest of the kernel.
 """
 
@@ -67,6 +81,58 @@ def _blocked_text(name: str, tool_input, reason: str) -> str:
 
 
 @dataclass
+class SequenceRule:
+    """A temporal tripwire: once ``trigger`` fires, ``consequences`` apply.
+
+    ``after`` triggers on an allowed tool CALL matching the pattern; ``taint``
+    triggers on a tool RESULT whose text matches. Consequences are
+    ``(action, call-pattern)`` pairs applied to every subsequent call.
+    """
+
+    trigger_type: str  # "after" | "taint"
+    trigger: str
+    consequences: "list[tuple[str, str]]"
+    raw: str
+    triggered: bool = False
+    evidence: str = ""
+
+
+def parse_sequence_rule(raw: str) -> SequenceRule:
+    """Parse ``'after Read(*.env*): deny WebFetch*, confirm Bash*'``."""
+    head, sep, tail = raw.partition(":")
+    head = head.strip()
+    for trigger_type in ("after", "taint"):
+        if head.startswith(trigger_type + " "):
+            trigger = head[len(trigger_type) + 1 :].strip()
+            break
+    else:
+        raise ValueError(
+            f"sequence rule must start with 'after <pattern>:' or 'taint <pattern>:', got {raw!r}"
+        )
+    if not sep or not trigger:
+        raise ValueError(f"sequence rule needs '<trigger>: <consequences>', got {raw!r}")
+    consequences = []
+    for part in tail.split(","):
+        action, _, pattern = part.strip().partition(" ")
+        if action not in (DENY, CONFIRM) or not pattern.strip():
+            raise ValueError(
+                f"consequence must be 'deny <pattern>' or 'confirm <pattern>', got {part.strip()!r}"
+            )
+        consequences.append((action, pattern.strip()))
+    return SequenceRule(trigger_type, trigger, consequences, raw)
+
+
+def _call_matches(pattern: str, name: str, tool_input) -> bool:
+    sig = _signature(name, tool_input)
+    return fnmatch(name, pattern) or fnmatch(sig, pattern) or fnmatch(_normalize(sig), pattern)
+
+
+def _text_matches(text: str, pattern: str) -> bool:
+    """Taint patterns are SEARCHED in the text: 'sk-ant-*' hits anywhere."""
+    return fnmatch(_normalize(text), f"*{pattern}*")
+
+
+@dataclass
 class PendingApproval:
     """A confirm-rule hit waiting for a human decision."""
 
@@ -104,6 +170,7 @@ class Shield:
         judge_threshold: float = 0.7,
         trust=None,
         trust_after: int = 0,
+        sequence: "list[str] | tuple" = (),
     ):
         if default not in (ALLOW, CONFIRM, DENY):
             raise ValueError(f"default must be allow/confirm/deny, not {default!r}")
@@ -123,6 +190,10 @@ class Shield:
         # tool's confirms auto-approve (via="ratchet"); any deny demotes it.
         self.trust = trust  # a TrustLedger
         self.trust_after = trust_after
+        # Temporal tripwires; state is per-Shield, i.e. per proxy session.
+        self.sequence = [
+            r if isinstance(r, SequenceRule) else parse_sequence_rule(r) for r in sequence
+        ]
         self.pending: dict[str, PendingApproval] = {}
         self.lock = threading.Lock()
 
@@ -204,6 +275,17 @@ class Shield:
 
     def _judge(self, name: str, tool_input) -> "tuple[bool, dict | None]":
         """Decide one tool call. Returns (allowed, event-or-None)."""
+        allowed, event = self._decide(name, tool_input)
+        if allowed:
+            self._arm_after_rules(name, tool_input)
+        return allowed, event
+
+    def _decide(self, name: str, tool_input) -> "tuple[bool, dict | None]":
+        # Tripped sequence rules come first: "this run touched secrets" beats
+        # any static allow. Denies before confirms across all tripped rules.
+        gate = self._sequence_gate(name, tool_input)
+        if gate is not None:
+            return gate
         action, rule = self.classify(name, tool_input)
         base = {"ts": time.time(), "tool": name, "input": tool_input, "rule": rule}
         if action == DENY:
@@ -223,6 +305,72 @@ class Shield:
                 )
             return True, {**base, "action": "allow", "via": "judge"}
         return True, None
+
+    # -- sequence rules ------------------------------------------------------
+
+    def _sequence_gate(self, name: str, tool_input) -> "tuple[bool, dict] | None":
+        """Consequences of tripped sequence rules, or None if none apply."""
+        with self.lock:
+            tripped = [r for r in self.sequence if r.triggered]
+        confirm_rule = None
+        for r in tripped:
+            for action, pattern in r.consequences:
+                if not _call_matches(pattern, name, tool_input):
+                    continue
+                label = f"{r.raw} (tripped by {r.evidence})"
+                if action == DENY:
+                    return False, {
+                        "ts": time.time(), "tool": name, "input": tool_input,
+                        "rule": label, "action": "deny", "via": "sequence",
+                    }
+                confirm_rule = confirm_rule or label
+        if confirm_rule is None:
+            return None
+        # A tripped tripwire always gets a human: no trust-ratchet shortcut.
+        base = {"ts": time.time(), "tool": name, "input": tool_input, "rule": confirm_rule}
+        approved, via, pid = self._await_approval(name, tool_input, confirm_rule)
+        return approved, {
+            **base, "id": pid, "action": "approve" if approved else "deny",
+            "via": via if via != "operator" else "sequence-operator",
+        }
+
+    def _arm_after_rules(self, name: str, tool_input) -> None:
+        """An allowed call arms every 'after' rule it matches."""
+        with self.lock:
+            for r in self.sequence:
+                if r.trigger_type == "after" and not r.triggered and _call_matches(
+                    r.trigger, name, tool_input
+                ):
+                    r.triggered = True
+                    r.evidence = _signature(name, tool_input)[:200]
+
+    def observe_request(self, request: dict) -> "list[dict]":
+        """Scan a request's tool RESULTS for taint triggers (both dialects).
+
+        The proxy calls this before forwarding: results of the last round's
+        tool calls ride in the next request, which is the earliest the wire
+        can know what a tool returned. Arming is recorded once per rule.
+        """
+        with self.lock:
+            watching = [
+                r for r in self.sequence if r.trigger_type == "taint" and not r.triggered
+            ]
+        if not watching:
+            return []
+        events = []
+        texts = _tool_result_texts(request)
+        with self.lock:
+            for r in watching:
+                for text in texts:
+                    if _text_matches(text, r.trigger):
+                        r.triggered = True
+                        r.evidence = f"a tool result matching {r.trigger!r}"
+                        events.append(
+                            {"ts": time.time(), "action": "tainted", "via": "sequence",
+                             "rule": r.raw}
+                        )
+                        break
+        return events
 
     def _confirm_flow(self, name: str, tool_input, rule: str, base: dict) -> "tuple[bool, dict]":
         """The confirm path: ratchet short-circuit, else wait for the operator."""
@@ -323,10 +471,36 @@ class Shield:
         return {**response, "choices": [new_choice] + choices[1:]}, events
 
 
+def _tool_result_texts(request: dict) -> "list[str]":
+    """Every tool-result string in a request body, Anthropic or OpenAI shaped."""
+    texts: list[str] = []
+    for message in request.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content")
+        if message.get("role") == "tool" and isinstance(content, str):
+            texts.append(content)  # OpenAI dialect
+        if not isinstance(content, list):
+            continue
+        for block in content:  # Anthropic dialect
+            if isinstance(block, dict) and block.get("type") == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, str):
+                    texts.append(inner)
+                elif isinstance(inner, list):
+                    texts.extend(
+                        b.get("text", "") for b in inner
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+    return texts
+
+
 def _reason(event: "dict | None") -> str:
     via = (event or {}).get("via", "rule")
     if via == "rule":
         return f"matched deny rule '{(event or {}).get('rule', '')}'."
+    if via == "sequence":
+        return f"blocked by sequence rule '{(event or {}).get('rule', '')}'."
     if via == "default":
         return "no rule matched and this shield denies by default."
     if via == "timeout":

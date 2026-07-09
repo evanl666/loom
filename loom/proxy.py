@@ -582,6 +582,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, response)
             return
 
+        # Taint tripwires: results of the last round's tool calls ride in this
+        # request -- the earliest moment the wire can see what a tool returned.
+        taint_events = (
+            self.server.shield.observe_request(request)
+            if self.server.shield is not None
+            else []
+        )
+
         headers = {k: v for k, v in self.headers.items() if k.lower() in _FORWARD_HEADERS}
         headers["content-type"] = "application/json"
         upstream_req = urllib.request.Request(
@@ -633,11 +641,12 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 response = json.loads(upstream.read())
 
-        events: list = []
+        events: list = list(taint_events)
         if shield is not None:
             # May block awaiting a human decision on a confirm rule; the
             # client sees (and the trace records) only the screened response.
-            response, events = shield.screen(response)
+            response, screen_events = shield.screen(response)
+            events.extend(screen_events)
 
         # Persist BEFORE answering: when the client sees the reply, the
         # exchange is already on disk (wirelog append + throttled trace write).
