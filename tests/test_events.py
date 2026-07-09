@@ -78,3 +78,43 @@ def test_cli_export_jsonl(tmp_path, capsys):
     # a directory corpus streams too
     assert main(["export", str(tmp_path), "--jsonl", "-"]) == 0
     assert '"kind": "shield"' in capsys.readouterr().out
+
+
+def test_action_events_carry_the_stable_semantic_fields(tmp_path):
+    path = _trace(tmp_path)
+    evs = events_for(path, json.load(open(path)))
+    action_evs = [e for e in evs if e["kind"] == "action"]
+    assert action_evs, "action-level events missing"
+
+    call = next(e for e in action_evs if e.get("tool") == "Bash" and e.get("action_type") == "call")
+    assert "exec" in call["capabilities"]
+    # the denied call surfaces with its policy decision
+    denied = next(e for e in action_evs if e.get("policy_action") == "deny")
+    assert denied["policy_rule"] == "cap:exec"
+
+    # OTel mapping uses the STABLE names from docs/action-schema.md
+    attrs = to_otel(call)["attributes"]
+    assert attrs["loom.action.type"] == "call"
+    assert "exec" in attrs["loom.capability"]
+    otel_denied = to_otel(denied)["attributes"]
+    assert otel_denied["loom.policy.action"] == "deny"
+    assert otel_denied["loom.policy.rule"] == "cap:exec"
+
+
+def test_action_events_include_state_diff_kind(tmp_path):
+    @tool
+    def Edit(file_path: str, new: str) -> str:
+        "edit"
+        return "edited"
+
+    provider = ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t1", "Edit", {"file_path": "a.py", "new": "x"})],
+                      stop_reason="tool_use"),
+        ModelResponse(text="done"),
+    ])
+    path = str(tmp_path / "e.loom.json")
+    Agent(model=provider, tools=[Edit]).run("go").save(path)
+    evs = events_for(path, json.load(open(path)))
+    call = next(e for e in evs if e["kind"] == "action" and e.get("tool") == "Edit")
+    assert call["state_diff_kind"] == "file"
+    assert to_otel(call)["attributes"]["loom.state_diff.kind"] == "file"

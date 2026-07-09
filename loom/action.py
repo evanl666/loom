@@ -288,3 +288,35 @@ def actions(source: Any) -> list[Action]:
 
     _packs.enrich(out, data)
     return out
+
+
+def _matches_term(action: Action, term: str) -> bool:
+    """Does an action match a capability/risk/tool term?
+
+    A term matches when it equals the action's risk category, is one of its
+    capabilities, or equals its tool name -- so 'secret-read', 'pii_access'
+    and 'send_email' all work without a prefix.
+    """
+    return (term == action.risk or term in action.capabilities
+            or term == action.tool)
+
+
+def sequence_hits(source: Any, first: str, then: str) -> "list[tuple[Action, Action]]":
+    """Ordered pairs: an action matching ``first`` strictly before one matching
+    ``then``. The temporal primitive behind exfiltration detection and
+    ``path:A->B`` search -- "read a secret, THEN reached the network" is a
+    different animal from both happening somewhere in the run.
+
+    Returns at most one pair per ``then``-action (paired with the earliest
+    ``first``-action before it), keeping the evidence list readable.
+    """
+    acts = [a for a in actions(source) if a.type == "call" and a.step >= 0]
+    earliest_first: "Action | None" = None
+    hits: list[tuple[Action, Action]] = []
+    for a in acts:
+        if earliest_first is not None and _matches_term(a, then):
+            hits.append((earliest_first, a))
+            continue
+        if earliest_first is None and _matches_term(a, first):
+            earliest_first = a
+    return hits

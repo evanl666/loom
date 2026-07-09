@@ -68,8 +68,9 @@ _RULES: "list[tuple[str, list[str], list[str]]]" = [
      ["*(*INSERT INTO*)", "*(*insert into*)", "*(*UPDATE *SET*)", "*(*update *set*)",
       "*(*UPSERT*)"]),
     ("browser-submit",
-     ["click*", "*_click", "submit*", "fill_form*", "type_text*", "press_button*",
-      "*form_submit*"],
+     # Clicks and submits only: FILLING a field is reversible typing, not a
+     # submission -- gating cap:browser_submit must catch the commit moment.
+     ["click*", "*_click", "submit*", "press_button*", "*form_submit*"],
      []),
     ("fs-destructive",
      ["Delete*", "*remove*", "*rmtree*"],

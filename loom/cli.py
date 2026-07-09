@@ -1053,6 +1053,40 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_packs(args: argparse.Namespace) -> int:
+    """List domain packs: built-ins plus pip-installed plugins."""
+    from importlib import metadata
+
+    from .packs import install_builtin, packs, register
+
+    install_builtin()
+    # Third-party packs: any installed package exposing a "loom.packs" entry
+    # point is discovered here -- the marketplace is pip itself.
+    plugin_names = set()
+    for ep in metadata.entry_points(group="loom.packs"):
+        try:
+            obj = ep.load()
+            pack = obj() if isinstance(obj, type) else obj
+            register(pack)
+            plugin_names.add(pack.name)
+        except Exception as e:  # a broken plugin shouldn't kill the listing
+            print(f"  ⚠️  plugin {ep.name!r} failed to load: {e}", file=sys.stderr)
+
+    import importlib
+
+    for p in packs():
+        doc = p.__class__.__doc__ or ""
+        if not doc:  # the built-ins document at module level
+            mod = importlib.import_module(p.__class__.__module__)
+            doc = mod.__doc__ or ""
+        first = doc.strip().splitlines()[0] if doc.strip() else ""
+        origin = "plugin" if p.name in plugin_names else "built-in"
+        print(f"  {p.name:<10} [{origin}]  {first}")
+    print("\ninstall more: pip install <package> — any package with a "
+          "'loom.packs' entry point is discovered automatically")
+    return 0
+
+
 def _cmd_serve(args: argparse.Namespace) -> int:
     """Serve a trace directory to the team: list, search, Studio, incidents."""
     import os
@@ -1550,15 +1584,50 @@ def _cmd_search(args: argparse.Namespace) -> int:
     """Query an auto-indexed directory of traces."""
     from .lake import Lake
 
+    # `path:A->B` terms are temporal (ordered within a run) -- SQL can't see
+    # order, so they post-filter the SQL candidates by walking each trace's
+    # Action timeline. Terms match a capability, risk category, or tool name:
+    #   loom search runs/ "path:pii_access->user_communication"
+    terms = args.query.split()
+    paths_terms = [t[5:] for t in terms if t.startswith("path:") and "->" in t]
+    sql_query = " ".join(t for t in terms if not t.startswith("path:"))
+
     lake = Lake(args.directory)
     lake.index()
     try:
-        rows = lake.search(args.query)
+        rows = lake.search(sql_query)
     except ValueError as e:
         print(f"loom: {e}", file=sys.stderr)
         return 2
     finally:
         lake.close()
+
+    evidence: dict[str, list[str]] = {}
+    if paths_terms:
+        from .action import sequence_hits
+        from .packs import install_builtin
+
+        install_builtin()
+        kept = []
+        for r in rows:
+            try:
+                with open(r["path"]) as f:
+                    data = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                continue
+            ok = True
+            for term in paths_terms:
+                first, _, then = term.partition("->")
+                hits = sequence_hits(data, first.strip(), then.strip())
+                if not hits:
+                    ok = False
+                    break
+                a, b = hits[0]
+                evidence[r["path"]] = [f"[{a.step}] {a.tool} → [{b.step}] {b.tool}"]
+            if ok:
+                kept.append(r)
+        rows = kept
+
     if not rows:
         print("no matching runs")
         return 1
@@ -1574,6 +1643,8 @@ def _cmd_search(args: argparse.Namespace) -> int:
         prompt = (r["episodes"] or "").split(" | ")[0][:60]
         print(f"{tokens:>9,} tok  {r['path']}  {prompt!r}"
               + (f"  [{', '.join(flags)}]" if flags else ""))
+        for line in evidence.get(r["path"], []):
+            print(f"           path: {line}")
     print(f"\n{len(rows)} run(s)")
     return 0
 
@@ -1938,6 +2009,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="append this user note to the context at the fork point")
     fk.add_argument("-o", "--output", default="", help="where to save the branch trace")
     fk.set_defaults(func=_cmd_fork)
+
+    pks = sub.add_parser("packs", help="list domain packs (built-in + installed plugins)")
+    pks.set_defaults(func=_cmd_packs)
 
     sv = sub.add_parser("serve", help="serve a trace directory to the team (list, search, "
                                       "Studio, incidents)")

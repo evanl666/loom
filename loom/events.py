@@ -66,25 +66,71 @@ def events_for(path: str, data: dict) -> "list[dict]":
                     "action": ev.get("action"), "rule": ev.get("rule"),
                     "via": ev.get("via"),
                     "risk": sorted(classify_all(ev.get("tool", ""), ev.get("input", {})))})
+
+    # Action-level events: the STABLE semantic layer (docs/action-schema.md).
+    # One event per Action with the fields dashboards key on -- action type,
+    # capabilities, risk, the firewall's decision, and the state diff kind.
+    try:
+        from .action import actions as _actions
+        from .packs import install_builtin
+
+        install_builtin()
+        acts = _actions(data)
+    except Exception:
+        acts = []
+    for a in acts:
+        ev = {"run": run, "kind": "action", "seq": a.step, "model": model,
+              "action_type": a.type, "depth": a.depth}
+        if a.tool:
+            ev["tool"] = a.tool
+        if a.capabilities:
+            ev["capabilities"] = a.capabilities
+        if a.risk:
+            ev["risk"] = a.risk
+        if a.policy is not None:
+            ev["policy_action"] = a.policy.action
+            if a.policy.rule:
+                ev["policy_rule"] = a.policy.rule
+            if a.policy.via:
+                ev["policy_via"] = a.policy.via
+        if a.state_diff is not None:
+            ev["state_diff_kind"] = a.state_diff.kind
+            ev["state_diff_summary"] = a.state_diff.summary
+        if a.observation is not None and a.observation.error:
+            ev["error"] = True
+        out.append(ev)
     return out
+
+
+# Flat event keys -> stable OTel attribute names. These are the semantic
+# contract (docs/action-schema.md): fields are only ever ADDED, never renamed,
+# so a Datadog/Splunk/Grafana dashboard keyed on them doesn't break.
+_OTEL_KEYS = {
+    "input_tokens": "loom.tokens.input",
+    "output_tokens": "loom.tokens.output",
+    "action_type": "loom.action.type",
+    "capabilities": "loom.capability",
+    "policy_action": "loom.policy.action",
+    "policy_rule": "loom.policy.rule",
+    "policy_via": "loom.policy.via",
+    "state_diff_kind": "loom.state_diff.kind",
+    "state_diff_summary": "loom.state_diff.summary",
+    "model": "loom.agent.id",
+}
 
 
 def to_otel(event: dict) -> dict:
     """Wrap a flat event as an OpenTelemetry-style log record.
 
-    Attribute keys are namespaced ``loom.*`` (see docs/events-schema.md), token
-    usage in the semantic-convention shape ``loom.tokens.input``/``.output``.
+    Attribute keys are namespaced ``loom.*`` and STABLE (see the mapping
+    above and docs/action-schema.md); token usage lands in the semantic-
+    convention shape ``loom.tokens.input``/``.output``.
     """
     attrs: dict = {}
     for k, v in event.items():
         if k in ("run", "kind"):
             continue
-        if k == "input_tokens":
-            attrs["loom.tokens.input"] = v
-        elif k == "output_tokens":
-            attrs["loom.tokens.output"] = v
-        else:
-            attrs[f"loom.{k}"] = v
+        attrs[_OTEL_KEYS.get(k, f"loom.{k}")] = v
     return {
         "resource": {"service.name": "loom-agent", "loom.run": event.get("run")},
         "name": f"loom.{event.get('kind', 'effect')}",
