@@ -178,6 +178,26 @@ def _prevention(facts: dict) -> list[str]:
     return tips
 
 
+def _executive_summary(facts: dict, data: dict) -> str:
+    """One paragraph a human can paste into a Slack thread or GitHub issue."""
+    outcome = "failed" if facts["failed"] else "completed"
+    parts = [f"The agent run **{outcome}**"]
+    if facts["suspects"]:
+        parts[0] += f" after {len(facts['suspects'])} failing tool call(s)"
+    blocked = [ev for ev in facts["shield_events"] if ev.get("action") == "deny"]
+    if blocked:
+        parts.append(f"the firewall blocked {len(blocked)} call(s)")
+    if facts["classification"]:
+        parts.append("flagged as " + ", ".join(facts["classification"]))
+    if facts["secrets"]:
+        parts.append(f"credentials were visible in {sum(facts['secrets'].values())} tool result(s)")
+    ch = (data.get("workspace") or {}).get("changes") or {}
+    if ch.get("files"):
+        parts.append(f"{len(ch['files'])} file(s) changed")
+    sentence = "; ".join(parts) + "."
+    return f"{sentence} Severity **{facts['severity']}**."
+
+
 def build_report(data: dict, path: str, why_output: str = "") -> str:
     """The incident report as markdown. Deterministic given the trace."""
     facts = _analyze(data)
@@ -222,7 +242,9 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
         if ch.get("stat"):
             lines.append(f"**Workspace changes:** {ch['stat']}"
                          + (f" · dirty-hash `{ch['dirty_hash']}`" if ch.get("dirty_hash") else ""))
+    lines += ["", "## Executive summary", _executive_summary(facts, data)]
     lines += [
+        "",
         f"**Blast radius:** {facts['input_tokens'] + facts['output_tokens']:,} tokens "
         f"across {facts['model_calls']} model call(s); tools touched: "
         + (", ".join(f"{n}×{c}" for n, c in sorted(facts["tool_counts"].items())) or "none"),

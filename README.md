@@ -5,25 +5,33 @@
 [![Python](https://img.shields.io/pypi/pyversions/loom-harness)](https://pypi.org/project/loom-harness/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**The black box recorder for AI agents.**
+**Put Claude Code behind a black box recorder and firewall.**
 
 Record Claude Code, Codex, LangGraph — any agent that speaks the Anthropic or
-OpenAI API — with **one command and zero code changes**. Replay failures with
-zero API calls. Diff prompt changes before merging. Turn every agent bug into
-a regression test.
+OpenAI API — with **one command and zero code changes**.
 
 ```
 pip install loom-harness                       # zero dependencies (or: uvx --from loom-harness loom)
 
-loom record --profile claude-code-safe --report claude "fix the failing test"
-#      ^ firewall + recording + workspace metadata, then writes session.html + session.incident.md
-loom studio session.loom.json                     # time-travel through it in your browser
-loom proxy --replay session.loom.json             # serve it back -- zero API calls, fake key works
+loom record claude "fix the failing test" --safe
 ```
 
-`loom record claude "..."` is the shortcut; `loom record -- <any command>` records
-anything that speaks the Anthropic or OpenAI API, unmodified. Run `loom doctor`
-first to check your agent is installed and will route through the proxy.
+That one command **records** the run, **blocks** dangerous tool calls (reads of
+`.env`, `rm -rf`, egress after a secret), **scrubs** secrets from the trace, and
+writes a `session.html` you can scrub through and a `session.incident.md`
+postmortem. `--safe` is shorthand for `--profile claude-code-safe --scrub
+--report`; add `--sandbox` (macOS) to make the proxy the agent's *only* network
+door.
+
+```
+loom studio session.loom.json              # time-travel through the run in your browser
+loom proxy --replay session.loom.json      # serve it back — zero API calls, fake key works
+loom test  session.loom.json               # it's now a regression test
+```
+
+`loom record claude "..."` is the shortcut; `loom record -- <any command>`
+records anything unmodified. Run `loom doctor` first to check your agent will
+route through the proxy.
 
 ![Loom demo: record, read, replay, rewind](docs/demo.gif)
 
@@ -39,8 +47,23 @@ traffic gives you the whole story, without touching the agent:
 | **Free CI** | Record once; the [GitHub Action](#the-github-action) flags PRs that change agent behavior — no tokens burned. |
 | **Firewall** | [Shield](#loom-shield-dont-dangerously-skip-permissions): `--deny 'Read(*.env*)'` blocks a tool call before the agent ever sees it. |
 | **Ask the trace** | `loom why trace.json "why did it read my .env?"` — a debugger agent investigates and answers, citing exact steps. |
+| **Incident report** | `loom incident trace.json` — every failure becomes a severity-rated postmortem with recommended fixes. |
+| **Bench** | `loom bench task.yml --agent claude:… --agent codex:… --reset git` — SWE-bench for *your* repo. |
 
 > The package installs as `loom-harness`, imports as `loom` (like `beautifulsoup4` / `bs4`).
+
+### 60-second demo: Claude touched `.env`, Loom caught it
+
+```
+loom record claude "set up the deploy script" --safe   # firewall + recording + report
+loom studio session.loom.json                          # watch it, step by step
+open session.incident.md                               # the postmortem, already written
+loom test session.loom.json                            # keep it as a regression test
+```
+
+The incident report leads with a **What Loom prevented** section: *"🛡️ blocked
+`Read({"file_path": ".env"})` — deny rule … · blast radius: a network
+exfiltration attempt was cut off."* Paste it straight into a GitHub issue.
 
 ## Record any agent — no migration
 
@@ -101,11 +124,20 @@ The proxy sees every tool call **before the agent executes it** — tool calls
 ride in the model's responses. Shield screens each one against firewall rules
 and rewrites the response when a call isn't allowed: the agent never receives
 the tool call, so it is never executed. Works on any agent you can record —
-no migration, no plugin:
+no migration, no plugin. **Start with a profile, not a wall of flags:**
 
 ```
-loom record --deny 'Read(*.env*)' --deny 'Bash(*rm -rf*)' --confirm 'Bash(*curl*)' \
-    -- claude -p "set up the deploy script" --dangerously-skip-permissions
+loom record claude "set up the deploy script" --profile claude-code-safe
+#   reads + tests flow · installs/pushes/network ask · secrets + rm -rf blocked
+#   · egress cut off after a secret is read
+```
+
+Built-in profiles: `claude-code-safe`, `ci-safe` (deny-by-default, no prompts),
+`prod-data-safe`. Under the hood a profile is just rules, which you can also
+write by hand or extend a profile with:
+
+```
+loom record claude "..." --profile claude-code-safe --deny 'Bash(*aws s3*)'
 ```
 
 Patterns are shell globs over the tool name (`WebFetch`) or its full signature

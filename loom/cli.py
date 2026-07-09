@@ -388,6 +388,21 @@ def _cmd_record(args: argparse.Namespace) -> int:
         print(f"loom: {err}", file=sys.stderr)
         return 2
 
+    if args.safe:  # one flag = the sane coding-agent defaults
+        args.profile = args.profile or "claude-code-safe"
+        args.scrub = True
+        args.report = True
+        print("safe mode:", file=sys.stderr)
+        print(f"  ✓ policy: {args.profile}", file=sys.stderr)
+        print("  ✓ scrub on   ✓ report on", file=sys.stderr)
+        if args.sandbox:
+            print("  ✓ sandbox on", file=sys.stderr)
+        elif sys.platform == "darwin":
+            print("  ! sandbox off — add --sandbox for full network isolation", file=sys.stderr)
+        else:
+            print("  ! sandbox not built in on this OS — see examples/docker-sandbox "
+                  "for full isolation", file=sys.stderr)
+
     shield = _build_shield(args)
     server = ProxyServer(port=args.port, target=args.target, save_path=args.save,
                          shield=shield, scrub=args.scrub,
@@ -1252,6 +1267,9 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream API (use https://api.openai.com for OpenAI agents)")
     rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
+    rc.add_argument("--safe", action="store_true",
+                    help="shorthand for --profile claude-code-safe --scrub --report "
+                         "(the sane defaults for a coding agent)")
     rc.add_argument("--report", action="store_true",
                     help="after recording, also write <save>.html (Studio) and "
                          "<save>.incident.md (postmortem)")

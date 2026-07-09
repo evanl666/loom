@@ -77,3 +77,26 @@ def test_profile_applies_and_report_writes_both_files(tmp_path, capsys):
 def test_no_workspace_opts_out(tmp_path):
     _, save = _run_record(tmp_path, ["--no-workspace"])
     assert "workspace" not in json.load(open(save))
+
+
+def test_safe_mode_sets_profile_scrub_report(tmp_path, capsys):
+    # A clean answer (no tool call) so claude-code-safe's default=confirm
+    # doesn't hold anything -- we're testing that --safe wires the defaults.
+    upstream = _FakeUpstream([FINAL_ANSWER, FINAL_ANSWER])
+    threading.Thread(target=upstream.serve_forever, daemon=True).start()
+    child = tmp_path / "child.py"
+    child.write_text(CHILD)
+    save = str(tmp_path / "session.loom.json")
+    code = main([
+        "record", "--safe", "--confirm-timeout", "2", "--save", save,
+        "--target", f"http://127.0.0.1:{upstream.server_address[1]}",
+        "--", sys.executable, str(child),
+    ])
+    upstream.shutdown()
+    assert code == 0
+
+    err = capsys.readouterr().err
+    assert "safe mode:" in err and "claude-code-safe" in err and "scrub on" in err
+    # --safe implies --report: the html + incident.md exist
+    base = save[: -len(".loom.json")]
+    assert os.path.exists(base + ".html") and os.path.exists(base + ".incident.md")
