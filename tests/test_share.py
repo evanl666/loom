@@ -50,7 +50,7 @@ def test_share_refuses_when_secrets_survive(tmp_path, capsys, monkeypatch):
     # so the residual scan trips and share refuses to emit.
     path = _trace(tmp_path, f"leak {SECRET}")
     monkeypatch.setattr("loom.scrub.scrub_trace",
-                        lambda data, aggressive=False: (data, {}))
+                        lambda data, aggressive=False, config=None: (data, {}))
     assert main(["share", path, "-o", str(tmp_path / "out.loom.json")]) == 1
     assert "survived scrubbing" in capsys.readouterr().err
     assert not (tmp_path / "out.loom.json").exists()  # nothing written
