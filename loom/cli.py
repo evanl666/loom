@@ -1342,6 +1342,24 @@ def _cmd_movie(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_harden(args: argparse.Namespace) -> int:
+    """Emit a deployment recommendation (policy + flags) from the threat model."""
+    from .harden import describe, harden, policy_yaml
+
+    try:
+        harden(args.scenario)
+    except ValueError as e:
+        raise CLIError(str(e))
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(policy_yaml(args.scenario))
+        print(f"recommended policy -> {args.output}")
+        print(f"  run: loom record --policy {args.output} ... -- <your agent>")
+        return 0
+    print(describe(args.scenario))
+    return 0
+
+
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Token-burn root cause: bloat / looping / overfetch / result explosion."""
     from .cost import analyze_cost, describe_cost
@@ -2851,6 +2869,12 @@ def build_parser() -> argparse.ArgumentParser:
     mv.add_argument("-o", "--output", default="", help="output file (default <trace>.movie.html)")
     mv.add_argument("--open", action="store_true", help="open in the browser")
     mv.set_defaults(func=_cmd_movie)
+
+    hd = sub.add_parser("harden", help="deployment wizard: recommended policy + flags per scenario")
+    hd.add_argument("--scenario", required=True,
+                    help="coding | data | browser | support | ci")
+    hd.add_argument("-o", "--output", default="", help="write the recommended policy file")
+    hd.set_defaults(func=_cmd_harden)
 
     ct = sub.add_parser("cost", help="token-burn RCA: bloat/looping/overfetch/result-explosion")
     ct.add_argument("path")
