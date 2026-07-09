@@ -1540,6 +1540,16 @@ def _cmd_taint(args: argparse.Namespace) -> int:
     return 1 if (paths and args.fail_on_leak) else 0
 
 
+def _cmd_inject(args: argparse.Namespace) -> int:
+    """Find indirect prompt injection: untrusted results that steered the agent."""
+    from .inject import describe_injections, find_injections
+
+    _import_builtin_packs()
+    hits = find_injections(_load_trace_json(args.path))
+    print(describe_injections(hits))
+    return 1 if (hits and args.gate) else 0
+
+
 def _cmd_dlp(args: argparse.Namespace) -> int:
     """DLP view: data flows by sensitivity class + a suggested policy."""
     from .taint import dlp_report
@@ -3065,6 +3075,11 @@ def build_parser() -> argparse.ArgumentParser:
     tt.add_argument("--fail-on-leak", action="store_true", dest="fail_on_leak",
                     help="exit 1 if any exfiltration path is found (CI gate)")
     tt.set_defaults(func=_cmd_taint)
+
+    ij = sub.add_parser("inject", help="find indirect prompt injection in untrusted tool results")
+    ij.add_argument("path")
+    ij.add_argument("--gate", action="store_true", help="exit 1 if an injection marker is found")
+    ij.set_defaults(func=_cmd_inject)
 
     dl = sub.add_parser("dlp", help="DLP: data flows by sensitivity class + policy suggestion")
     dl.add_argument("path")
