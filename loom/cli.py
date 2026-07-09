@@ -1069,6 +1069,19 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_score(args: argparse.Namespace) -> int:
+    """The behavior scorecard: security / side-effect / reversibility / ..."""
+    from .diff import describe_score, score_breakdown
+
+    _import_builtin_packs()
+    b = score_breakdown(_load_trace_json(args.path))
+    if args.json:
+        print(json.dumps(b, indent=2))
+    else:
+        print(describe_score(b))
+    return 0
+
+
 def _cmd_taint(args: argparse.Namespace) -> int:
     """Trace sensitive VALUES from where they were read to where they left."""
     from .taint import describe_taint, taint_paths
@@ -2251,6 +2264,11 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    sc = sub.add_parser("score", help="behavior scorecard: security/side-effect/reversibility/...")
+    sc.add_argument("path")
+    sc.add_argument("--json", action="store_true", help="machine-readable breakdown")
+    sc.set_defaults(func=_cmd_score)
 
     tt = sub.add_parser("taint", help="value-lineage exfiltration paths (secret/PII → egress)")
     tt.add_argument("path")
