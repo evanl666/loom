@@ -452,7 +452,8 @@ def _step_detail(kind: str, result) -> str:
 def _tokens_of(e: dict) -> int:
     if e.get("kind") != "model":
         return 0
-    u = e.get("result", {}).get("usage", {}) or {}
+    result = e.get("result")
+    u = (result.get("usage") or {}) if isinstance(result, dict) else {}
     return u.get("input_tokens", 0) + u.get("output_tokens", 0)
 
 
@@ -802,13 +803,16 @@ def _data_flow(data: dict) -> str:
 
 def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
     """Render a saved trace dict (``Run.to_dict`` / a ``.loom.json`` file) to HTML."""
-    log = data.get("log", [])
+    from .action import effect_dicts
+
+    log = effect_dicts(data)
     episodes = data.get("episodes") or [data.get("prompt", "")]
 
     inp = out = turns = 0
     for e in log:
         if e.get("kind") == "model":
-            u = e.get("result", {}).get("usage", {}) or {}
+            result = e.get("result")
+            u = (result.get("usage") or {}) if isinstance(result, dict) else {}
             inp += u.get("input_tokens", 0)
             out += u.get("output_tokens", 0)
             if e.get("depth", 0) == 0:

@@ -24,7 +24,8 @@ def analyze_cost(data: dict) -> dict:
     turns = []  # per top-level model call: input/output tokens
     tool_counts: dict[str, int] = {}
     tool_result_tokens: list[tuple[int, str, int]] = []  # (seq, kind, est tokens)
-    for e in data.get("log", []):
+    from .action import effect_dicts
+    for e in effect_dicts(data):
         kind = e.get("kind", "")
         if kind == "model" and isinstance(e.get("result"), dict):
             u = e["result"].get("usage") or {}

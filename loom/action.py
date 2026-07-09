@@ -145,6 +145,14 @@ class Action:
         return d
 
 
+def effect_dicts(data: dict) -> "list[dict]":
+    """The trace's log as a clean list of effect dicts, tolerant of a log that
+    isn't a list or holds non-dict junk. The shared guard for every module that
+    iterates ``data['log']`` directly (cost, score, incident, kpi, Studio...)."""
+    raw = data.get("log")
+    return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+
+
 def _as_trace(source: Any) -> dict:
     """Accept a trace dict, a Run, or anything with .to_dict()."""
     if isinstance(source, dict):
@@ -192,8 +200,19 @@ def actions(source: Any) -> list[Action]:
     from .risk import classify as _classify
 
     data = _as_trace(source)
-    log = [EffectEntry.from_dict(e) if isinstance(e, dict) else e for e in data.get("log", [])]
-    shield_events = list(data.get("shield_events", []))
+    # Defensive against hand-edited / third-party / corrupted traces: a log
+    # that isn't a list, non-dict/entry items, or a null shield_events must not
+    # crash the analyzer that every debugger command routes through.
+    raw_log = data.get("log")
+    log: list[EffectEntry] = []
+    for e in (raw_log if isinstance(raw_log, list) else []):
+        if isinstance(e, EffectEntry):
+            log.append(e)
+        elif isinstance(e, dict):
+            log.append(EffectEntry.from_dict(e))
+    raw_events = data.get("shield_events")
+    shield_events = ([ev for ev in raw_events if isinstance(ev, dict)]
+                     if isinstance(raw_events, list) else [])
 
     # Turn boundaries: top-level model calls are the fork points.
     turn_of_seq: dict[int, int] = {}

@@ -115,13 +115,17 @@ def _fix(failure, category, diagnosis, suggestion, verify):
 def _last_top_turn_before_trouble(data: dict) -> int:
     """A reasonable fork point: the last top-level turn index (so a fork
     re-runs the final decision). Falls back to 0."""
-    turns = sum(1 for e in data.get("log", [])
+    from .action import effect_dicts
+
+    turns = sum(1 for e in effect_dicts(data)
                 if e.get("kind") == "model" and not e.get("depth", 0))
     return max(0, turns - 1)
 
 
 def _first_error_step(data: dict) -> int:
-    for e in data.get("log", []):
+    from .action import effect_dicts
+
+    for e in effect_dicts(data):
         if e.get("kind", "").startswith("tool:") and isinstance(e.get("result"), str):
             if e["result"].startswith(("ERROR", "BLOCKED")):
                 return e.get("seq", 0)

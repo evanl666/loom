@@ -30,7 +30,7 @@ def _percentile(values: "list[int]", p: float) -> int:
 
 def compute_kpis(paths: "list[str]") -> dict:
     """Aggregate KPIs over every trace in ``paths`` (files and/or directories)."""
-    from .action import actions as _actions
+    from .action import actions as _actions, effect_dicts as _effect_dicts
     from .packs import install_builtin
 
     install_builtin()
@@ -56,7 +56,7 @@ def compute_kpis(paths: "list[str]") -> dict:
                 or data.get("truncated") or data.get("paused")):
             failed += 1
         tokens = 0
-        for e in data.get("log", []):
+        for e in _effect_dicts(data):
             if e.get("kind") == "model" and isinstance(e.get("result"), dict):
                 u = e["result"].get("usage") or {}
                 tokens += (u.get("input_tokens", 0) or 0) + (u.get("output_tokens", 0) or 0)

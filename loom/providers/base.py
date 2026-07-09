@@ -56,11 +56,17 @@ class ModelResponse:
 
     @staticmethod
     def from_dict(d: dict) -> "ModelResponse":
+        # Tolerate hand-edited / third-party traces: a null tool_calls or usage
+        # (some serializers emit `null` rather than omitting the key) must read
+        # as empty, not crash. `or` covers both "missing" and "present but null".
+        if not isinstance(d, dict):
+            return ModelResponse()
         return ModelResponse(
-            text=d.get("text", ""),
-            tool_calls=[ToolCall.from_dict(t) for t in d.get("tool_calls", [])],
-            stop_reason=d.get("stop_reason", "end_turn"),
-            usage=d.get("usage", {}),
+            text=d.get("text") or "",
+            tool_calls=[ToolCall.from_dict(t) for t in (d.get("tool_calls") or [])
+                        if isinstance(t, dict)],
+            stop_reason=d.get("stop_reason") or "end_turn",
+            usage=d.get("usage") or {},
         )
 
 

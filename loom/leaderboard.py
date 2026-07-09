@@ -40,7 +40,7 @@ def _agent_dirs(directory: str) -> "list[tuple[str, list[str]]]":
 
 def compute_leaderboard(directory: str) -> "list[dict]":
     """Aggregate per-agent safety/cost/risk metrics; ranked safest first."""
-    from .action import actions as _actions
+    from .action import actions as _actions, effect_dicts as _effect_dicts
     from .diff import score_breakdown
     from .packs import install_builtin
 
@@ -56,7 +56,7 @@ def compute_leaderboard(directory: str) -> "list[dict]":
                 continue
             scores.append(score_breakdown(data)["overall"])
             t = 0
-            for e in data.get("log", []):
+            for e in _effect_dicts(data):
                 if e.get("kind") == "model" and isinstance(e.get("result"), dict):
                     u = e["result"].get("usage") or {}
                     t += (u.get("input_tokens", 0) or 0) + (u.get("output_tokens", 0) or 0)

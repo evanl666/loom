@@ -188,7 +188,8 @@ def score_breakdown(trace: dict) -> dict:
 
     # cost: cheap runs score high; ~one point per 1k tokens over a soft budget.
     tokens = 0
-    for e in trace.get("log", []):
+    from .action import effect_dicts
+    for e in effect_dicts(trace):
         if e.get("kind") == "model" and isinstance(e.get("result"), dict):
             u = e["result"].get("usage") or {}
             tokens += (u.get("input_tokens", 0) or 0) + (u.get("output_tokens", 0) or 0)

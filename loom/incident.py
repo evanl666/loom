@@ -35,7 +35,9 @@ def _clip(s: str, n: int = _SNIP) -> str:
 
 def _analyze(data: dict) -> dict:
     """Everything the report needs, mined from the trace dict."""
-    log = data.get("log") or []
+    from .action import effect_dicts
+
+    log = effect_dicts(data)
     facts: dict = {
         "episodes": data.get("episodes") or [data.get("prompt", "")],
         "output": str(data.get("output", "")),
