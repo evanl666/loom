@@ -1342,6 +1342,23 @@ def _cmd_movie(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_redteam(args: argparse.Namespace) -> int:
+    """Run canonical attacks through a policy; check the firewall stops them."""
+    from .policy_file import resolve, to_shield_kwargs
+    from .redteam import describe, run_all, scenarios
+    from .shield import Shield
+
+    if args.scenario and args.scenario not in scenarios():
+        raise CLIError(f"unknown scenario {args.scenario!r}; try: {', '.join(scenarios())}")
+    if not args.profile and not args.policy:
+        args.profile = "claude-code-safe"  # test something by default
+    shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
+    results = run_all(shield, only=args.scenario or None)
+    print(describe(results))
+    got_through = [r for r in results if not r["stopped"]]
+    return 1 if got_through else 0
+
+
 def _cmd_harden(args: argparse.Namespace) -> int:
     """Emit a deployment recommendation (policy + flags) from the threat model."""
     from .harden import describe, harden, policy_yaml
@@ -2869,6 +2886,14 @@ def build_parser() -> argparse.ArgumentParser:
     mv.add_argument("-o", "--output", default="", help="output file (default <trace>.movie.html)")
     mv.add_argument("--open", action="store_true", help="open in the browser")
     mv.set_defaults(func=_cmd_movie)
+
+    rt2 = sub.add_parser("redteam", help="run canonical attacks through a policy (exit 1 if any get through)")
+    rtsub = rt2.add_subparsers(dest="redteam_cmd", required=True)
+    rt_run = rtsub.add_parser("run", help="secret_exfil / sql_destroy / refund_abuse / pii_leak / rm_rf")
+    rt_run.add_argument("--scenario", default="", help="one scenario (default: all)")
+    rt_run.add_argument("--profile", default="", help="a built-in profile to test")
+    rt_run.add_argument("--policy", default="", help="a policy file to test")
+    rt_run.set_defaults(func=_cmd_redteam)
 
     hd = sub.add_parser("harden", help="deployment wizard: recommended policy + flags per scenario")
     hd.add_argument("--scenario", required=True,
