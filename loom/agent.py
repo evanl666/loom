@@ -506,6 +506,13 @@ class Agent:
 
                 truncated = False
                 break
+            else:
+                # The for-loop ran out of steps without a clean finish: the
+                # agent kept calling tools past max_steps. truncated is already
+                # True; name the reason so tooling can distinguish it from a
+                # budget/output stop.
+                if not stop_reason:
+                    stop_reason = "max_steps"
             if stop_reason:
                 break
 

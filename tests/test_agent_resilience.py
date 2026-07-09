@@ -116,3 +116,18 @@ def test_tool_timeout_records_an_error_result():
 def test_fast_tools_are_unaffected_by_the_cap():
     run = Agent(model=_tool_use("quick"), tools=[slow, quick], tool_timeout=5).run("go")
     assert [e.result for e in run.log if e.kind == "tool:quick"] == ["fast"]
+
+
+def test_max_steps_exhaustion_names_the_stop_reason():
+    # A provider that never stops calling tools should exhaust max_steps and
+    # report *why* it stopped -- not leave stop_reason empty.
+    from loom.providers import ToolCall
+
+    looping = ScriptedProvider(
+        [ModelResponse(tool_calls=[ToolCall(f"t{i}", "quick", {})], stop_reason="tool_use")
+         for i in range(10)]
+    )
+    run = Agent(model=looping, tools=[quick], max_steps=3).run("go")
+    assert run.truncated is True
+    assert run.stop_reason == "max_steps"
+    assert len([e for e in run.log if e.kind == "tool:quick"]) == 3

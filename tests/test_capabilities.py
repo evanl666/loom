@@ -22,6 +22,20 @@ def test_shell_synonyms_all_read_as_exec():
         assert "exec" in capabilities(name, {}), name
 
 
+def test_name_hints_do_not_false_positive_on_substrings():
+    # Token-anchored globs must not flag innocent tools: 'prune' isn't exec,
+    # 'capital' isn't network, 'truncate' isn't exec.
+    for name in ["prune_logs", "truncate_display", "capital_gains", "rapid_sort",
+                 "evaluate_answer", "brunt_force"]:
+        caps = capabilities(name, {})
+        assert "exec" not in caps and "network" not in caps, (name, caps)
+
+
+def test_unclassifiable_tool_is_not_assumed_idempotent():
+    # A tool we can't classify at all is *unknown*, not safe-to-rerun.
+    assert capabilities("prune_logs", {}) == set()
+
+
 def test_declared_capabilities_win_over_inference():
     # a tool named innocently but declared as network
     assert capabilities("summarize", {}, declared={"network"}) == {"network"}

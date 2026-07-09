@@ -149,7 +149,7 @@ def run_agent(name: str, command: str, task: dict, target: str,
 
         html_path = os.path.join(outdir, f"{name}.html")
         with open(html_path, "w") as f:
-            f.write(trace_to_html(trace))
+            f.write(trace_to_html(trace, path=save))  # action buttons target the real trace
         result["studio"] = html_path
     return {**result, **score(trace, passed)}
 

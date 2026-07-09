@@ -33,13 +33,19 @@ _FROM_RISK = {
 }
 
 # Name hints beyond what risk's (display-tuned) globs cover.
-_READ_NAMES = ["read*", "*get*", "glob*", "grep*", "ls*", "list*", "cat*", "search*",
-               "find*", "view*", "*fetch*", "*status*", "head*", "tail*", "stat*"]
-_WRITE_NAMES = ["write*", "edit*", "*create*", "*update*", "*patch*", "*append*", "put*"]
-_EXEC_NAMES = ["sh", "bash*", "zsh", "shell*", "*run*", "exec*", "*command*", "terminal*",
-               "*execute*", "eval*", "python*", "node*"]
-_NETWORK_NAMES = ["*http*", "*url*", "*download*", "curl*", "wget*", "*request*", "*api*",
-                  "*webhook*", "*email*", "*slack*"]
+# Name hints are token-anchored (start*, *_token, *_end) rather than bare
+# *substring* to avoid false positives -- '*run*' would flag 'prune'/'truncate',
+# '*api*' would flag 'capital'. Declared capabilities are the reliable path;
+# this is a conservative fallback.
+_READ_NAMES = ["read*", "get_*", "*_get", "glob*", "grep*", "ls", "list_*", "*_list",
+               "cat", "search*", "find_*", "view*", "*_fetch", "fetch_*", "*status*",
+               "head", "tail", "stat"]
+_WRITE_NAMES = ["write*", "edit*", "create_*", "*_create", "update_*", "*_update",
+                "*patch*", "append_*", "*_append", "put_*"]
+_EXEC_NAMES = ["sh", "bash*", "zsh", "shell*", "*shell*", "run", "run_*", "*_run",
+               "exec*", "*_exec*", "*command*", "terminal*", "*execute*", "python*", "node*"]
+_NETWORK_NAMES = ["*http*", "*_url", "url_*", "*download*", "curl*", "wget*", "*request*",
+                  "api_*", "*_api", "fetch*", "*webhook*", "*email*", "*slack*"]
 
 
 def capabilities(name: str, tool_input=None, declared: "set[str] | None" = None) -> "set[str]":
@@ -61,9 +67,10 @@ def capabilities(name: str, tool_input=None, declared: "set[str] | None" = None)
         caps.add("exec")
     if any(fnmatch(lname, p) for p in _NETWORK_NAMES):
         caps.add("network")
-    # A read that touches nothing external is idempotent; exec/write/network
-    # are assumed to have side effects unless the tool declares otherwise.
-    if caps <= {"read"}:
+    # A CONFIRMED read-only tool is idempotent. A tool we couldn't classify at
+    # all (empty caps) is *unknown*, not safe -- don't claim it's idempotent
+    # (e.g. 'prune_logs' matches nothing but is destructive).
+    if caps == {"read"}:
         caps.add("idempotent")
     return caps
 
