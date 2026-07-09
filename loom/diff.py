@@ -121,3 +121,80 @@ def diff_logs(a: list[EffectEntry], b: list[EffectEntry]) -> TraceDiff:
             status = IDENTICAL
         steps.append(StepDiff(seq=i, status=status, a=ea, b=eb))
     return TraceDiff(steps=steps)
+
+
+# -- action-level behavior diff ----------------------------------------------
+
+def run_risk_score(trace: dict) -> int:
+    """0-100 score of the risk EXERCISED by a run (not just its tool surface).
+
+    100 = no risky action taken; each risk category exercised deducts its
+    weight once. Comparable across agent versions -- the PR-comment number.
+    """
+    from .action import actions as _actions
+    from .impact import _SCORE_WEIGHTS
+
+    exercised = {a.risk for a in _actions(trace) if a.type == "call" and a.risk}
+    return max(0, 100 - sum(_SCORE_WEIGHTS.get(c, 0) for c in exercised))
+
+
+def diff_actions(trace_a: dict, trace_b: dict) -> dict:
+    """Behavior diff between two runs at the Action level.
+
+    Answers the PR-review question: what does the new agent DO differently --
+    which actions appeared, which disappeared, and how did exercised risk
+    move? Actions are grouped by (tool, risk) so ten identical Reads collapse
+    to one row with a count.
+    """
+    from collections import Counter
+
+    from .action import actions as _actions
+    from .impact import _RISK_LABELS
+    from .packs import install_builtin
+
+    install_builtin()
+    calls_a = [x for x in _actions(trace_a) if x.type == "call"]
+    calls_b = [x for x in _actions(trace_b) if x.type == "call"]
+    sig_a = Counter((x.tool, x.risk) for x in calls_a)
+    sig_b = Counter((x.tool, x.risk) for x in calls_b)
+
+    def rows(counter):
+        return [{"tool": t, "risk": r, "count": n}
+                for (t, r), n in sorted(counter.items(), key=lambda kv: -kv[1])]
+
+    added, removed = sig_b - sig_a, sig_a - sig_b
+    score_a, score_b = run_risk_score(trace_a), run_risk_score(trace_b)
+    risks_a = {x.risk for x in calls_a if x.risk}
+    risks_b = {x.risk for x in calls_b if x.risk}
+    return {
+        "added": rows(added),
+        "removed": rows(removed),
+        "risk_gained": sorted(risks_b - risks_a),
+        "risk_dropped": sorted(risks_a - risks_b),
+        "score": {"a": score_a, "b": score_b},
+        "calls": {"a": len(calls_a), "b": len(calls_b)},
+        "labels": {c: _RISK_LABELS.get(c, c) for c in (risks_a | risks_b)},
+    }
+
+
+def describe_action_diff(d: dict) -> str:
+    """Human/PR-comment rendering of a ``diff_actions`` result."""
+    lines = []
+    sa, sb = d["score"]["a"], d["score"]["b"]
+    if sa != sb:
+        arrow = "⬇" if sb < sa else "⬆"
+        why = ""
+        if d["risk_gained"]:
+            why = " (" + ", ".join("+" + d["labels"].get(c, c) for c in d["risk_gained"]) + ")"
+        lines.append(f"run risk score: {sa} → {sb} {arrow}{why}")
+    else:
+        lines.append(f"run risk score: {sa} (unchanged)")
+    for row in d["added"]:
+        risk = f"  ⚠ {row['risk']}" if row["risk"] else ""
+        lines.append(f"  + {row['tool']} x{row['count']}{risk}")
+    for row in d["removed"]:
+        lines.append(f"  - {row['tool']} x{row['count']}")
+    if not d["added"] and not d["removed"]:
+        lines.append("  same actions on both sides "
+                     f"({d['calls']['a']} vs {d['calls']['b']} calls)")
+    return "\n".join(lines)

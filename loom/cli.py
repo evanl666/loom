@@ -704,6 +704,21 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     """Compare two saved traces; exit 0 if identical, 1 if they diverge."""
     from .diff import diff_logs
 
+    if getattr(args, "actions", False):
+        # Behavior diff: what does run B DO differently -- new/removed actions
+        # and the exercised-risk movement. The PR-review view.
+        from .diff import describe_action_diff, diff_actions
+
+        data_a = _load_trace_json(args.a)
+        data_b = _load_trace_json(args.b)
+        d = diff_actions(data_a, data_b)
+        if getattr(args, "json", False):
+            print(json.dumps(d, indent=2))
+        else:
+            print(describe_action_diff(d))
+        changed = d["added"] or d["removed"] or d["score"]["a"] != d["score"]["b"]
+        return 1 if changed else 0
+
     log_a, _ = _load_log(args.a)
     log_b, _ = _load_log(args.b)
     d = diff_logs(log_a, log_b)
@@ -1589,6 +1604,10 @@ def build_parser() -> argparse.ArgumentParser:
     df = sub.add_parser("diff", help="compare two saved traces at the effect level")
     df.add_argument("a")
     df.add_argument("b")
+    df.add_argument("--actions", action="store_true",
+                    help="behavior diff at the Action level: added/removed actions "
+                         "and the exercised-risk movement (exit 1 on any change)")
+    df.add_argument("--json", action="store_true", help="machine-readable (--actions only)")
     df.set_defaults(func=_cmd_diff)
 
     ex = sub.add_parser("export", help="render a trace to HTML, or --jsonl/--otel events")

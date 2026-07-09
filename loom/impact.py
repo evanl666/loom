@@ -267,10 +267,15 @@ def tools_delta(base: "dict", head: "dict") -> str:
 # able to recompute the number in their head.
 _SCORE_WEIGHTS = {
     "fs-destructive": 18,
+    "money-movement": 18,   # moving money is as grave as destroying data
     "secret-read": 15,
+    "pii-access": 12,
     "network-egress": 12,
+    "user-comm": 10,        # a message to a real user can't be unsent
     "code-exec": 10,
+    "db-write": 8,
     "fs-write": 5,
+    "browser-submit": 5,
 }
 
 
@@ -301,6 +306,15 @@ def score_line(base: "dict", head: "dict") -> str:
     return f"Security score: {b} → {h} {arrow}"
 
 
+_RISK_LABELS = {
+    "network-egress": "network egress", "secret-read": "secret reads",
+    "code-exec": "shell execution", "fs-destructive": "destructive filesystem",
+    "fs-write": "file writes", "money-movement": "money movement",
+    "pii-access": "PII access", "user-comm": "user communication",
+    "db-write": "database writes", "browser-submit": "browser submissions",
+}
+
+
 def risk_delta(base: "dict", head: "dict") -> str:
     """Per-category risk verdict between two ``to_json()`` docs.
 
@@ -314,11 +328,7 @@ def risk_delta(base: "dict", head: "dict") -> str:
     if b is None or h is None:
         return ""
     added, removed = set(h) - set(b), set(b) - set(h)
-    label = {
-        "network-egress": "network egress", "secret-read": "secret reads",
-        "code-exec": "shell execution", "fs-destructive": "destructive filesystem",
-        "fs-write": "file writes",
-    }
+    label = _RISK_LABELS
     gained: dict = {}
     for t in added:
         for c in categories_for_names([t]) & DANGEROUS:

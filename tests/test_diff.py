@@ -62,3 +62,70 @@ def test_run_diff_integration():
     r3 = agent("answer A").run("different question")  # different inputs
     d2 = r1.diff(r3)
     assert d2.steps[0].status == INPUTS_DIFFER
+
+
+# -- action-level behavior diff ------------------------------------------------
+
+
+def _saved(tmp_path, name, calls):
+    from loom import tool
+    from loom.providers import ToolCall
+
+    made = []
+    for tool_name in {c[0] for c in calls}:
+        @tool
+        def t(**kwargs) -> str:
+            "a tool"
+            return "x"
+        t.name = tool_name
+        made.append(t)
+    responses = [
+        ModelResponse(tool_calls=[ToolCall(f"t{i}", n, inp)], stop_reason="tool_use")
+        for i, (n, inp) in enumerate(calls)
+    ] + [ModelResponse(text="done")]
+    run = Agent(model=ScriptedProvider(responses), tools=made).run("go")
+    path = str(tmp_path / name)
+    run.save(path)
+    return path
+
+
+def test_diff_actions_reports_added_risk(tmp_path):
+    import json
+
+    from loom.diff import describe_action_diff, diff_actions
+
+    a = _saved(tmp_path, "a.loom.json", [("Read", {"file_path": "a.py"})])
+    b = _saved(tmp_path, "b.loom.json", [("Read", {"file_path": "a.py"}),
+                                          ("send_email", {"to": "jane@x.com"})])
+    d = diff_actions(json.load(open(a)), json.load(open(b)))
+    assert d["added"] == [{"tool": "send_email", "risk": "user-comm", "count": 1}]
+    assert d["removed"] == []
+    assert d["risk_gained"] == ["user-comm"]
+    assert d["score"]["b"] < d["score"]["a"]
+    text = describe_action_diff(d)
+    assert "run risk score: 100 → 90 ⬇ (+user communication)" in text
+    assert "+ send_email x1  ⚠ user-comm" in text
+
+
+def test_diff_actions_identical_runs_score_unchanged(tmp_path):
+    import json
+
+    from loom.diff import diff_actions
+
+    a = _saved(tmp_path, "a.loom.json", [("Read", {"file_path": "a.py"})])
+    b = _saved(tmp_path, "b.loom.json", [("Read", {"file_path": "a.py"})])
+    d = diff_actions(json.load(open(a)), json.load(open(b)))
+    assert d["added"] == [] and d["removed"] == []
+    assert d["score"]["a"] == d["score"]["b"] == 100
+
+
+def test_cli_diff_actions_gates_on_change(tmp_path, capsys):
+    from loom.cli import main
+
+    a = _saved(tmp_path, "a.loom.json", [("Read", {"file_path": "a.py"})])
+    b = _saved(tmp_path, "b.loom.json", [("Read", {"file_path": "a.py"}),
+                                          ("run_sql", {"query": "INSERT INTO t VALUES (1)"})])
+    assert main(["diff", a, b, "--actions"]) == 1  # behavior changed
+    out = capsys.readouterr().out
+    assert "run risk score" in out and "run_sql" in out
+    assert main(["diff", a, a, "--actions"]) == 0  # same behavior passes
