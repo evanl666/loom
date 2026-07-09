@@ -1053,6 +1053,16 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_taint(args: argparse.Namespace) -> int:
+    """Trace sensitive VALUES from where they were read to where they left."""
+    from .taint import describe_taint, taint_paths
+
+    _import_builtin_packs()
+    paths = taint_paths(_load_trace_json(args.path))
+    print(describe_taint(paths))
+    return 1 if (paths and args.fail_on_leak) else 0
+
+
 def _cmd_map(args: argparse.Namespace) -> int:
     """The side-effect map: everything the run changed or reached, one view."""
     from .insight import describe_map, side_effect_map
@@ -2197,6 +2207,12 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    tt = sub.add_parser("taint", help="value-lineage exfiltration paths (secret/PII → egress)")
+    tt.add_argument("path")
+    tt.add_argument("--fail-on-leak", action="store_true", dest="fail_on_leak",
+                    help="exit 1 if any exfiltration path is found (CI gate)")
+    tt.set_defaults(func=_cmd_taint)
 
     mp = sub.add_parser("map", help="side-effect map: everything the run changed or reached")
     mp.add_argument("path")

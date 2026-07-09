@@ -107,7 +107,9 @@ def test_incident_names_the_exfiltration_path(tmp_path):
     from loom.incident import build_report
 
     report = build_report(json.load(open(path)), path)
-    assert "⛓ exfiltration path: [1] get_customer → [3] send_email" in report
+    # the PII value isn't carried verbatim here, so it falls back to the
+    # category sequence (a value-lineage match would win -- see test_taint).
+    assert "⛓ exfiltration path (category sequence): [1] get_customer → [3] send_email" in report
 
 
 def test_cli_why_step_map_and_note(tmp_path, capsys):

@@ -329,20 +329,32 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
                      + "  _(* = already dirty before the run)_")
         if changes.get("agent_exit_code") is not None:
             lines.append(f"- agent process exited {changes['agent_exit_code']}")
-    # Exfiltration PATH: ordered evidence beats co-occurrence -- "read the
-    # secret, THEN reached the network" names the actual leak chain.
+    # Exfiltration PATH. Strongest evidence first: a VERBATIM value-lineage
+    # match (the same secret bytes read then sent) beats a mere category
+    # sequence ("a secret read, then some egress").
     try:
-        from .action import sequence_hits
+        from .taint import taint_paths
 
-        for first, then in (("secret", "network"), ("secret", "user_communication"),
-                            ("pii_access", "network"), ("pii_access", "user_communication"),
-                            ("pii_access", "browser_submit")):
-            hits = sequence_hits(data, first, then)
-            if hits:
-                a, b = hits[0]
-                lines.append(f"- ⛓ exfiltration path: [{a.step}] {a.tool} → "
-                             f"[{b.step}] {b.tool}")
-                break
+        tpaths = taint_paths(data)
+        if tpaths:
+            p = tpaths[0]
+            via = ", ".join(p["sink"]["via"])
+            lines.append(
+                f"- ⛓ exfiltration path (value lineage): {p['kind']} "
+                f"({p['value_preview']}) [{p['source']['step']}] {p['source']['tool']} → "
+                f"[{p['sink']['step']}] {p['sink']['tool']} via {via}")
+        else:
+            from .action import sequence_hits
+
+            for first, then in (("secret", "network"), ("secret", "user_communication"),
+                                ("pii_access", "network"), ("pii_access", "user_communication"),
+                                ("pii_access", "browser_submit")):
+                hits = sequence_hits(data, first, then)
+                if hits:
+                    a, b = hits[0]
+                    lines.append(f"- ⛓ exfiltration path (category sequence): "
+                                 f"[{a.step}] {a.tool} → [{b.step}] {b.tool}")
+                    break
     except Exception:
         pass
 
