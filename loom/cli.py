@@ -1325,6 +1325,26 @@ def _slug_from(path: str) -> str:
     return _slug(path)
 
 
+def _cmd_autopsy(args: argparse.Namespace) -> int:
+    """One report: diagnosis + score + impact map + data flow + fix + incident."""
+    from .autopsy import autopsy_html
+
+    import os
+
+    _import_builtin_packs()
+    data = _load_trace_json(args.path)
+    base = args.path[: -len(".loom.json")] if args.path.endswith(".loom.json") else args.path
+    out = args.output or f"{base}.autopsy.html"
+    with open(out, "w") as f:
+        f.write(autopsy_html(data, path=os.path.basename(args.path)))
+    print(f"autopsy -> {out}  (hand it to a manager / security review / issue)")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(f"file://{os.path.abspath(out)}")
+    return 0
+
+
 def _cmd_movie(args: argparse.Namespace) -> int:
     """Render the 30-second incident movie from a trace."""
     from .movie import movie_html
@@ -2880,6 +2900,12 @@ def build_parser() -> argparse.ArgumentParser:
     rg_from.add_argument("--open-pr", action="store_true", dest="open_pr",
                          help="create a branch + PR with the guard (needs git + gh)")
     rg_from.set_defaults(func=_cmd_regression)
+
+    ap = sub.add_parser("autopsy", help="one report: diagnosis+score+impact+data-flow+fix+incident")
+    ap.add_argument("path")
+    ap.add_argument("-o", "--output", default="", help="output file (default <trace>.autopsy.html)")
+    ap.add_argument("--open", action="store_true", help="open in the browser")
+    ap.set_defaults(func=_cmd_autopsy)
 
     mv = sub.add_parser("movie", help="the 30-second incident animation (self-playing HTML)")
     mv.add_argument("path")
