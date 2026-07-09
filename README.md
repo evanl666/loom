@@ -254,11 +254,15 @@ Traces record everything the agent saw — which can include the API key it
 read out of a config file. Before a trace leaves your machine:
 
 ```
-loom scrub session.loom.json            # -> session.scrubbed.loom.json
+loom share session.loom.json            # scrub, then REFUSE if any secret survives
 loom scrub session.loom.json --check    # CI gate: exit 1 if secrets found
 loom record --scrub -- ...              # redact at write time: credentials never touch disk
 ```
 
+`loom share` is the safe default: it redacts, re-scans the result, and won't
+hand you a `*.shared.loom.json` if anything a human would call a secret is
+still there. The shared copy is stamped `scrubbed`, so **Studio shows a green
+"safe to share" banner** (and an amber "not scrubbed" warning on raw traces).
 Detection covers known key shapes (Anthropic, OpenAI, GitHub, AWS, Slack,
 JWTs, PEM blocks, `DB_PASSWORD=...` assignments); `--aggressive` adds an
 entropy detector. With `--scrub` the agent still sees real values — only the

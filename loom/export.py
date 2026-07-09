@@ -66,6 +66,13 @@ h1 .brand { color: var(--muted); font-weight: 450; font-size: .95rem; }
   opacity: .75; }
 .sub { color: var(--ink-2); font-size: .95rem; margin: .35rem 0 0;
   overflow-wrap: anywhere; }
+.banner { margin: .8rem 0 0; padding: .5rem .8rem; border-radius: 8px;
+  font-size: .9rem; border: 1px solid; }
+.banner code { background: rgba(127,127,127,.15); padding: 0 .3em; border-radius: 4px; }
+.banner.safe { color: var(--tool); border-color: var(--tool);
+  background: color-mix(in srgb, var(--tool) 10%, transparent); }
+.banner.unsafe { color: var(--warn); border-color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 12%, transparent); }
 .tiles { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1.1rem 0 1.2rem; }
 .tile { background: var(--surface); border: 1px solid var(--ring);
   border-radius: 14px; padding: .65rem 1.05rem; min-width: 7rem;
@@ -355,6 +362,15 @@ def _tokens_of(e: dict) -> int:
     return u.get("input_tokens", 0) + u.get("output_tokens", 0)
 
 
+def _scrub_banner(data: dict) -> str:
+    """A safe/unsafe banner: green if `loom share` scrubbed it, amber otherwise."""
+    if data.get("scrubbed"):
+        return ('<div class="banner safe">🛡️ Scrubbed &mdash; secrets redacted, '
+                'safe to share.</div>')
+    return ('<div class="banner unsafe">⚠️ Not scrubbed &mdash; this trace may contain '
+            'secrets the agent saw. Run <code>loom share</code> before sharing it.</div>')
+
+
 def _workspace_tile(ws: "dict | None") -> str:
     if not ws:
         return ""
@@ -439,6 +455,7 @@ def trace_to_html(data: dict) -> str:
   <h1>Loom Studio <span class="brand">— read · replay · rewind</span></h1>
 </div>
 <p class="sub">{title}</p>
+{_scrub_banner(data)}
 <hr class="accentline">
 <div class="tiles">
   <div class="tile accent"><div class="k">model</div><div class="v">{html.escape(str(data.get("model", "?")))}</div></div>

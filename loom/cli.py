@@ -510,7 +510,8 @@ def _cmd_heal(args: argparse.Namespace) -> int:
 
     run = Run.load(args.path, agent=agent)
     report = run.checkup()
-    print(report.summary())
+    print("diagnosis:")
+    print("  " + report.summary().replace("\n", "\n  "))
 
     def check(text: str) -> bool:
         ok = True
@@ -525,13 +526,35 @@ def _cmd_heal(args: argparse.Namespace) -> int:
         return 0
     healed = run.heal(check, regression_dir=args.save_regression or None)
     if healed is None:
-        print("\nno repair fixed the run")
+        print("\n❌ no single context repair fixed the run (tried redacting each "
+              "suspect item). The failure may not be context rot.")
         return 1
-    print(f"\n✅ healed by: {healed.healed_by}")
-    print(f"   output now: {healed.output[:100]}")
+
+    what = _explain_repair(healed.healed_by)
+    print(f"\n✅ fixed by {what}")
+    print(f"   before: {run.output[:100]!r}")
+    print(f"   after:  {healed.output[:100]!r}")
     if healed.regression_path:
-        print(f"   saved regression: {healed.regression_path}")
+        print(f"\n   saved as a regression test -> {healed.regression_path}")
+        print(f"   it runs in CI with:  loom test {args.save_regression}")
+    else:
+        print("\n   keep it as a regression test:  "
+              "add --save-regression tests/traces")
     return 0
+
+
+def _explain_repair(healed_by: str) -> str:
+    """Turn a healed_by tag like 'redact-oversized-0' into a sentence."""
+    parts = (healed_by or "").split("-")
+    if len(parts) >= 2 and parts[0] == "redact":
+        kind = parts[1]
+        reason = {
+            "oversized": "redacting the oversized context item that was crowding out the answer",
+            "unused": "redacting a context item nothing later referenced",
+            "duplicate": "redacting a duplicated context item",
+        }.get(kind, f"redacting the {kind} context item")
+        return f"{reason} (`{healed_by}`)"
+    return f"`{healed_by}`"
 
 
 def _cmd_skills(args: argparse.Namespace) -> int:
@@ -771,6 +794,41 @@ def _cmd_scrub(args: argparse.Namespace) -> int:
     with open(out, "w") as f:
         json.dump(clean, f, indent=2)
     print(f"scrubbed {total} secret(s) -> {out}")
+    return 0
+
+
+def _cmd_share(args: argparse.Namespace) -> int:
+    """Produce a shareable copy: scrub secrets, then REFUSE to emit if any remain."""
+    from .scrub import scrub_text, scrub_trace
+
+    data = _load_trace_json(args.path)
+    clean, found = scrub_trace(data, aggressive=args.aggressive)
+    total = sum(found.values())
+    for kind in sorted(found):
+        print(f"  redacted {found[kind]:>3}x {kind}")
+
+    # Belt and suspenders: scan the SCRUBBED output too. If anything a human
+    # would call a secret survives, don't hand out a file that looks safe.
+    residual = 0
+    _, still = scrub_text(json.dumps(clean), aggressive=True)
+    residual = sum(still.values())
+    if residual:
+        print(f"loom: {residual} possible secret(s) survived scrubbing -- not sharing. "
+              f"Try --aggressive, or inspect the trace.", file=sys.stderr)
+        return 1
+
+    clean["scrubbed"] = True  # Studio reads this to show a "safe to share" banner
+    if "checksum" in clean:
+        from .trace import trace_checksum
+
+        clean["checksum"] = trace_checksum(clean)
+    if args.path.endswith(".loom.json"):
+        out = args.output or args.path[: -len(".loom.json")] + ".shared.loom.json"
+    else:
+        out = args.output or args.path + ".shared"
+    with open(out, "w") as f:
+        json.dump(clean, f, indent=2)
+    print(f"redacted {total} secret(s); safe to share -> {out}")
     return 0
 
 
@@ -1265,6 +1323,12 @@ def build_parser() -> argparse.ArgumentParser:
     lk.add_argument("-o", "--output", default="", help="dashboard path (default <dir>/lake.html)")
     lk.add_argument("--open", action="store_true", help="open the dashboard in a browser")
     lk.set_defaults(func=_cmd_lake)
+
+    sh = sub.add_parser("share", help="make a shareable copy: scrub, then refuse if secrets remain")
+    sh.add_argument("path")
+    sh.add_argument("-o", "--output", default="", help="output path (default *.shared.loom.json)")
+    sh.add_argument("--aggressive", action="store_true", help="also redact high-entropy tokens")
+    sh.set_defaults(func=_cmd_share)
 
     sc = sub.add_parser("scrub", help="redact secrets from a trace before sharing it")
     sc.add_argument("path")
