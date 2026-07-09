@@ -44,7 +44,11 @@ def why_action(source: Any, step: int) -> dict:
     model most plausibly acted on. Heuristic and honest about it: entries are
     ranked candidates, not proofs.
     """
-    acts = actions(source)
+    return why_from_actions(actions(source), step)
+
+
+def why_from_actions(acts: "list[Action]", step: int) -> dict:
+    """``why_action`` over an already-built Action list (avoids re-lifting)."""
     target = next((a for a in acts if a.step == step), None)
     if target is None:
         raise ValueError(f"no action at step {step}")
@@ -59,6 +63,16 @@ def why_action(source: Any, step: int) -> dict:
         if overlap:
             evidence.append((len(overlap), a))
     evidence.sort(key=lambda pair: -pair[0])
+    top = evidence[0][0] if evidence else 0
+    # Honest confidence: a strong word-overlap with an earlier observation is
+    # "medium" (it's still correlation, not proof); a stated intent alone is
+    # "low"; nothing at all is "none". Never "high" -- this is a heuristic.
+    if top >= 3:
+        confidence = "medium"
+    elif top >= 1 or target.intent.strip():
+        confidence = "low"
+    else:
+        confidence = "none"
     return {
         "step": step,
         "tool": target.tool,
@@ -67,16 +81,18 @@ def why_action(source: Any, step: int) -> dict:
         "risk": target.risk,
         "capabilities": target.capabilities,
         "policy": target.policy.to_dict() if target.policy else None,
+        "confidence": confidence,
         "evidence": [
             {"step": a.step, "tool": a.tool or a.type,
-             "snippet": _snippet(a.observation.text)}
-            for _, a in evidence[:3]
+             "snippet": _snippet(a.observation.text), "shared": n}
+            for n, a in evidence[:3]
         ],
+        "missing_evidence": not evidence,
     }
 
 
 def describe_why(w: dict) -> str:
-    lines = [f"[{w['step']}] {w['tool'] or w['type']}"]
+    lines = [f"[{w['step']}] {w['tool'] or w['type']}  (confidence: {w.get('confidence', '?')})"]
     if w["intent"]:
         lines.append(f'  stated intent: "{_snippet(w["intent"], 160)}"')
     if w["risk"]:
@@ -85,12 +101,12 @@ def describe_why(w: dict) -> str:
         p = w["policy"]
         lines.append(f"  firewall: {p['action']}" + (f" ({p['rule']})" if p.get("rule") else ""))
     if w["evidence"]:
-        lines.append("  drew on (ranked candidates):")
+        lines.append("  drew on (ranked candidates -- correlation, not proof):")
         for e in w["evidence"]:
             lines.append(f"    [{e['step']}] {e['tool']}: {e['snippet']}")
     else:
-        lines.append("  no earlier observation overlaps this input -- the model "
-                     "acted on the prompt/context alone")
+        lines.append("  ⚠ no earlier observation overlaps this input -- the model "
+                     "acted on the prompt/context alone (explanation is weak)")
     return "\n".join(lines)
 
 

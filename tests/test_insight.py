@@ -128,3 +128,40 @@ def test_cli_why_step_map_and_note(tmp_path, capsys):
     assert main(["note", path]) == 0
     listing = capsys.readouterr().out
     assert "over the limit — evan" in listing
+
+
+def test_why_action_confidence_is_honest():
+    # strong overlap -> medium (never "high"); intent-only -> low; nothing -> none
+    run = _support_run().to_dict()
+    strong = why_action(run, 3)
+    assert strong["confidence"] in ("medium", "low")  # never "high"
+    assert "confidence" in strong and strong["missing_evidence"] in (True, False)
+    for e in strong["evidence"]:
+        assert "shared" in e  # the overlap count is exposed
+
+
+def test_why_no_evidence_is_low_or_none_and_flagged():
+    # a first action with no prior observation to draw on
+    from loom import Agent, tool
+    from loom.providers import ModelResponse, ScriptedProvider, ToolCall
+
+    @tool
+    def start(x: int) -> str:
+        "start"
+        return "ok"
+
+    run = Agent(model=ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t1", "start", {"x": 1})], stop_reason="tool_use"),
+        ModelResponse(text="done"),
+    ]), tools=[start]).run("go")
+    w = why_action(run.to_dict(), 1)
+    assert w["missing_evidence"] is True
+    assert w["confidence"] in ("low", "none")
+
+
+def test_studio_why_disclosure_present():
+    from loom.export import trace_to_html
+    page = trace_to_html(_support_run().to_dict())
+    assert '<details class="why">' in page
+    assert "stated intent" in page and "correlation, not proof" in page
+    assert "wjump" in page  # evidence links jump to the step

@@ -263,6 +263,23 @@ footer { color: var(--muted); font-size: .78rem; margin-top: 1.4rem;
 @media (prefers-color-scheme: dark) {
   .badge.risk, .badge.deny { color: #ff8f92; }
 }
+.why { margin-top: .45rem; font-size: .82rem; }
+.why > summary { cursor: pointer; color: var(--model); font-weight: 600;
+  list-style: none; user-select: none; width: fit-content; }
+.why > summary::-webkit-details-marker { display: none; }
+.why > summary::before { content: "▸ "; }
+.why[open] > summary::before { content: "▾ "; }
+.wconf { color: var(--muted); font-weight: 500; font-size: .74rem; margin-left: .3rem; }
+.why .wr { display: grid; grid-template-columns: 5.4rem 1fr; gap: .1rem .7rem;
+  margin: .35rem 0; }
+.why .wr b { color: var(--muted); font-weight: 500; font-size: .72rem;
+  text-transform: uppercase; letter-spacing: .05em; }
+.why .wr span { color: var(--ink-2); overflow-wrap: anywhere; }
+.why .wev { margin: .1rem 0 .2rem 0; padding-left: 1rem; }
+.why .wev li { margin: .15rem 0; }
+.why .wjump { color: var(--model); cursor: pointer; }
+.why .wsnip { color: var(--ink-2); } .why .wshared { color: var(--muted); font-size: .74rem; }
+.why em { color: var(--muted); font-size: .74rem; font-style: normal; }
 """
 
 _JS = """
@@ -367,8 +384,12 @@ playBtn.addEventListener('click', () => {
 
 slider.addEventListener('input', () => { stop(); apply(+slider.value); });
 rows.forEach((r, i) => r.addEventListener('click', () => { stop(); apply(i, i); }));
-acts.forEach(a => a.addEventListener('click', () => {
+acts.forEach(a => a.addEventListener('click', (ev) => {
+  if (ev.target.closest('.why')) return;  // don't hijack the Why disclosure
   stop(); const s = +a.dataset.seq; apply(s, s);
+}));
+document.querySelectorAll('.wjump').forEach(j => j.addEventListener('click', (ev) => {
+  ev.stopPropagation(); stop(); const s = +j.dataset.seq; apply(s, s);
 }));
 cells.forEach((c, i) => {
   c.addEventListener('click', () => { stop(); apply(i, i); });
@@ -550,11 +571,13 @@ def _action_rows(data: dict) -> str:
     diff, risk, and the firewall's decision. World-neutral: rendered from the
     generic Action schema, so a SQL or browser pack's actions read the same."""
     from .action import actions as _actions
+    from .insight import why_from_actions
 
     verbs = {"reason": "💭 thought", "answer": "✅ final answer",
              "ask-human": "🙋 asked the human", "meta": "⚙️"}
+    acts = _actions(data)  # built once; the Why disclosures reuse it
     cards: list[str] = []
-    for a in _actions(data):
+    for a in acts:
         head: list[str] = []
         if a.type == "call":
             head.append(f'<span class="verb">🔧 {html.escape(a.tool)}</span>')
@@ -594,14 +617,49 @@ def _action_rows(data: dict) -> str:
         elif a.observation is not None and a.observation.text:
             row("", a.observation.text)
 
+        why_html = _why_disclosure(acts, a) if a.type == "call" and a.step >= 0 else ""
+
         seq_attr = f' data-seq="{a.step}"' if a.step >= 0 else ""
         cards.append(
             f'<div class="action depth{min(a.depth, 3)}"{seq_attr}>'
             f'<div class="head">{"".join(head)}</div>'
             + (f'<div class="kv">{"".join(kv)}</div>' if kv else "")
+            + why_html
             + "</div>"
         )
     return "".join(cards)
+
+
+_CONF_ICON = {"medium": "◑ medium", "low": "◔ low", "none": "○ none"}
+
+
+def _why_disclosure(acts, action) -> str:
+    """A collapsible 'Why?' for one action: stated intent, evidence candidates,
+    missing-evidence flag, policy context, and an HONEST confidence label."""
+    from .insight import why_from_actions
+
+    w = why_from_actions(acts, action.step)
+    rows = []
+    if w["intent"]:
+        rows.append(f'<div class="wr"><b>stated intent</b><span>{html.escape(w["intent"])}</span></div>')
+    if w["policy"]:
+        p = w["policy"]
+        pol = p["action"] + (f" · {p['rule']}" if p.get("rule") else "")
+        rows.append(f'<div class="wr"><b>firewall</b><span>{html.escape(pol)}</span></div>')
+    if w["evidence"]:
+        ev = "".join(
+            f'<li><a class="wjump" data-seq="{e["step"]}">[{e["step"]}] {html.escape(e["tool"])}</a> '
+            f'<span class="wsnip">{html.escape(e["snippet"])}</span> '
+            f'<span class="wshared">({e["shared"]} shared)</span></li>'
+            for e in w["evidence"])
+        rows.append('<div class="wr"><b>drew on</b><span><ul class="wev">' + ev
+                    + '</ul><em>ranked by word overlap — correlation, not proof</em></span></div>')
+    else:
+        rows.append('<div class="wr"><b>drew on</b><span>⚠ nothing earlier overlaps this '
+                    'input — the model acted on the prompt/context alone</span></div>')
+    conf = _CONF_ICON.get(w["confidence"], w["confidence"])
+    return (f'<details class="why"><summary>Why? <span class="wconf">{conf}</span></summary>'
+            + "".join(rows) + "</details>")
 
 
 _WORLD = {  # state-diff kind (or "network") -> (emoji, label)
