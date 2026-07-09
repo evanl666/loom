@@ -38,3 +38,6 @@ examples/flight-recorder/artifacts/
 lake.html
 bench-traces/
 *.wirelog
+
+# generated incident gallery (regenerate: python examples/incidents/generate.py)
+examples/incidents/*.html

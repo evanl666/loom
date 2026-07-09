@@ -78,3 +78,27 @@ def test_insert_is_not_labeled_a_clean_revert():
 
 def test_load_pack_resolves_class_and_instance():
     assert load_pack("loom.packs.sql:SqlPack").name == "sql"
+
+
+def test_scaffolded_pack_certifies_clean(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    from loom.cli import main
+
+    outdir = str(tmp_path / "pk")
+    assert main(["packs", "new", "acme", "-o", outdir]) == 0
+    import os
+    assert os.path.isfile(os.path.join(outdir, "acme_pack.py"))
+    assert os.path.isfile(os.path.join(outdir, "cases.yml"))
+
+    # the scaffold lints clean and its golden case passes, out of the box
+    env = {**os.environ, "PYTHONPATH": outdir}
+    lint = subprocess.run([sys.executable, "-m", "loom", "packs", "lint",
+                           "--pack", "acme_pack:AcmePack"], env=env,
+                          capture_output=True, text=True)
+    assert lint.returncode == 0, lint.stdout + lint.stderr
+    test = subprocess.run([sys.executable, "-m", "loom", "packs", "test",
+                           os.path.join(outdir, "cases.yml")], env=env,
+                          capture_output=True, text=True)
+    assert test.returncode == 0 and "1/1 case(s) passed" in test.stdout

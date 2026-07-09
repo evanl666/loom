@@ -1519,8 +1519,100 @@ def _load_yaml_or_json(path: str) -> dict:
         raise CLIError(f"cannot read {path}: {e}")
 
 
+_PACK_TEMPLATE = '''"""The {title} Pack -- teach Loom about {name} agents.
+
+Fill in the hooks your domain needs; delete the ones it doesn't. Certify with:
+
+    loom packs lint --pack {module}:{cls}
+    loom packs test cases.yml
+"""
+
+from __future__ import annotations
+
+from loom.action import Action, StateDiff
+from loom.packs import Pack, UndoPlan, register
+
+
+class {cls}(Pack):
+    name = "{name}"
+
+    def owns(self, action: Action) -> bool:
+        # Which actions are yours? Keep this NARROW -- `loom packs lint` flags
+        # packs that claim benign unrelated tools.
+        return action.type == "call" and action.tool.startswith("{name}_")
+
+    def capabilities(self, name: str, tool_input) -> "set[str]":
+        # Domain risk hints, merged with the core taxonomy. Vocabulary:
+        # read/write/exec/network/secret/destructive + pii_access/
+        # database_write/browser_submit/user_communication/money_movement.
+        return set()
+
+    def state_diff(self, action: Action, trace: dict) -> "StateDiff | None":
+        # How did the OUTSIDE WORLD change? Return None for reads.
+        # return StateDiff("record", "updated X", detail={{...}})
+        return None
+
+    def undo(self, action: Action, trace: dict) -> "UndoPlan | None":
+        # Be honest: an external side effect can only be COMPENSATED
+        # (reversible=False); lint rejects fake reversibility.
+        return None
+
+    def safe_runtime(self) -> str:
+        # How to debug this domain without touching production.
+        return ""
+
+    def replay_hint(self, action: Action) -> str:
+        return ""
+
+
+register({cls}())
+'''
+
+_PACK_CASES = """# Golden cases certifying the {name} pack.
+#   loom packs test cases.yml
+pack: {module}:{cls}
+cases:
+  - action: {{tool: {name}_example, input: {{id: 1}}, result: "ok"}}
+    expect:
+      owns: true
+      # capabilities_include: [pii_access]
+      # state_diff_kind: record
+      # undo_kind: compensate
+      # reversible: false
+"""
+
+
 def _cmd_packs(args: argparse.Namespace) -> int:
-    """List, lint, or test domain packs."""
+    """List, lint, test, or scaffold domain packs."""
+    if getattr(args, "packs_cmd", None) == "new":
+        import os
+        import re
+
+        name = re.sub(r"[^a-z0-9_]+", "_", args.name.lower()).strip("_")
+        if not name:
+            raise CLIError("pack name must contain letters/digits")
+        cls = "".join(p.capitalize() for p in name.split("_")) + "Pack"
+        outdir = args.output or f"loom-pack-{name}"
+        os.makedirs(outdir, exist_ok=True)
+        module = f"{name}_pack"
+        with open(os.path.join(outdir, f"{module}.py"), "w") as f:
+            f.write(_PACK_TEMPLATE.format(name=name, cls=cls, module=module,
+                                          title=name.replace("_", " ").title()))
+        with open(os.path.join(outdir, "cases.yml"), "w") as f:
+            f.write(_PACK_CASES.format(name=name, cls=cls, module=module))
+        with open(os.path.join(outdir, "README.md"), "w") as f:
+            f.write(f"# loom-pack-{name}\n\nA Loom domain pack. Develop:\n\n```\n"
+                    f"pip install loom-harness\nPYTHONPATH=. loom packs lint --pack {module}:{cls}\n"
+                    f"PYTHONPATH=. loom packs test cases.yml\n```\n\nPublish: expose a "
+                    f"`loom.packs` entry point named `{name}` -> `{module}:{cls}` and any "
+                    f"pip install makes it discoverable (`loom packs`).\n")
+        print(f"pack scaffold -> {outdir}/")
+        for f in (f"{module}.py", "cases.yml", "README.md"):
+            print(f"  {f}")
+        print(f"\nnext: edit {module}.py, then certify:\n"
+              f"  PYTHONPATH={outdir} loom packs lint --pack {module}:{cls}")
+        return 0
+
     if getattr(args, "packs_cmd", None) == "safe-runtime":
         from .packs import install_builtin, packs
 
@@ -2588,6 +2680,10 @@ def build_parser() -> argparse.ArgumentParser:
     pks_sr = pkssub.add_parser("safe-runtime",
                                help="how to run each domain safely while debugging")
     pks_sr.set_defaults(func=_cmd_packs)
+    pks_new = pkssub.add_parser("new", help="scaffold a new domain pack (module + golden cases)")
+    pks_new.add_argument("name", help="the domain, e.g. salesforce / playwright / stripe")
+    pks_new.add_argument("-o", "--output", default="", help="output dir (default loom-pack-<name>)")
+    pks_new.set_defaults(func=_cmd_packs)
 
     sv = sub.add_parser("serve", help="serve a trace directory to the team (list, search, "
                                       "Studio, incidents)")
