@@ -59,3 +59,21 @@ def test_cli_movie(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "movie ->" in out
     assert (tmp_path / "r.movie.html").exists()
+
+
+def test_incident_gallery_generator_builds_an_index(tmp_path):
+    import importlib.util
+    import os
+
+    gen_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "examples", "incidents", "generate.py")
+    spec = importlib.util.spec_from_file_location("incident_gen", gen_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.HERE = str(tmp_path)          # redirect output to a temp dir
+    mod.main()
+    index = (tmp_path / "index.html").read_text()
+    assert "Loom incident gallery" in index
+    for name in ("secret-leak", "sql-delete", "refund-mistake"):
+        assert f"{name}.movie.html" in index and f"{name}.autopsy.html" in index
+        assert (tmp_path / f"{name}.loom.json").exists()
