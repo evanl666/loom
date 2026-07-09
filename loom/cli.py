@@ -749,6 +749,41 @@ def _cmd_trust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_bench(args: argparse.Namespace) -> int:
+    """Run one task through several agents and compare their traces."""
+    import os
+
+    from .bench import load_task, report, run_agent
+
+    try:
+        task = load_task(args.task)
+    except (OSError, ValueError) as e:
+        raise CLIError(str(e))
+
+    agents = []
+    for spec in args.agent:
+        name, sep, command = spec.partition(":")
+        if not sep or not command.strip():
+            raise CLIError(f"--agent must look like name:command, got {spec!r}")
+        agents.append((name.strip(), command.strip()))
+    if not agents:
+        raise CLIError("bench needs at least one --agent name:command")
+
+    os.makedirs(args.outdir, exist_ok=True)
+    shield = _build_shield(args)
+    results = []
+    for name, command in agents:
+        print(f"running {name}...", file=sys.stderr)
+        results.append(run_agent(name, command, task, args.target,
+                                  shield=shield, outdir=args.outdir))
+    text = report(args.task, results)
+    print(text)
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(text + "\n")
+    return 0 if any(r.get("passed") for r in results) else 1
+
+
 def _cmd_policy(args: argparse.Namespace) -> int:
     """Scaffold, test, or explain a firewall policy."""
     from .policy_file import PROFILES, profile_names, resolve, to_shield_kwargs
@@ -1100,6 +1135,17 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
     ap.set_defaults(func=_cmd_approve)
+
+    bn = sub.add_parser("bench", help="run one task through several agents and compare")
+    bn.add_argument("task", help="task file (yaml/json): prompt + success check")
+    bn.add_argument("--agent", action="append", default=[], metavar="NAME:COMMAND",
+                    help="an agent to benchmark, e.g. 'claude:claude -p {prompt}' (repeatable)")
+    bn.add_argument("--target", default="https://api.anthropic.com",
+                    help="upstream API (https://api.openai.com for OpenAI agents)")
+    bn.add_argument("--outdir", default="bench-traces", help="where per-agent traces go")
+    bn.add_argument("-o", "--output", default="", help="also write the report here")
+    shield_flags(bn)
+    bn.set_defaults(func=_cmd_bench)
 
     po = sub.add_parser("policy", help="scaffold, test, or explain a firewall policy")
     posub = po.add_subparsers(dest="policy_cmd", required=True)

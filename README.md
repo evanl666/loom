@@ -277,6 +277,31 @@ decisions — and answers with seq numbers you can jump to in `loom studio`,
 fork, or bisect. The diagnosis is itself a loom run: save it, replay it, ask
 why about the why.
 
+## Bench: same task, several agents, one table
+
+```
+loom bench tasks/fix-tests.yaml \
+    --agent "claude:claude -p {prompt}" \
+    --agent "codex:codex exec {prompt}" \
+    --profile claude-code-safe
+```
+```
+Task: tasks/fix-tests.yaml
+
+agent          pass    tokens  steps  tools  blocked
+------------------------------------------------------
+claude         ✅      18,204     22      6        2
+codex          ✅      11,880     14      4        0
+
+cheapest passing: codex (11,880 tokens)
+```
+
+SWE-bench for *your* repo. Each agent runs behind the recording proxy and the
+firewall, so every cell is backed by a replayable trace in `bench-traces/` —
+open the loser in `loom studio` and see exactly where it went wrong. The task
+file names the prompt and the success check (`contains`/`absent` on the output,
+or a shell `command` whose exit code is the verdict).
+
 ## Incident reports: the postmortem writes itself
 
 ```

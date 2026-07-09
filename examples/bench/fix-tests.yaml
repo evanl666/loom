@@ -1,0 +1,16 @@
+# A loom bench task: one prompt, a success check, run through many agents.
+#
+#   loom bench examples/bench/fix-tests.yaml \
+#     --agent "claude:claude -p {prompt}" \
+#     --agent "codex:codex exec {prompt}" \
+#     --profile claude-code-safe
+#
+# {prompt} is substituted into each agent command; without it, the prompt is
+# appended as the last argument.
+
+prompt: "Fix the failing tests in this repository. Run the test suite to confirm."
+
+success:
+  # Pass when this command exits 0 after the agent finishes.
+  # (Or use `contains: "PASSED"` / `absent: "FAILED"` to check the final output.)
+  command: "pytest -q"
