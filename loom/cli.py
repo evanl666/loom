@@ -1081,6 +1081,54 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_artifacts(args: argparse.Namespace) -> int:
+    """Externalize oversized tool results to a blob dir, or inline them back."""
+    from .artifacts import _blobdir_for, externalize, inline
+
+    data = _load_trace_json(args.path)
+    blobdir = _blobdir_for(args.path, args.blobdir)
+
+    if args.artifacts_cmd == "externalize":
+        threshold = _parse_size(args.threshold)
+        out, manifest = externalize(data, blobdir, threshold=threshold)
+        if not manifest:
+            print(f"nothing over {args.threshold} to externalize")
+            return 0
+        with open(args.path, "w") as f:
+            json.dump(out, f, indent=2)
+        total = sum(m["bytes"] for m in manifest)
+        print(f"externalized {len(manifest)} artifact(s) ({total // 1024} KB) -> {blobdir}/")
+        for m in manifest:
+            print(f"  seq {m['seq']}  {m['kind']}  {m['bytes'] // 1024} KB  sha {m['sha'][:10]}…")
+        return 0
+
+    # inline
+    out, missing = inline(data, blobdir)
+    with open(args.path, "w") as f:
+        json.dump(out, f, indent=2)
+    if missing:
+        print(f"loom: {len(missing)} blob(s) missing from {blobdir} (trace partially restored)",
+              file=sys.stderr)
+        return 1
+    print(f"inlined artifacts from {blobdir}/")
+    return 0
+
+
+def _parse_size(s: str) -> int:
+    s = str(s).strip().lower()
+    mult = 1
+    if s.endswith("kb"):
+        mult, s = 1024, s[:-2]
+    elif s.endswith("mb"):
+        mult, s = 1024 * 1024, s[:-2]
+    elif s.endswith("b"):
+        s = s[:-1]
+    try:
+        return int(float(s) * mult)
+    except ValueError:
+        raise CLIError(f"bad size {s!r} (use e.g. 32kb, 1mb, 65536)")
+
+
 def _cmd_retention(args: argparse.Namespace) -> int:
     """Age-based lifecycle for a trace corpus: scrub-in-place / delete + audit."""
     import os
@@ -2413,6 +2461,18 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    af = sub.add_parser("artifacts", help="externalize oversized tool results to a blob dir")
+    afsub = af.add_subparsers(dest="artifacts_cmd", required=True)
+    af_ext = afsub.add_parser("externalize", help="move big results to blobs, leave pointers")
+    af_ext.add_argument("path")
+    af_ext.add_argument("--threshold", default="32kb", help="externalize results over this (default 32kb)")
+    af_ext.add_argument("--blobdir", default="", help="blob dir (default <trace>.artifacts/)")
+    af_ext.set_defaults(func=_cmd_artifacts)
+    af_in = afsub.add_parser("inline", help="restore externalized results from the blob dir")
+    af_in.add_argument("path")
+    af_in.add_argument("--blobdir", default="", help="blob dir (default <trace>.artifacts/)")
+    af_in.set_defaults(func=_cmd_artifacts)
 
     rt = sub.add_parser("retention", help="age-based lifecycle for a corpus (scrub/delete + audit)")
     rt.add_argument("directory")

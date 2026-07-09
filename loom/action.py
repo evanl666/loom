@@ -167,6 +167,12 @@ def _as_trace(source: Any) -> dict:
 def _result_text(result: Any) -> str:
     import json
 
+    # An externalized tool result is a pointer, not the content -- render it
+    # as a friendly placeholder rather than dumping the pointer dict.
+    if isinstance(result, dict) and "_loom_artifact" in result:
+        from .artifacts import preview
+
+        return preview(result["_loom_artifact"])
     if isinstance(result, str):
         return result
     try:
