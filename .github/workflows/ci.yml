@@ -28,6 +28,13 @@ jobs:
           if ref.startswith("refs/tags/v"):
               tag = ref.removeprefix("refs/tags/v")
               assert pyproject == tag, f"pyproject {pyproject} != tag {tag}"
+          # No STALE hardcoded version in the README (a common source of user
+          # confusion). Prose about old releases is fine; a "loom-harness==X.Y.Z"
+          # pin or a "vX.Y.Z" that isn't the current one is not.
+          readme = open("README.md").read()
+          pins = re.findall(r'loom-harness==(\d+\.\d+\.\d+)', readme)
+          stale = [p for p in pins if p != pyproject]
+          assert not stale, f"README pins stale version(s) {stale} (current {pyproject})"
           print(f"version consistent: {pyproject}")
           EOF
 
