@@ -73,6 +73,22 @@ h1 .brand { color: var(--muted); font-weight: 450; font-size: .95rem; }
   background: color-mix(in srgb, var(--tool) 10%, transparent); }
 .banner.unsafe { color: var(--warn); border-color: var(--warn);
   background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.wspanel { margin: 1.1rem 0; }
+.wsmeta { color: var(--ink-2); font-size: .85rem; margin: 0 0 .6rem; }
+.wsstat { color: var(--muted); font-size: .8rem; margin-bottom: .5rem; }
+.wsfiles { display: flex; flex-direction: column; gap: .2rem; margin-bottom: .6rem; }
+.wsfile { font-size: .85rem; display: flex; gap: .5rem; align-items: baseline; }
+.wstag { font-size: .68rem; font-weight: 600; padding: 0 .35em; border-radius: 4px;
+  text-transform: uppercase; }
+.t-add { color: var(--tool); border: 1px solid var(--tool); }
+.t-mod { color: var(--model); border: 1px solid var(--model); }
+.t-del { color: var(--warn); border: 1px solid var(--warn); }
+.wsfile .pre { color: var(--muted); font-size: .75rem; }
+.wshint { color: var(--muted); font-size: .8rem; }
+.wsdiff summary { cursor: pointer; color: var(--model); font-size: .85rem; }
+.wsdiff pre { max-height: 340px; overflow: auto; font-size: .78rem; line-height: 1.45;
+  background: var(--page); border: 1px solid var(--ring); border-radius: 8px;
+  padding: .6rem .8rem; margin-top: .5rem; white-space: pre; }
 .tiles { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1.1rem 0 1.2rem; }
 .tile { background: var(--surface); border: 1px solid var(--ring);
   border-radius: 14px; padding: .65rem 1.05rem; min-width: 7rem;
@@ -362,6 +378,57 @@ def _tokens_of(e: dict) -> int:
     return u.get("input_tokens", 0) + u.get("output_tokens", 0)
 
 
+def _dirty_banner(ws: "dict | None") -> str:
+    """Warn when the recording ran on an uncommitted working tree."""
+    g = (ws or {}).get("git") or {}
+    if not g.get("dirty"):
+        return ""
+    return ('<div class="banner unsafe">⚠️ Recorded on a <b>dirty working tree</b> '
+            f'(commit <code>{html.escape(g.get("commit", "")[:10])}</code> + uncommitted '
+            'changes) — the exact source state may not be reconstructable from git alone.</div>')
+
+
+def _workspace_panel(ws: "dict | None") -> str:
+    """A Workspace panel: git identity + what the agent changed + the diff."""
+    if not ws:
+        return ""
+    g = ws.get("git") or {}
+    ch = ws.get("changes") or {}
+    meta = []
+    if g.get("commit"):
+        meta.append(f"commit <code>{html.escape(g['commit'][:10])}</code>")
+    if g.get("branch"):
+        meta.append(f"branch <code>{html.escape(g['branch'])}</code>")
+    if ws.get("cwd"):
+        meta.append(f"<code>{html.escape(ws['cwd'])}</code>")
+    if ws.get("os"):
+        meta.append(html.escape(ws["os"]))
+    if not meta and not ch.get("files"):
+        return ""
+
+    rows = ""
+    for f in (ch.get("files") or [])[:200]:
+        tag = {"M": "mod", "A": "add", "D": "del"}.get(f.get("status", "")[:1], f.get("status", ""))
+        pre = ' <span class="pre">(was dirty)</span>' if f.get("pre_existing") else ""
+        rows += (f'<div class="wsfile"><span class="wstag t-{tag}">{tag}</span>'
+                 f'<code>{html.escape(f.get("path", ""))}</code>{pre}</div>')
+    files_html = f'<div class="wsfiles">{rows}</div>' if rows else ""
+    if ch.get("stat"):
+        files_html = f'<div class="wsstat">{html.escape(ch["stat"])}</div>' + files_html
+
+    diff_html = ""
+    if ch.get("diff"):
+        trunc = " (truncated)" if ch.get("diff_truncated") else ""
+        diff_html = (f'<details class="wsdiff"><summary>view patch{trunc}</summary>'
+                     f'<pre>{html.escape(ch["diff"])}</pre></details>')
+    elif ch.get("files"):
+        diff_html = ('<p class="wshint">record with <code>--capture-diff</code> to embed '
+                     'the full patch here.</p>')
+
+    return (f'<div class="panel wspanel"><h2>Workspace</h2>'
+            f'<p class="wsmeta">{" · ".join(meta)}</p>{files_html}{diff_html}</div>')
+
+
 def _scrub_banner(data: dict) -> str:
     """A safe/unsafe banner: green if `loom share` scrubbed it, amber otherwise."""
     if data.get("scrubbed"):
@@ -465,6 +532,7 @@ def trace_to_html(data: dict) -> str:
 </div>
 <p class="sub">{title}</p>
 {_scrub_banner(data)}
+{_dirty_banner(data.get("workspace"))}
 <hr class="accentline">
 <div class="tiles">
   <div class="tile accent"><div class="k">model</div><div class="v">{html.escape(str(data.get("model", "?")))}</div></div>
@@ -484,6 +552,7 @@ def trace_to_html(data: dict) -> str:
   <div class="striplabel">tokens per step · click a bar to jump · ← / → to scrub · space to replay</div>
   <div class="strip">{"".join(cells)}</div>
 </div>
+{_workspace_panel(data.get("workspace"))}
 <div class="cols">
   <div class="panel"><h2>Timeline</h2><div class="timeline">{"".join(rows)}</div></div>
   <div class="side">

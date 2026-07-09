@@ -209,6 +209,36 @@ def tools_delta(base: "dict", head: "dict") -> str:
     return "this change " + "; ".join(parts) if parts else ""
 
 
+def risk_delta(base: "dict", head: "dict") -> str:
+    """Per-category risk verdict between two ``to_json()`` docs.
+
+    Groups newly-granted tools by risk category so a PR reviewer sees the
+    capability change in safety terms -- "new network egress", "new shell
+    execution" -- not just a tool name. Removed categories are noted too.
+    """
+    from .risk import DANGEROUS, categories_for_names
+
+    b, h = base.get("agent_tools"), head.get("agent_tools")
+    if b is None or h is None:
+        return ""
+    added, removed = set(h) - set(b), set(b) - set(h)
+    label = {
+        "network-egress": "network egress", "secret-read": "secret reads",
+        "code-exec": "shell execution", "fs-destructive": "destructive filesystem",
+        "fs-write": "file writes",
+    }
+    gained: dict = {}
+    for t in added:
+        for c in categories_for_names([t]) & DANGEROUS:
+            gained.setdefault(c, []).append(t)
+    lost = {c for t in removed for c in categories_for_names([t]) & DANGEROUS}
+    lost -= set(gained)
+    parts = [f"+{label.get(c, c)} ({', '.join(sorted(ts))})"
+             for c, ts in sorted(gained.items())]
+    parts += [f"-{label.get(c, c)}" for c in sorted(lost)]
+    return "risk delta: " + ", ".join(parts) if parts else ""
+
+
 def cost_delta(base: "list[dict]", head: "list[dict]") -> str:
     """One-line cost verdict between two ``to_json()['impacts']`` lists.
 

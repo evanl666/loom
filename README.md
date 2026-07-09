@@ -5,7 +5,7 @@
 [![Python](https://img.shields.io/pypi/pyversions/loom-harness)](https://pypi.org/project/loom-harness/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**Put Claude Code behind a black box recorder and firewall.**
+**The black box, firewall, and incident reporter for AI coding agents.**
 
 Record Claude Code, Codex, LangGraph — any agent that speaks the Anthropic or
 OpenAI API — with **one command and zero code changes**.
@@ -14,6 +14,14 @@ OpenAI API — with **one command and zero code changes**.
 pip install loom-harness                       # zero dependencies (or: uvx --from loom-harness loom)
 
 loom record claude "fix the failing test" --safe
+```
+```
+recorded 17 steps, 42k tokens -> session.loom.json
+🛡️ shield blocked 1 risky call: Read(".env")
+report:    session.html + session.incident.md
+shareable: session.shared.loom.json   (secrets scrubbed)
+replay:    loom replay session.loom.json
+inspect:   loom studio session.loom.json
 ```
 
 That one command **records** the run, **blocks** dangerous tool calls (reads of

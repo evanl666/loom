@@ -481,11 +481,10 @@ def _cmd_record(args: argparse.Namespace) -> int:
         )
         blocked = [e for e in data.get("shield_events", []) if e.get("action") == "deny"]
         if blocked:
-            print(f"  shield blocked {len(blocked)} tool call(s):", file=sys.stderr)
-            for e in blocked:
-                print(f"    {e.get('tool')}({json.dumps(e.get('input', {}), sort_keys=True, default=str)})", file=sys.stderr)
-        print(f"  replay it:  loom replay {args.save}", file=sys.stderr)
-        print(f"  inspect it: loom studio {args.save}", file=sys.stderr)
+            calls = ", ".join(
+                f"{e.get('tool')}({json.dumps(e.get('input', {}), sort_keys=True, default=str)})"
+                for e in blocked[:3])
+            print(f"🛡️ shield blocked {len(blocked)} risky call(s): {calls}", file=sys.stderr)
         if args.report:
             base = args.save[: -len(".loom.json")] if args.save.endswith(".loom.json") else args.save
             from .export import trace_to_html
@@ -497,7 +496,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
             md_path = base + ".incident.md"
             with open(md_path, "w") as f:
                 f.write(build_report(data, args.save) + "\n")
-            print(f"  report:     {html_path}  +  {md_path}", file=sys.stderr)
+            print(f"report:    {html_path} + {md_path}", file=sys.stderr)
             # A safe-to-share copy: scrub the trace, stamp it, so it can go
             # straight into an issue alongside the incident report.
             from .scrub import scrub_trace
@@ -510,9 +509,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
             shared_path = base + ".shared.loom.json"
             with open(shared_path, "w") as f:
                 json.dump(shared, f, indent=2)
-            print(f"  shareable:  {shared_path}"
-                  + (f" ({sum(found.values())} secret(s) redacted)" if found else ""),
+            print(f"shareable: {shared_path}"
+                  + (f"   ({sum(found.values())} secret(s) scrubbed)" if found else "   (secrets scrubbed)"),
                   file=sys.stderr)
+        print(f"replay:    loom replay {args.save}", file=sys.stderr)
+        print(f"inspect:   loom studio {args.save}", file=sys.stderr)
     except (OSError, json.JSONDecodeError):
         print("\nno traffic recorded (did the agent talk to the API?)", file=sys.stderr)
         if "openai" not in args.target:

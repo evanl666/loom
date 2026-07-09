@@ -227,3 +227,20 @@ def test_tools_delta_flags_dangerous_grants():
     # a purely safe addition doesn't cry wolf
     safe = tools_delta({"agent_tools": ["Read"]}, {"agent_tools": ["Read", "summarize"]})
     assert "DANGEROUS" not in safe and "summarize" in safe
+
+
+def test_risk_delta_groups_by_category():
+    from loom.impact import risk_delta
+
+    base = {"agent_tools": ["Read", "Glob"]}
+    head = {"agent_tools": ["Read", "Glob", "Bash", "WebFetch", "summarize"]}
+    line = risk_delta(base, head)
+    assert "risk delta:" in line
+    assert "+network egress (WebFetch)" in line
+    assert "+shell execution (Bash)" in line
+    assert "summarize" not in line  # not dangerous -> not in risk delta
+
+    # a purely safe change -> no risk delta
+    assert risk_delta({"agent_tools": ["Read"]}, {"agent_tools": ["Read", "summarize"]}) == ""
+    # missing inventory -> no delta (old loom)
+    assert risk_delta({"agent_tools": None}, head) == ""

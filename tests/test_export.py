@@ -54,3 +54,27 @@ def test_export_marks_paused_runs():
     page = trace_to_html(run.to_dict())
     assert "paused" in page
     assert "Proceed?" in page
+
+
+def test_studio_workspace_panel_and_dirty_banner():
+    from loom.export import trace_to_html
+
+    data = {
+        "model": "m", "episodes": ["fix"], "output": "done", "log": [],
+        "workspace": {
+            "os": "Linux", "cwd": "/repo",
+            "git": {"commit": "abc1234567", "branch": "main", "dirty": True},
+            "changes": {
+                "stat": "2 files changed", "dirty_hash": "beef",
+                "files": [{"status": "M", "path": "app.py", "pre_existing": False},
+                          {"status": "A", "path": "new.py", "pre_existing": True}],
+                "diff": "--- a/app.py\n+++ b/app.py\n+new\n",
+            },
+        },
+    }
+    html = trace_to_html(data)
+    assert "dirty working tree" in html          # top banner
+    assert ">Workspace</h2>" in html             # the panel
+    assert "app.py" in html and "new.py" in html
+    assert "was dirty" in html                   # pre_existing marker
+    assert "view patch" in html and "+new" in html  # the embedded diff
