@@ -1,0 +1,23 @@
+# Golden cases certifying the built-in SQL pack.
+#   loom packs test examples/pack-cases/sql.yml
+pack: loom.packs.sql:SqlPack
+cases:
+  - action: {tool: run_query, input: {query: "SELECT ssn FROM customers"}}
+    expect:
+      owns: true
+      capabilities_include: [pii_access, read]
+      state_diff_kind: null        # a read changes nothing
+
+  - action: {tool: run_query, input: {query: "INSERT INTO orders VALUES (1)"}, result: "1 row inserted"}
+    expect:
+      owns: true
+      capabilities_include: [database_write, write]
+      state_diff_kind: database
+      undo_kind: compensate
+      reversible: false
+
+  - action: {tool: db_exec, input: {sql: "DROP TABLE users"}}
+    expect:
+      capabilities_include: [destructive]
+      undo_kind: noop
+      reversible: false

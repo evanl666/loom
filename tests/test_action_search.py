@@ -63,3 +63,20 @@ def test_cli_packs_lists_builtins(capsys):
     for name in ("coding", "sql", "browser", "support"):
         assert name in out
     assert "built-in" in out and "loom.packs" in out
+
+
+def test_cli_packs_lint_and_test(tmp_path, capsys):
+    # lint a built-in clean
+    assert main(["packs", "lint", "--pack", "loom.packs.sql:SqlPack"]) == 0
+    assert "looks good" in capsys.readouterr().out
+
+    # a golden cases file certifies the pack
+    cases = tmp_path / "cases.yml"
+    cases.write_text(
+        "pack: loom.packs.sql:SqlPack\n"
+        "cases:\n"
+        "  - action: {tool: run_query, input: {query: \"INSERT INTO t VALUES (1)\"}, result: \"1 row\"}\n"
+        "    expect: {owns: true, undo_kind: compensate, reversible: false}\n"
+    )
+    assert main(["packs", "test", str(cases)]) == 0
+    assert "1/1 case(s) passed" in capsys.readouterr().out

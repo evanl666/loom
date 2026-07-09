@@ -1144,8 +1144,59 @@ def _cmd_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_yaml_or_json(path: str) -> dict:
+    """Load a .yml/.json doc via the bounded policy parser (pyyaml if present)."""
+    from .policy_file import _parse
+
+    try:
+        with open(path) as f:
+            return _parse(f.read(), path) or {}
+    except OSError as e:
+        raise CLIError(f"cannot read {path}: {e}")
+
+
 def _cmd_packs(args: argparse.Namespace) -> int:
-    """List domain packs: built-ins plus pip-installed plugins."""
+    """List, lint, or test domain packs."""
+    if getattr(args, "packs_cmd", None) == "lint":
+        from .packs.certify import lint_pack, load_pack
+
+        try:
+            pack = load_pack(args.pack)
+        except (ImportError, AttributeError, ValueError) as e:
+            raise CLIError(f"could not load pack {args.pack!r}: {e}")
+        problems = lint_pack(pack)
+        for p in problems:
+            print(f"  ⚠️  {p}")
+        if problems:
+            print(f"\n{len(problems)} issue(s) — this pack may mislabel actions", file=sys.stderr)
+            return 1
+        print(f"pack {pack.name!r} looks good ✓")
+        return 0
+
+    if getattr(args, "packs_cmd", None) == "test":
+        from .packs.certify import load_pack, test_pack
+
+        cases_doc = _load_yaml_or_json(args.cases)
+        spec = args.pack or cases_doc.get("pack")
+        if not spec:
+            raise CLIError("provide --pack module:attr, or a 'pack:' key in the cases file")
+        try:
+            pack = load_pack(spec)
+        except (ImportError, AttributeError, ValueError) as e:
+            raise CLIError(f"could not load pack {spec!r}: {e}")
+        results = test_pack(pack, cases_doc.get("cases", []))
+        failed = 0
+        for r in results:
+            if r["ok"]:
+                print(f"  ok   {r['tool']}")
+            else:
+                failed += 1
+                print(f"  FAIL {r['tool']}")
+                for f in r["failures"]:
+                    print(f"         - {f}")
+        print(f"\n{len(results) - failed}/{len(results)} case(s) passed")
+        return 1 if failed else 0
+
     from importlib import metadata
 
     from .packs import install_builtin, packs, register
@@ -2085,8 +2136,16 @@ def build_parser() -> argparse.ArgumentParser:
     fk.add_argument("-o", "--output", default="", help="where to save the branch trace")
     fk.set_defaults(func=_cmd_fork)
 
-    pks = sub.add_parser("packs", help="list domain packs (built-in + installed plugins)")
-    pks.set_defaults(func=_cmd_packs)
+    pks = sub.add_parser("packs", help="list / lint / test domain packs")
+    pks.set_defaults(func=_cmd_packs, packs_cmd=None)
+    pkssub = pks.add_subparsers(dest="packs_cmd")
+    pks_lint = pkssub.add_parser("lint", help="static correctness checks for a pack")
+    pks_lint.add_argument("--pack", required=True, help="module:attr (a Pack class or instance)")
+    pks_lint.set_defaults(func=_cmd_packs)
+    pks_test = pkssub.add_parser("test", help="run golden cases against a pack")
+    pks_test.add_argument("cases", help="a .yml/.json file of {pack, cases:[{action, expect}]}")
+    pks_test.add_argument("--pack", default="", help="module:attr (overrides the file's pack:)")
+    pks_test.set_defaults(func=_cmd_packs)
 
     sv = sub.add_parser("serve", help="serve a trace directory to the team (list, search, "
                                       "Studio, incidents)")

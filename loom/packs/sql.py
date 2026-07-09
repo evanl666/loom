@@ -112,8 +112,11 @@ class SqlPack(Pack):
         op, table = _op_and_table(stmt)
         t = table or "<table>"
         if op == "INSERT":
+            # Compensable but not a clean revert: the trace doesn't hold the
+            # keys of the inserted rows, so this needs a human to fill them in.
             return UndoPlan("compensate", f"DELETE the rows inserted into {t}",
-                            [f"DELETE FROM {t} WHERE <keys of the inserted rows>"])
+                            [f"DELETE FROM {t} WHERE <keys of the inserted rows>"],
+                            reversible=False)
         if op in ("UPDATE", "UPSERT"):
             return UndoPlan(
                 "compensate", f"restore the previous values in {t}",
