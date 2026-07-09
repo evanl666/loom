@@ -5,10 +5,14 @@
 [![Python](https://img.shields.io/pypi/pyversions/loom-harness)](https://pypi.org/project/loom-harness/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-**The black box, firewall, and incident reporter for AI coding agents.**
+**The black-box debugger for tool-using AI agents.**
 
-Record Claude Code, Codex, LangGraph — any agent that speaks the Anthropic or
-OpenAI API — with **one command and zero code changes**.
+Record, replay, firewall, and *undo* any agent that calls tools — coding,
+browser, data, or support — then debug it action by action: what it did, why,
+what changed in the world, and whether policy should have stopped it.
+**Start with Claude Code or Codex** — one command, zero code changes — and the
+same primitives extend to any Anthropic/OpenAI-API agent through
+[domain packs](#packs).
 
 ```
 pip install loom-harness                       # zero dependencies (or: uvx --from loom-harness loom)
@@ -131,6 +135,63 @@ loom proxy --replay session.loom.json
 
 Your API key is forwarded, never stored — traces contain traffic, not
 credentials.
+
+## The Action Debugger: what it did, why, and what changed
+
+A trace is a log; a debugger is a log you can *reason about*. Loom lifts the
+raw effect log into a domain-neutral **Action** timeline — the same vocabulary
+whether the agent writes code, clicks through a browser, or runs SQL:
+
+| Field | What it answers |
+|---|---|
+| **Action** | one thing the agent did — reasoned, called a tool, answered |
+| **Observation** | what came back (result, error, tokens) |
+| **StateDiff** | how the *outside world* changed (files, DB rows, DOM, fields) |
+| **PolicyDecision** | what the firewall decided — allow / deny / confirm, and why |
+| **ReplayPoint** | a handle to replay or fork from this step |
+
+```python
+from loom import actions
+for a in run.actions():
+    print(a.type, a.tool, a.risk, a.capabilities, a.state_diff, a.policy)
+```
+
+Risk is described in **capabilities**, not tool names, so a firewall rule
+survives the agent renaming its shell tool — and generalizes past coding to
+business risk:
+
+```
+read  write  exec  network  secret  destructive          # infrastructure
+pii_access  database_write  browser_submit
+user_communication  money_movement  external_side_effect  # business
+```
+
+`--confirm 'cap:money_movement'` gates every refund tool; `--deny 'cap:exec'`
+blocks every shell-shaped tool whatever it's called.
+
+<a id="packs"></a>
+### Packs: teach Loom your agent's world
+
+The core is domain-neutral; what it can't know is how a *specific world*
+works — how to diff a database, screenshot a browser, or undo a CRM write.
+That lives in a **Pack** (`loom.packs.Pack`) with a few optional hooks —
+`state_diff`, `undo`, domain `capabilities`, `capture`:
+
+```python
+from loom.packs import Pack, StateDiff, UndoPlan, register
+
+class SqlPack(Pack):
+    name = "sql"
+    def owns(self, action):      return action.tool == "run_sql"
+    def state_diff(self, a, tr): return StateDiff("database", "+1 row in customers")
+    def undo(self, a, tr):       return UndoPlan("compensate", "DELETE the inserted row", [...])
+
+register(SqlPack())
+```
+
+The **Coding Pack** ships built-in (file diffs, `git` undo, shell/secret
+risk) — it's simply the first pack. Browser / Data / Support packs plug in the
+same way, which is what makes Loom a debugger for agents it didn't build.
 
 ## Loom Shield: don't dangerously skip permissions
 
