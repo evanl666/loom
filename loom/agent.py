@@ -87,6 +87,39 @@ def _jsonable(value: Any) -> Any:
         return str(value)
 
 
+_TRANSIENT_STATUS = {408, 409, 429, 500, 502, 503, 504, 529}
+_TRANSIENT_NAMES = (
+    "ratelimit", "overloaded", "timeout", "connection", "serviceunavailable",
+    "internalserver",
+)
+
+
+def _transient(e: Exception) -> bool:
+    """Is this worth retrying? Vendor-neutral: status codes + class-name hints."""
+    if isinstance(e, (ConnectionError, TimeoutError)):
+        return True
+    status = getattr(e, "status_code", None) or getattr(e, "status", None)
+    if isinstance(status, int):
+        return status in _TRANSIENT_STATUS
+    return any(hint in type(e).__name__.lower() for hint in _TRANSIENT_NAMES)
+
+
+def _with_timeout(tool: Any, args: dict, seconds: float) -> Any:
+    """Run a tool with a wall-clock cap. The worker thread can't be killed --
+    it is abandoned (daemon) and its eventual result discarded."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as _FuturesTimeout
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(lambda: tool(**args))
+    try:
+        return future.result(timeout=seconds)
+    except _FuturesTimeout:
+        raise TimeoutError(f"tool {tool.name!r} exceeded {seconds}s") from None
+    finally:
+        pool.shutdown(wait=False)
+
+
 def _resolve_provider(model: Any, provider: "ModelProvider | None") -> ModelProvider:
     if provider is not None:
         return provider
@@ -130,6 +163,9 @@ class Agent:
         critic_threshold: float = 0.6,
         critic_retries: int = 1,
         deliberate: int = 1,
+        model_retries: int = 2,
+        retry_backoff: float = 1.0,
+        tool_timeout: "float | None" = None,
     ):
         self.provider = _resolve_provider(model, provider)
         self.model = getattr(self.provider, "model", str(model))
@@ -167,6 +203,14 @@ class Agent:
         self.deliberate = max(1, deliberate)
         if self.deliberate > 1 and self.critic_provider is None:
             raise ValueError("deliberate=N needs a critic to pick the winner: Agent(critic=...)")
+        # Production essentials: transient model errors (rate limits, 5xx,
+        # dropped connections) retry with exponential backoff INSIDE the
+        # effect boundary -- the recorded effect is the final result, so
+        # replays never see the weather. Tools get a wall-clock cap; a timed-
+        # out tool records an ERROR result like any other tool failure.
+        self.model_retries = model_retries
+        self.retry_backoff = retry_backoff
+        self.tool_timeout = tool_timeout
 
     # -- delegation -------------------------------------------------------
 
@@ -364,9 +408,7 @@ class Agent:
                     # added or a schema edited must fail strict replay and
                     # show up in impact, exactly like a prompt change.
                     {"system": self.system, "messages": messages, "tools": tool_schemas},
-                    lambda messages=messages: self.provider.complete(
-                        self.system, messages, tool_schemas
-                    ),
+                    lambda messages=messages: self._complete(messages, tool_schemas),
                     encode=lambda r: r.to_dict(),
                     decode=ModelResponse.from_dict,
                 )
@@ -398,9 +440,7 @@ class Agent:
                         alt = rec.run(
                             "sample",
                             {"turn": turn, "i": i},
-                            lambda messages=messages: self.provider.complete(
-                                self.system, messages, tool_schemas
-                            ),
+                            lambda messages=messages: self._complete(messages, tool_schemas),
                             encode=lambda r: r.to_dict(),
                             decode=ModelResponse.from_dict,
                         )
@@ -623,11 +663,33 @@ class Agent:
         )
         ctx.items[:] = pinned + [summary_item] + tail
 
+    def _complete(self, messages: list, tool_schemas: list):
+        """One model call, with transient errors retried before recording.
+
+        Retries live INSIDE the effect thunk: the recorded effect is the final
+        successful response, so a run that weathered two rate limits replays
+        identically to one that didn't. Non-transient errors (auth, bad
+        request) raise immediately.
+        """
+        import time as _time
+
+        attempt = 0
+        while True:
+            try:
+                return self.provider.complete(self.system, messages, tool_schemas)
+            except Exception as e:
+                if attempt >= self.model_retries or not _transient(e):
+                    raise
+                _time.sleep(self.retry_backoff * (2 ** attempt))
+                attempt += 1
+
     def _call_tool(self, name: str, args: dict) -> Any:
         tool = self.tools.get(name)
         if tool is None:
             return f"ERROR: unknown tool {name!r}"
         try:
+            if self.tool_timeout is not None:
+                return _jsonable(_with_timeout(tool, args, self.tool_timeout))
             return _jsonable(tool(**args))
         except Exception as e:  # tools failing shouldn't crash the harness
             return f"ERROR: {type(e).__name__}: {e}"

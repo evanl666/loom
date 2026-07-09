@@ -409,6 +409,24 @@ agent = Agent(model=..., tools=[fetch_a, fetch_b], parallel_tools=True)
 run = await agent.arun("...")
 ```
 
+## Rough weather: retries, timeouts, turn caps
+
+```python
+agent = Agent(
+    model=...,
+    model_retries=2,      # rate limits / 5xx / dropped connections retry
+    retry_backoff=1.0,    # ...with exponential backoff (1s, 2s, 4s...)
+    tool_timeout=30,      # a hung tool records "ERROR: TimeoutError" and the run continues
+    max_steps=20,         # hard turn cap per episode
+)
+```
+
+Retries happen *inside* the effect boundary: the recorded effect is the final
+successful response, so a run that weathered two rate limits replays
+byte-identically to one that didn't. Auth and bad-request errors never retry.
+A timed-out tool becomes an `ERROR:` result the model can react to — same as
+any other tool failure — and the worker is abandoned, not awaited.
+
 ## Loom Studio: visual time travel
 
 `loom studio` opens any saved trace as a self-contained HTML time-travel
