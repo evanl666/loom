@@ -161,14 +161,81 @@ def _cmd_watch(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor(args: argparse.Namespace) -> int:
-    """Check a saved trace for context rot; exit 1 if findings exist."""
-    from .health import analyze
+    """No path: check the environment. With a path: check a trace for context rot."""
+    if args.path:
+        from .health import analyze
 
-    log, data = _load_log(args.path)
-    episodes = data.get("episodes") or [data.get("prompt", "")]
-    report = analyze(episodes, log)
-    print(report.summary())
-    return 0 if report.ok else 1
+        log, data = _load_log(args.path)
+        episodes = data.get("episodes") or [data.get("prompt", "")]
+        report = analyze(episodes, log)
+        print(report.summary())
+        return 0 if report.ok else 1
+    return _doctor_environment()
+
+
+def _doctor_environment() -> int:
+    """Will a recording actually work here? Check versions, agents, extras."""
+    import importlib.util
+    import os
+    import platform
+    import shutil
+
+    from . import __version__
+
+    ok = "✅"
+    warn = "⚠️ "
+    print(f"loom {__version__}   python {platform.python_version()}   {platform.system()}")
+    print()
+
+    problems = 0
+    print("agents (loom record <name> \"...\"):")
+    any_agent = False
+    for name, (_, binary, is_openai) in sorted(AGENTS.items()):
+        found = shutil.which(binary)
+        env = "OPENAI_BASE_URL" if is_openai else "ANTHROPIC_BASE_URL"
+        if found:
+            any_agent = True
+            print(f"  {ok} {name:8} {found}  (honors {env})")
+        else:
+            print(f"  {warn}{name:8} not on PATH")
+    if not any_agent:
+        print("     (install Claude Code or Codex, or use `loom record -- <command>`)")
+
+    print("\noptional extras:")
+    for extra, module, what in [
+        ("anthropic", "anthropic", "live Claude runs / the LLM judge"),
+        ("openai", "openai", "OpenAI agents / embeddings"),
+        ("yaml", "yaml", "full YAML for policy files (a bounded parser ships built in)"),
+        ("mcp", "mcp", "MCP tool servers"),
+    ]:
+        present = importlib.util.find_spec(module) is not None
+        mark = ok if present else warn
+        note = "" if present else f"  (pip install \"loom-harness[{extra}]\")"
+        print(f"  {mark}{module:10} {what}{note}")
+
+    print("\nfirewall profiles (--profile):")
+    from .policy_file import profile_names
+
+    print("  " + ", ".join(profile_names()))
+
+    runtime = os.path.join(os.path.expanduser("~"), ".loom")
+    try:
+        os.makedirs(runtime, exist_ok=True)
+        testfile = os.path.join(runtime, ".doctor-write-test")
+        with open(testfile, "w") as f:
+            f.write("ok")
+        os.remove(testfile)
+        print(f"\n{ok} runtime dir writable: {runtime}")
+    except OSError as e:
+        problems += 1
+        print(f"\n{warn}runtime dir not writable ({runtime}): {e}")
+
+    print()
+    if problems:
+        print(f"{problems} problem(s) found.")
+        return 1
+    print("ready to record.")
+    return 0
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
@@ -986,8 +1053,10 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("-o", "--output", default="", help="output path (default: <trace>.html)")
     ex.set_defaults(func=_cmd_export)
 
-    dr = sub.add_parser("doctor", help="check a saved trace for context rot")
-    dr.add_argument("path")
+    dr = sub.add_parser("doctor",
+                        help="check your environment (no args) or a trace for context rot")
+    dr.add_argument("path", nargs="?", default="",
+                    help="a trace to check for context rot; omit to check the environment")
     dr.set_defaults(func=_cmd_doctor)
 
     ts = sub.add_parser("test", help="verify a suite of saved traces")

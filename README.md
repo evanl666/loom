@@ -22,7 +22,8 @@ loom proxy --replay session.loom.json             # serve it back -- zero API ca
 ```
 
 `loom record claude "..."` is the shortcut; `loom record -- <any command>` records
-anything that speaks the Anthropic or OpenAI API, unmodified.
+anything that speaks the Anthropic or OpenAI API, unmodified. Run `loom doctor`
+first to check your agent is installed and will route through the proxy.
 
 ![Loom demo: record, read, replay, rewind](docs/demo.gif)
 
