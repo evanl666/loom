@@ -184,11 +184,25 @@ def _cmd_export(args: argparse.Namespace) -> int:
 
 
 def _build_shield(args: argparse.Namespace):
-    """Turn --deny/--confirm/--allow/--judge/--rule flags into a Shield (or None)."""
-    if not (args.deny or args.confirm or args.allow or args.judge or args.rule
-            or args.shield_default != "allow"):
+    """Turn --profile/--policy plus --deny/--confirm/--allow/--judge/--rule into a Shield."""
+    profile = getattr(args, "profile", "")
+    policy_path = getattr(args, "policy", "")
+    has_flags = (args.deny or args.confirm or args.allow or args.judge or args.rule
+                 or args.shield_default != "allow")
+    if not (has_flags or profile or policy_path):
         return None
     from .shield import Shield, TrustLedger
+
+    # Start from the resolved policy (profile and/or file), then let explicit
+    # command-line flags extend it -- the flags always win by being additive.
+    policy: dict = {}
+    if profile or policy_path:
+        from .policy_file import resolve, to_shield_kwargs
+
+        policy = to_shield_kwargs(resolve(profile=profile, policy_path=policy_path))
+    default = policy.get("default", "allow")
+    if args.shield_default != "allow":  # an explicit flag overrides the policy
+        default = args.shield_default
 
     trust = None
     if args.trust_after > 0:
@@ -199,17 +213,17 @@ def _build_shield(args: argparse.Namespace):
         )
         trust = TrustLedger(ledger_path)
     return Shield(
-        deny=args.deny or [],
-        confirm=args.confirm or [],
-        allow=args.allow or [],
-        default=args.shield_default,
+        deny=list(policy.get("deny", [])) + (args.deny or []),
+        confirm=list(policy.get("confirm", [])) + (args.confirm or []),
+        allow=list(policy.get("allow", [])) + (args.allow or []),
+        default=default,
         timeout=args.confirm_timeout,
         webhook=args.webhook,
         judge=args.judge or None,
         judge_threshold=args.judge_threshold,
         trust=trust,
         trust_after=args.trust_after,
-        sequence=args.rule or [],
+        sequence=list(policy.get("sequence", [])) + (args.rule or []),
     )
 
 
@@ -682,6 +696,71 @@ def _cmd_trust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_policy(args: argparse.Namespace) -> int:
+    """Scaffold, test, or explain a firewall policy."""
+    from .policy_file import PROFILES, profile_names, resolve, to_shield_kwargs
+    from .shield import Shield
+
+    if args.policy_cmd == "init":
+        if args.name not in PROFILES:
+            raise CLIError(f"unknown profile {args.name!r}; built-in: {', '.join(profile_names())}")
+        out = args.output or "loom-policy.yml"
+        prof = PROFILES[args.name]
+        lines = [f"# loom policy -- generated from the {args.name!r} profile", "",
+                 f"# {prof.get('description', '')}", f"default: {prof.get('default', 'allow')}"]
+        for section in ("allow", "confirm", "deny", "sequence"):
+            if prof.get(section):
+                lines.append(f"{section}:")
+                # Quote items with a colon so YAML reads them as strings, not maps
+                # (sequence rules like 'after X: deny Y' would otherwise parse wrong).
+                lines += [f'  - "{p}"' if ": " in p else f"  - {p}" for p in prof[section]]
+        with open(out, "w") as f:
+            f.write("\n".join(lines) + "\n")
+        print(f"wrote {out} (from profile {args.name!r}) -- edit, then: loom record ... --policy {out}")
+        return 0
+
+    if args.policy_cmd == "explain":
+        # Explain how the policy would classify each tool call in a trace.
+        shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
+        data = _load_trace_json(args.path)
+        seen: dict = {}
+        for e in data.get("log", []):
+            if e.get("kind") == "model" and isinstance(e.get("result"), dict):
+                for tc in e["result"].get("tool_calls") or []:
+                    action, rule = shield.classify(tc.get("name", ""), tc.get("input", {}))
+                    sig = f"{tc.get('name')}({json.dumps(tc.get('input', {}), sort_keys=True, default=str)})"
+                    seen[sig[:100]] = (action, rule)
+        if not seen:
+            print("no tool calls in this trace")
+            return 0
+        for sig, (action, rule) in seen.items():
+            mark = {"deny": "🚫", "confirm": "⏸️ ", "allow": "✅"}.get(action, "  ")
+            print(f"{mark} {action:8} {sig}" + (f"   (rule: {rule})" if rule else "   (default)"))
+        return 0
+
+    # test: run the policy against a JSON list of {name, input} calls
+    shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
+    with open(args.calls) as f:
+        cases = json.load(f)
+    failures = 0
+    for case in cases:
+        action, rule = shield.classify(case["name"], case.get("input", {}))
+        expected = case.get("expect")
+        ok = expected is None or expected == action
+        if not ok:
+            failures += 1
+        status = "ok  " if ok else "FAIL"
+        line = f"{status} {action:8} {case['name']}({json.dumps(case.get('input', {}), default=str)})"
+        if expected and expected != action:
+            line += f"   expected {expected}"
+        print(line)
+    if failures:
+        print(f"\n{failures} case(s) did not match expectations", file=sys.stderr)
+        return 1
+    print(f"\nall {len(cases)} case(s) as expected")
+    return 0
+
+
 def _cmd_incident(args: argparse.Namespace) -> int:
     """Write an agent postmortem from a saved trace."""
     from .incident import build_report
@@ -846,6 +925,11 @@ def build_parser() -> argparse.ArgumentParser:
     im.set_defaults(func=_cmd_impact)
 
     def shield_flags(sp) -> None:
+        sp.add_argument("--profile", default="", metavar="NAME",
+                        help="apply a built-in safety profile (claude-code-safe, ci-safe, "
+                             "prod-data-safe); flags below extend it")
+        sp.add_argument("--policy", default="", metavar="FILE",
+                        help="apply a policy file (loom-policy.yml/.json)")
         sp.add_argument("--deny", action="append", default=[], metavar="PATTERN",
                         help="block tool calls matching this glob, e.g. 'Read(*.env*)' (repeatable)")
         sp.add_argument("--confirm", action="append", default=[], metavar="PATTERN",
@@ -948,6 +1032,23 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
     ap.set_defaults(func=_cmd_approve)
+
+    po = sub.add_parser("policy", help="scaffold, test, or explain a firewall policy")
+    posub = po.add_subparsers(dest="policy_cmd", required=True)
+    po_init = posub.add_parser("init", help="write a policy file from a built-in profile")
+    po_init.add_argument("name", help="profile: claude-code-safe, ci-safe, prod-data-safe")
+    po_init.add_argument("-o", "--output", default="", help="output path (default loom-policy.yml)")
+    po_init.set_defaults(func=_cmd_policy)
+    po_test = posub.add_parser("test", help="classify a JSON list of tool calls against a policy")
+    po_test.add_argument("calls", help="JSON file: [{\"name\":..., \"input\":..., \"expect\":\"deny\"}]")
+    po_test.add_argument("--profile", default="")
+    po_test.add_argument("--policy", default="")
+    po_test.set_defaults(func=_cmd_policy)
+    po_exp = posub.add_parser("explain", help="show how a policy classifies a trace's tool calls")
+    po_exp.add_argument("path", help="a saved trace")
+    po_exp.add_argument("--profile", default="")
+    po_exp.add_argument("--policy", default="")
+    po_exp.set_defaults(func=_cmd_policy)
 
     ic = sub.add_parser("incident", help="write an agent postmortem from a saved trace")
     ic.add_argument("path")

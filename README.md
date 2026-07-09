@@ -147,6 +147,33 @@ loom record --confirm 'Bash*' --trust-after 5 -- ...
 The judge's verdict lands in `shield_events` whether it escalates or not, so
 even "the AI said it was fine" is on the record. Autonomy you can audit.
 
+### Policy-as-code: profiles, not a wall of flags
+
+Nobody wants to hand-write forty globs per run. Ship a **named profile** or a
+policy file instead:
+
+```
+loom record claude "fix the failing test" --profile claude-code-safe
+loom record claude "..."                    --policy loom-policy.yml
+```
+
+Built-in profiles — `claude-code-safe` (reads and tests flow, network/installs/
+pushes ask, secrets and destructive shell are blocked, egress after a secret
+read is cut), `ci-safe` (deny-by-default, no human in the loop), `prod-data-safe`
+(writes and egress denied near real data). Scaffold one and edit it:
+
+```
+loom policy init claude-code-safe          # writes loom-policy.yml
+loom policy test cases.json --policy loom-policy.yml   # does it classify as you expect?
+loom policy explain session.loom.json --profile claude-code-safe  # what would it do to this run?
+```
+
+A policy is exactly the Shield the flags build — deny/allow/confirm precedence,
+sequence rules, the default action — so anything below is expressible in it, and
+`--deny`/`--rule` flags still extend whatever profile you pick. Files are YAML or
+JSON (YAML via a tiny built-in reader, so the zero-dependency install still
+works; `pip install "loom-harness[yaml]"` for the full language).
+
 ### Sequence rules: incidents are sequences, not calls
 
 Reading `.env` is fine. Posting to the network is fine. Reading `.env` *and
