@@ -51,6 +51,44 @@ def sandbox_profile(ports: "list[int]", allow: "list[str]" = ()) -> str:
     return _PROFILE.format(rules="\n".join(rules))
 
 
+_LOOPBACK = "localhost,127.0.0.1,::1"
+
+
+def proxy_bypass_env(env: dict, sandboxed: bool = False) -> dict:
+    """Make loopback traffic immune to HTTP proxies in the child's env.
+
+    The loom proxy lives on loopback. If the machine routes HTTP through a
+    proxy (env vars, or -- very common with Clash/Surge/corporate setups -- the
+    macOS SYSTEM proxy), a well-behaved client would send its "loopback"
+    request to the proxy first. Un-sandboxed that's a pointless extra hop;
+    sandboxed it's a hard failure (the proxy port isn't in the allowlist) or,
+    worse, a hole if it were. Two measures:
+
+    1. Always: merge localhost/127.0.0.1/::1 into no_proxy/NO_PROXY, so env-
+       proxy users reach the loom proxy directly.
+    2. Sandboxed on macOS, when NO env proxies are set: Python's urllib falls
+       back to the macOS system proxy (SCDynamicStore), which no_proxy cannot
+       override. Setting a dummy env proxy (a dead loopback port) forces
+       urllib onto the env path where no_proxy IS honored. Non-loopback
+       egress then fails fast at the dead port -- which the sandbox denies
+       anyway; nothing new is reachable.
+    """
+    out = dict(env)
+    for key in ("no_proxy", "NO_PROXY"):
+        existing = [p.strip() for p in out.get(key, "").split(",") if p.strip()]
+        for entry in _LOOPBACK.split(","):
+            if entry not in existing:
+                existing.append(entry)
+        out[key] = ",".join(existing)
+    has_env_proxy = any(out.get(k) for k in
+                        ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"))
+    if sandboxed and sys.platform == "darwin" and not has_env_proxy:
+        dummy = "http://127.0.0.1:9"  # discard port: never in the sandbox allowlist
+        for k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+            out[k] = dummy
+    return out
+
+
 def wrap_sandboxed(command: "list[str]", ports: "list[int]",
                    allow: "list[str]" = ()) -> "tuple[list[str], str]":
     """Wrap a command so it runs with network access ONLY to ``ports``.

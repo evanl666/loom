@@ -126,3 +126,38 @@ def test_container_and_sandbox_are_mutually_exclusive(tmp_path, capsys):
                  "--", "echo", "hi"])
     assert code == 2
     assert "not both" in capsys.readouterr().err
+
+
+def test_proxy_bypass_env_merges_no_proxy():
+    from loom.sandbox import proxy_bypass_env
+
+    env = proxy_bypass_env({"NO_PROXY": "internal.corp", "HTTP_PROXY": "http://corp:8080"})
+    # existing entries preserved, loopback added, both cases set
+    assert "internal.corp" in env["NO_PROXY"]
+    for entry in ("localhost", "127.0.0.1", "::1"):
+        assert entry in env["NO_PROXY"] and entry in env["no_proxy"]
+    # a user's real env proxy is left alone (sandbox denies it at connect time)
+    assert env["HTTP_PROXY"] == "http://corp:8080"
+
+
+def test_proxy_bypass_env_dummy_only_when_sandboxed_darwin_and_no_env_proxy(monkeypatch):
+    import loom.sandbox as sb
+
+    monkeypatch.setattr(sb.sys, "platform", "darwin")
+    # no env proxies + sandboxed -> dummy proxy forces urllib off the macOS
+    # system-proxy path so no_proxy is honored
+    env = sb.proxy_bypass_env({}, sandboxed=True)
+    assert env["HTTP_PROXY"] == "http://127.0.0.1:9"
+    assert "127.0.0.1" in env["no_proxy"]
+
+    # not sandboxed -> never inject a dummy (users may need real egress)
+    assert "HTTP_PROXY" not in sb.proxy_bypass_env({}, sandboxed=False)
+
+    # env proxy already set -> respected, no dummy
+    env3 = sb.proxy_bypass_env({"https_proxy": "http://corp:8080"}, sandboxed=True)
+    assert env3["https_proxy"] == "http://corp:8080"
+    assert "HTTP_PROXY" not in env3
+
+    # non-darwin -> no dummy either
+    monkeypatch.setattr(sb.sys, "platform", "linux")
+    assert "HTTP_PROXY" not in sb.proxy_bypass_env({}, sandboxed=True)

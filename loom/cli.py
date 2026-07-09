@@ -463,7 +463,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
         shield.notify = _shield_notifier(server.port)
         _print_shield_rules(shield)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    env = dict(os.environ)
+    from .sandbox import proxy_bypass_env
+
+    # Loopback traffic to the loom proxy must never route through an HTTP
+    # proxy (env or macOS system proxy) -- see proxy_bypass_env.
+    env = proxy_bypass_env(dict(os.environ), sandboxed=args.sandbox)
     base = f"http://127.0.0.1:{server.port}"
     if "openai" in args.target:
         env["OPENAI_BASE_URL"] = base + "/v1"
