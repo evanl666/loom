@@ -78,3 +78,15 @@ def test_studio_workspace_panel_and_dirty_banner():
     assert "app.py" in html and "new.py" in html
     assert "was dirty" in html                   # pre_existing marker
     assert "view patch" in html and "+new" in html  # the embedded diff
+
+
+def test_studio_action_buttons_use_the_trace_path():
+    from loom.export import trace_to_html
+
+    html = trace_to_html({"model": "m", "episodes": ["fix"], "output": "x", "log": []},
+                         path="runs/deploy.loom.json")
+    assert 'class="actions"' in html
+    assert "loom incident runs/deploy.loom.json" in html
+    assert "loom heal runs/deploy.loom.json" in html
+    assert "loom proxy --replay runs/deploy.loom.json" in html
+    assert 'data-cmd=' in html and "navigator.clipboard.writeText(b.dataset.cmd)" in html

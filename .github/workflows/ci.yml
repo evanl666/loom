@@ -42,5 +42,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - name: The jail jails (egress blocked, proxy records)
         run: bash examples/docker-sandbox/ci/check.sh
+      - name: Install loom for the container check
+        run: pip install -e .
+      - name: loom record --container records a Dockerized agent
+        run: bash examples/docker-sandbox/ci/container_check.sh

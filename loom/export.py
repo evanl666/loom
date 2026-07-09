@@ -73,6 +73,12 @@ h1 .brand { color: var(--muted); font-weight: 450; font-size: .95rem; }
   background: color-mix(in srgb, var(--tool) 10%, transparent); }
 .banner.unsafe { color: var(--warn); border-color: var(--warn);
   background: color-mix(in srgb, var(--warn) 12%, transparent); }
+.actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center;
+  margin: .9rem 0 .2rem; }
+.act { font: inherit; font-size: .82rem; cursor: pointer; border: 1px solid var(--ring);
+  background: var(--surface); color: var(--ink); border-radius: 99px; padding: .3rem .8rem; }
+.act:hover { border-color: var(--model); color: var(--model); }
+.actmsg { font-size: .8rem; color: var(--tool); }
 .wspanel { margin: 1.1rem 0; }
 .wsmeta { color: var(--ink-2); font-size: .85rem; margin: 0 0 .6rem; }
 .wsstat { color: var(--muted); font-size: .8rem; margin-bottom: .5rem; }
@@ -340,6 +346,12 @@ copyBtn.addEventListener('click', () => {
   copyBtn.textContent = 'copied ✓';
   setTimeout(() => { copyBtn.textContent = 'copy fork snippet'; }, 1200);
 });
+const actMsg = document.getElementById('actmsg');
+document.querySelectorAll('.act').forEach((b) => b.addEventListener('click', () => {
+  navigator.clipboard.writeText(b.dataset.cmd);
+  actMsg.textContent = 'copied: ' + b.dataset.cmd;
+  setTimeout(() => { actMsg.textContent = ''; }, 3000);
+}));
 apply(N - 1, N - 1);
 """
 
@@ -376,6 +388,29 @@ def _tokens_of(e: dict) -> int:
         return 0
     u = e.get("result", {}).get("usage", {}) or {}
     return u.get("input_tokens", 0) + u.get("output_tokens", 0)
+
+
+def _actions_bar(path: str) -> str:
+    """Copy-to-clipboard buttons for the next thing you'd do with this trace.
+
+    Studio is a static file with no backend, so a button can't *run* anything;
+    each copies the exact CLI command to the clipboard instead.
+    """
+    p = html.escape(path)
+    base = p[: -len(".loom.json")] if p.endswith(".loom.json") else p
+    actions = [
+        ("📋 incident report", f"loom incident {p} -o {base}.incident.md"),
+        ("🧪 regression test", f"loom heal {p} --agent <module:attr> "
+                               f"--forbid ERROR --save-regression tests/traces"),
+        ("▶ replay offline", f"loom replay {p}"),
+        ("🔌 serve as mock API", f"loom proxy --replay {p}"),
+        ("🔎 policy check", f"loom policy explain {p} --profile claude-code-safe"),
+    ]
+    btns = "".join(
+        f'<button class="act" data-cmd="{html.escape(cmd)}">{label}</button>'
+        for label, cmd in actions
+    )
+    return f'<div class="actions">{btns}<span class="actmsg" id="actmsg"></span></div>'
 
 
 def _dirty_banner(ws: "dict | None") -> str:
@@ -460,7 +495,7 @@ def _workspace_tile(ws: "dict | None") -> str:
     return tiles
 
 
-def trace_to_html(data: dict) -> str:
+def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
     """Render a saved trace dict (``Run.to_dict`` / a ``.loom.json`` file) to HTML."""
     log = data.get("log", [])
     episodes = data.get("episodes") or [data.get("prompt", "")]
@@ -533,6 +568,7 @@ def trace_to_html(data: dict) -> str:
 <p class="sub">{title}</p>
 {_scrub_banner(data)}
 {_dirty_banner(data.get("workspace"))}
+{_actions_bar(path)}
 <hr class="accentline">
 <div class="tiles">
   <div class="tile accent"><div class="k">model</div><div class="v">{html.escape(str(data.get("model", "?")))}</div></div>

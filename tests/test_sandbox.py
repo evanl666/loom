@@ -82,3 +82,42 @@ def test_sandboxed_record_blocks_bypass_but_proxy_works(tmp_path, capsys):
 def _serve(server):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
+
+
+def test_wrap_container_argv(monkeypatch):
+    import loom.sandbox as sb
+
+    monkeypatch.setattr(sb.shutil, "which", lambda x: "/usr/bin/docker")
+    argv = sb.wrap_container(["claude", "-p", "fix"], port=8788, image="myimg",
+                             workdir="/repo", target="https://api.anthropic.com")
+    assert argv[:3] == ["docker", "run", "--rm"]
+    assert "/repo:/workspace" in argv
+    joined = " ".join(argv)
+    assert "ANTHROPIC_BASE_URL=http://host.docker.internal:8788" in joined
+    assert "host.docker.internal:host-gateway" in joined
+    assert argv[-3:] == ["myimg", "claude", "-p"] or argv[-4:] == ["myimg", "claude", "-p", "fix"]
+
+    # OpenAI target -> the other env var + /v1
+    argv = sb.wrap_container(["codex"], port=9, workdir="/r", target="https://api.openai.com")
+    assert "OPENAI_BASE_URL=http://host.docker.internal:9/v1" in " ".join(argv)
+
+    # read-only mount
+    ro = sb.wrap_container(["x"], port=1, workdir="/r", target="", read_only=True)
+    assert "/r:/workspace:ro" in ro
+
+
+def test_wrap_container_without_docker(monkeypatch):
+    import loom.sandbox as sb
+
+    monkeypatch.setattr(sb.shutil, "which", lambda x: None)
+    with pytest.raises(RuntimeError, match="needs Docker"):
+        sb.wrap_container(["x"], port=1, workdir="/r", target="")
+
+
+def test_container_and_sandbox_are_mutually_exclusive(tmp_path, capsys):
+    from loom.cli import main
+
+    code = main(["record", "--container", "--sandbox", "--save", str(tmp_path / "s.loom.json"),
+                 "--", "echo", "hi"])
+    assert code == 2
+    assert "not both" in capsys.readouterr().err

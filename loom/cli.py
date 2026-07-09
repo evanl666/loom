@@ -245,7 +245,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
     data = _load_trace_json(args.path)
     out = args.output or (args.path.rsplit(".json", 1)[0] + ".html")
     with open(out, "w") as f:
-        f.write(trace_to_html(data))
+        f.write(trace_to_html(data, path=args.path))
     print(f"wrote {out}")
     return 0
 
@@ -403,11 +403,20 @@ def _cmd_record(args: argparse.Namespace) -> int:
             print("  ! sandbox not built in on this OS — see examples/docker-sandbox "
                   "for full isolation", file=sys.stderr)
 
+    if args.container and args.sandbox:
+        print("loom: use --container OR --sandbox, not both (container includes network "
+              "isolation)", file=sys.stderr)
+        return 2
+
     shield = _build_shield(args)
+    # A container reaches the host proxy via host.docker.internal, so the proxy
+    # must bind beyond loopback.
+    proxy_host = "0.0.0.0" if args.container else "127.0.0.1"
     server = ProxyServer(port=args.port, target=args.target, save_path=args.save,
                          shield=shield, scrub=args.scrub,
                          max_body=args.max_body_mb * 1024 * 1024,
-                         upstream_timeout=args.upstream_timeout, auth=args.auth)
+                         upstream_timeout=args.upstream_timeout, auth=args.auth,
+                         host=proxy_host)
     before_snap = None
     if not args.no_workspace:
         from .workspace import collect, diff_snapshot
@@ -443,6 +452,21 @@ def _cmd_record(args: argparse.Namespace) -> int:
             return 2
         print("loom record: sandboxed -- the proxy is the only network door",
               file=sys.stderr)
+
+    if args.container:
+        from .sandbox import wrap_container
+
+        try:
+            command = wrap_container(command, port=server.port, image=args.container_image,
+                                     workdir=os.getcwd(), target=args.target,
+                                     read_only=args.container_readonly)
+        except RuntimeError as e:
+            print(f"loom: {e}", file=sys.stderr)
+            server.shutdown()
+            server.finalize()
+            return 2
+        print(f"loom record: containerized in {args.container_image} -- repo mounted, "
+              "API routed through the proxy", file=sys.stderr)
 
     try:
         code = subprocess.call(command, env=env)
@@ -492,7 +516,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
 
             html_path = base + ".html"
             with open(html_path, "w") as f:
-                f.write(trace_to_html(data))
+                f.write(trace_to_html(data, path=args.save))
             md_path = base + ".incident.md"
             with open(md_path, "w") as f:
                 f.write(build_report(data, args.save) + "\n")
@@ -1404,6 +1428,13 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--sandbox", action="store_true",
                     help="deny the agent ALL network except the proxy (macOS sandbox-exec); "
                          "shield rules become impossible to bypass")
+    rc.add_argument("--container", action="store_true",
+                    help="run the agent in Docker: filesystem AND network isolation, "
+                         "API routed through the proxy (repo mounted at /workspace)")
+    rc.add_argument("--container-image", dest="container_image", default="python:3.12-slim",
+                    help="the Docker image to run the agent in (default python:3.12-slim)")
+    rc.add_argument("--container-readonly", dest="container_readonly", action="store_true",
+                    help="mount the repo read-only inside the container")
     rc.add_argument("--sandbox-allow", action="append", default=[], metavar="HOST:PORT",
                     help="extra host:port the sandboxed agent may reach (repeatable)")
     shield_flags(rc)

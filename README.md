@@ -298,6 +298,24 @@ On Linux, the same shape as a ready-made compose file —
 only path out. CI stands the topology up on every push and asserts the jail
 actually jails.
 
+### `--container`: filesystem isolation too
+
+> Shield controls what the model may *ask* for; the sandbox controls what the
+> process can actually *do*.
+
+`--sandbox` boxes the network; `--container` boxes the **filesystem** as well
+by running the agent in Docker:
+
+```
+loom record --container claude "fix the tests" --safe
+```
+
+The repo is mounted at `/workspace` (add `--container-readonly` to keep the
+source read-only), the API is routed to the host proxy so it's still recorded
+and firewalled, and the container is torn down after. This is the honest
+answer to `--dangerously-skip-permissions`: dangerous mode, but boxed. CI runs
+a real containerized recording on every push.
+
 ## Share traces, not secrets
 
 Traces record everything the agent saw — which can include the API key it
