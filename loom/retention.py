@@ -50,10 +50,17 @@ def load_retention(path: str) -> dict:
 
 
 def plan_retention(directory: str, config: dict, now: "float | None" = None) -> "list[dict]":
-    """What retention WOULD do to each trace (no changes made)."""
+    """What retention WOULD do to each trace (no changes made).
+
+    ``legal_hold`` patterns (path globs) exempt matching traces from BOTH
+    scrubbing and deletion -- a held trace is evidence; age doesn't apply.
+    """
+    from fnmatch import fnmatchcase
+
     now = now if now is not None else time.time()
     scrub_after = _seconds(config.get("scrub_after", ""))
     delete_after = _seconds(config.get("delete_after", ""))
+    holds = config.get("legal_hold") or []
     out = []
     for path in sorted(glob(os.path.join(directory, "**", "*.loom.json"), recursive=True)):
         try:
@@ -62,7 +69,11 @@ def plan_retention(directory: str, config: dict, now: "float | None" = None) -> 
             continue
         age_days = round(age / 86400, 1)
         already = _is_scrubbed(path)
-        if delete_after is not None and age >= delete_after:
+        base = os.path.basename(path)
+        held = any(fnmatchcase(base, h) or fnmatchcase(path, h) for h in holds)
+        if held:
+            action = "hold"
+        elif delete_after is not None and age >= delete_after:
             action = "delete"
         elif scrub_after is not None and age >= scrub_after and not already:
             action = "scrub"
@@ -71,6 +82,49 @@ def plan_retention(directory: str, config: dict, now: "float | None" = None) -> 
         out.append({"path": path, "age_days": age_days, "action": action,
                     "already_scrubbed": already})
     return out
+
+
+def dsar(directory: str, value: str, mode: str = "plan") -> "list[dict]":
+    """Data-subject request: find (and optionally purge) a person's identifier.
+
+    ``value`` is the subject's identifier (an email, an ID). ``mode``:
+    "plan" lists matching traces; "scrub" redacts every occurrence in place
+    (to ``[scrubbed:dsar]``, re-checksummed); "delete" removes the files.
+    Returns per-file audit records. Substring match over the raw JSON, so it
+    catches the value wherever it sits -- inputs, results, or wire data.
+    """
+    from .trace import trace_checksum
+
+    if len(value) < 4:
+        raise ValueError("a DSAR identifier under 4 characters would over-match")
+    audit = []
+    for path in sorted(glob(os.path.join(directory, "**", "*.loom.json"), recursive=True)):
+        try:
+            with open(path) as f:
+                raw = f.read()
+        except OSError:
+            continue
+        count = raw.count(value)
+        if not count:
+            continue
+        record = {"path": path, "occurrences": count, "mode": mode,
+                  "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        if mode == "delete":
+            try:
+                os.remove(path)
+            except OSError as e:
+                record["error"] = str(e)
+        elif mode == "scrub":
+            try:
+                data = json.loads(raw.replace(value, "[scrubbed:dsar]"))
+                if "checksum" in data:
+                    data["checksum"] = trace_checksum(data)
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
+            except (ValueError, OSError) as e:
+                record["error"] = str(e)
+        audit.append(record)
+    return audit
 
 
 def _is_scrubbed(path: str) -> bool:
@@ -126,7 +180,8 @@ def summarize(audit: "list[dict]") -> str:
     redacted = sum(a.get("secrets_redacted", 0) for a in audit)
     verb = "applied" if any(a["applied"] for a in audit) else "would"
     lines = [f"retention ({verb}): {counts.get('keep', 0)} kept, "
-             f"{counts.get('scrub', 0)} scrubbed, {counts.get('delete', 0)} deleted"]
+             f"{counts.get('scrub', 0)} scrubbed, {counts.get('delete', 0)} deleted"
+             + (f", {counts['hold']} on legal hold" if counts.get("hold") else "")]
     if redacted:
         lines.append(f"  {redacted} secret(s) redacted")
     errs = [a for a in audit if a.get("error")]

@@ -75,3 +75,40 @@ def test_cli_retention_dry_run_then_apply(tmp_path, capsys):
                  "--apply", "--audit", audit_path]) == 0
     assert not os.path.exists(tmp_path / "ancient.loom.json")
     assert os.path.exists(audit_path)
+
+
+def test_legal_hold_exempts_from_scrub_and_delete(tmp_path):
+    d = _corpus(tmp_path)
+    audit = apply_retention(d, {"scrub_after": "30d", "delete_after": "90d",
+                                "legal_hold": ["ancient.loom.json"]}, dry_run=False)
+    actions = {os.path.basename(a["path"]): a["action"] for a in audit}
+    assert actions["ancient.loom.json"] == "hold"          # NOT deleted
+    assert os.path.exists(tmp_path / "ancient.loom.json")
+    assert actions["old.loom.json"] == "scrub"             # hold is per-pattern
+
+
+def test_dsar_plan_scrub_delete(tmp_path, capsys):
+    from loom.cli import main
+    from loom.retention import dsar
+
+    d = _corpus(tmp_path)  # every trace result contains jane@example.com
+    plan = dsar(d, "jane@example.com", mode="plan")
+    assert len(plan) == 3 and all(p["occurrences"] >= 1 for p in plan)
+
+    # scrub redacts in place and re-checksums
+    dsar(d, "jane@example.com", mode="scrub")
+    blob = (tmp_path / "fresh.loom.json").read_text()
+    assert "jane@example.com" not in blob and "[scrubbed:dsar]" in blob
+    assert dsar(d, "jane@example.com", mode="plan") == []  # gone everywhere
+
+    # CLI: an identifier nobody has
+    assert main(["dsar", d, "--value", "no-such-person@x.com"]) == 0
+    assert "no trace contains" in capsys.readouterr().out
+
+
+def test_dsar_rejects_short_identifiers(tmp_path):
+    import pytest as _pytest
+    from loom.retention import dsar
+
+    with _pytest.raises(ValueError):
+        dsar(str(tmp_path), "ab", mode="plan")

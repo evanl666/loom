@@ -1158,11 +1158,13 @@ def _cmd_retention(args: argparse.Namespace) -> int:
         raise CLIError("provide --config FILE or --scrub-after/--delete-after")
     if args.pii:
         config["redact_pii"] = True
+    if args.hold:
+        config.setdefault("legal_hold", []).extend(args.hold)
 
     audit = apply_retention(args.directory, config, dry_run=not args.apply)
     for a in audit:
         if a["action"] != "keep":
-            mark = {"scrub": "🧽", "delete": "🗑"}.get(a["action"], " ")
+            mark = {"scrub": "🧽", "delete": "🗑", "hold": "⚖️"}.get(a["action"], " ")
             print(f"  {mark} {a['action']:6} {a['path']}  ({a['age_days']}d)"
                   + (f"  -- {a['error']}" if a.get("error") else ""))
     print("\n" + summarize(audit))
@@ -1172,6 +1174,36 @@ def _cmd_retention(args: argparse.Namespace) -> int:
         print(f"audit log -> {args.audit}")
     if not args.apply:
         print("(dry run -- pass --apply to make these changes)")
+    return 0
+
+
+def _cmd_dsar(args: argparse.Namespace) -> int:
+    """Data-subject request: find/scrub/delete a person's identifier in a corpus."""
+    import os
+
+    from .retention import dsar
+
+    if not os.path.isdir(args.directory):
+        raise CLIError(f"{args.directory} is not a directory")
+    mode = "delete" if args.delete else ("scrub" if args.scrub else "plan")
+    try:
+        audit = dsar(args.directory, args.value, mode=mode)
+    except ValueError as e:
+        raise CLIError(str(e))
+    if not audit:
+        print(f"no trace contains {args.value!r}")
+        return 0
+    for a in audit:
+        mark = {"plan": "🔎", "scrub": "🧽", "delete": "🗑"}[a["mode"]]
+        print(f"  {mark} {a['path']}  ({a['occurrences']} occurrence(s))"
+              + (f"  -- {a['error']}" if a.get("error") else ""))
+    print(f"\n{len(audit)} trace(s) "
+          + {"plan": "contain the identifier (pass --scrub or --delete to purge)",
+             "scrub": "scrubbed in place", "delete": "deleted"}[mode])
+    if args.audit and mode != "plan":
+        with open(args.audit, "w") as f:
+            json.dump(audit, f, indent=2)
+        print(f"audit log -> {args.audit}")
     return 0
 
 
@@ -2608,7 +2640,18 @@ def build_parser() -> argparse.ArgumentParser:
     rt.add_argument("--pii", action="store_true", help="also redact PII (emails/SSNs/cards/phones)")
     rt.add_argument("--apply", action="store_true", help="make the changes (default: dry run)")
     rt.add_argument("--audit", default="", help="write a JSON audit log of what was done")
+    rt.add_argument("--hold", action="append", default=[], metavar="GLOB",
+                    help="legal hold: traces matching this name/path glob are never "
+                         "scrubbed or deleted (repeatable; or legal_hold: in the config)")
     rt.set_defaults(func=_cmd_retention)
+
+    ds = sub.add_parser("dsar", help="data-subject request: find/scrub/delete an identifier")
+    ds.add_argument("directory")
+    ds.add_argument("--value", required=True, help="the subject's identifier (email, id, ...)")
+    ds.add_argument("--scrub", action="store_true", help="redact every occurrence in place")
+    ds.add_argument("--delete", action="store_true", help="delete matching traces entirely")
+    ds.add_argument("--audit", default="", help="write a JSON audit log")
+    ds.set_defaults(func=_cmd_dsar)
 
     dg = sub.add_parser("diagnose", help="classify a failure and propose a fix + verify plan")
     dg.add_argument("path")
