@@ -97,9 +97,10 @@ def leaderboard_text(rows: "list[dict]") -> str:
 
 def leaderboard_html(rows: "list[dict]") -> str:
     from .diff import score_badge_svg
+    from .lake import _esc
 
     body = "".join(
-        f"<tr><td>{i + 1}</td><td><b>{r['agent']}</b></td>"
+        f"<tr><td>{i + 1}</td><td><b>{_esc(r['agent'])}</b></td>"
         f"<td>{score_badge_svg(r['safety'])}</td>"
         f"<td class='num'>{r['cost']:,}</td><td class='num'>{r['risky_rate']}%</td>"
         f"<td class='num'>{r['blocked']}</td><td class='num'>{r['failure_rate']}%</td>"
