@@ -123,6 +123,11 @@ class CodingPack(Pack):
                                cmds, executable=False)
         return RestorePlan("git", note, cmds, executable=True)
 
+    def safe_runtime(self) -> str:
+        return ("run the agent in a container (loom record --container) or the macOS "
+                "sandbox (loom record --sandbox) so its file writes and network go "
+                "through the proxy and can't escape the workspace")
+
     @staticmethod
     def _recorded_status(trace: dict, path: str) -> str:
         """The git status the workspace recorded for ``path`` (''/'A'/'M'/'D')."""

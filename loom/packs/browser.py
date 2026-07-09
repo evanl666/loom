@@ -95,6 +95,11 @@ class BrowserPack(Pack):
                 reversible=False)
         return None
 
+    def safe_runtime(self) -> str:
+        return ("drive a throwaway/staging browser profile with form submission "
+                "disabled (no-submit mode) and autofill off; capture storage_state "
+                "so you can replay without re-authenticating")
+
     def replay_hint(self, action: Action) -> str:
         return "restore the browser session (same page, cookies, form state), then replay"
 

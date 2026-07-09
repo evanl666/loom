@@ -134,6 +134,13 @@ class Pack:
         """How to restore this domain's state before replaying (advisory)."""
         return ""
 
+    def safe_runtime(self) -> str:
+        """How to run this domain SAFELY while debugging -- a sandboxed world
+        where the agent's actions can't cause real harm (a dry-run DB, a
+        no-submit browser, a fake customer tenant). Advisory text; empty when
+        the pack has no specific guidance."""
+        return ""
+
 
 # -- registry --------------------------------------------------------------
 

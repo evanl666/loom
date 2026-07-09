@@ -1038,6 +1038,18 @@ def _cmd_fork(args: argparse.Namespace) -> int:
             print(f"  [{name}] ({mark}) {plan.summary}")
             for c in plan.commands:
                 print(f"      $ {c}")
+        # These domains touch the real world -- point them at a safe runtime.
+        from .packs import pack_for
+
+        safe = {}
+        for a in touched:
+            p = pack_for(a)
+            if p is not None and p.safe_runtime():
+                safe.setdefault(p.name, p.safe_runtime())
+        if safe:
+            print("run safely (don't rerun against production):")
+            for name, advice in safe.items():
+                print(f"  [{name}] {advice}")
 
     if not args.agent:
         print("\nno --agent given (module:attr), so nothing was run. To continue live:")
@@ -1286,6 +1298,17 @@ def _load_yaml_or_json(path: str) -> dict:
 
 def _cmd_packs(args: argparse.Namespace) -> int:
     """List, lint, or test domain packs."""
+    if getattr(args, "packs_cmd", None) == "safe-runtime":
+        from .packs import install_builtin, packs
+
+        install_builtin()
+        for p in packs():
+            advice = p.safe_runtime()
+            if advice:
+                print(f"  [{p.name}] {advice}\n")
+        print("Debug high-risk agents against a safe world -- not production data.")
+        return 0
+
     if getattr(args, "packs_cmd", None) == "lint":
         from .packs.certify import lint_pack, load_pack
 
@@ -2303,6 +2326,9 @@ def build_parser() -> argparse.ArgumentParser:
     pks_test.add_argument("cases", help="a .yml/.json file of {pack, cases:[{action, expect}]}")
     pks_test.add_argument("--pack", default="", help="module:attr (overrides the file's pack:)")
     pks_test.set_defaults(func=_cmd_packs)
+    pks_sr = pkssub.add_parser("safe-runtime",
+                               help="how to run each domain safely while debugging")
+    pks_sr.set_defaults(func=_cmd_packs)
 
     sv = sub.add_parser("serve", help="serve a trace directory to the team (list, search, "
                                       "Studio, incidents)")

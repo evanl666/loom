@@ -182,3 +182,26 @@ def test_restore_plans_one_per_touched_domain(domain_packs):
     plans = dict(restore_plans([a for a in actions(trace) if a.type == "call"], trace))
     assert plans["coding"].executable is True       # git checkout
     assert plans["sql"].executable is False         # manual DB snapshot
+
+
+# -- safe runtime ------------------------------------------------------------
+
+def test_every_domain_pack_has_safe_runtime_advice(domain_packs):
+    from loom.packs.browser import BrowserPack
+    from loom.packs.coding import CodingPack
+    from loom.packs.sql import SqlPack
+    from loom.packs.support import SupportPack
+
+    assert "dry-run" in SqlPack().safe_runtime() or "test database" in SqlPack().safe_runtime()
+    assert "no-submit" in BrowserPack().safe_runtime()
+    assert "idempotency" in SupportPack().safe_runtime()
+    assert "sandbox" in CodingPack().safe_runtime() or "container" in CodingPack().safe_runtime()
+
+
+def test_cli_packs_safe_runtime(capsys):
+    from loom.cli import main
+
+    assert main(["packs", "safe-runtime"]) == 0
+    out = capsys.readouterr().out
+    assert "[sql]" in out and "[support]" in out
+    assert "not production data" in out

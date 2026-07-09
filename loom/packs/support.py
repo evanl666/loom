@@ -108,6 +108,11 @@ class SupportPack(Pack):
                         "audit history to revert", reversible=False)
         return None
 
+    def safe_runtime(self) -> str:
+        return ("point the tools at a SANDBOX tenant with fake customers; enable "
+                "idempotency keys on refund/payment calls so a replay or retry can't "
+                "double-charge; route email to a catch-all mailbox")
+
     def replay_hint(self, action: Action) -> str:
         return ("point the tools at a sandbox tenant (or record with --shield confirm "
                 "rules) before replaying actions that touch real customers")

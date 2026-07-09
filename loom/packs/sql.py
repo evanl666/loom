@@ -129,6 +129,11 @@ class SqlPack(Pack):
                 reversible=False)
         return None
 
+    def safe_runtime(self) -> str:
+        return ("point the SQL tool at a read-replica or a disposable test database, "
+                "wrap writes in a transaction you roll back, or run it EXPLAIN-only "
+                "(dry-run) while debugging -- never at production data")
+
     def replay_hint(self, action: Action) -> str:
         return ("restore the database to its state before this step "
                 "(snapshot / point-in-time recovery), then replay")
