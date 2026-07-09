@@ -114,6 +114,48 @@ def test_studio_action_debugger_panel():
     assert ">Raw effects</h2>" in page                    # effect log demoted
 
 
+def test_studio_impact_map_bipartite_worlds():
+    from loom.packs import install_builtin
+    install_builtin()
+
+    @tool
+    def Edit(file_path: str, new: str) -> str:
+        "edit"
+        return "edited"
+
+    @tool
+    def run_sql(query: str) -> str:
+        "sql"
+        return "1 row inserted"
+
+    @tool
+    def WebFetch(url: str) -> str:
+        "fetch"
+        return "data"
+
+    provider = ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t1", "Edit", {"file_path": "a.py", "new": "x"})],
+                      stop_reason="tool_use"),
+        ModelResponse(tool_calls=[ToolCall("t2", "run_sql", {"query": "INSERT INTO t VALUES (1)"})],
+                      stop_reason="tool_use"),
+        ModelResponse(tool_calls=[ToolCall("t3", "WebFetch", {"url": "http://x"})],
+                      stop_reason="tool_use"),
+        ModelResponse(text="done"),
+    ])
+    page = trace_to_html(Agent(model=provider, tools=[Edit, run_sql, WebFetch]).run("go").to_dict())
+    assert "Impact map — what it touched in the world" in page
+    assert "<svg viewBox" in page
+    assert "📄 files" in page and "🗄 database" in page and "↗ network" in page
+    assert "fs-write" in page and "db-write" in page   # edge risk labels
+
+
+def test_studio_impact_map_absent_when_nothing_touched():
+    # A pure Q&A run (no tool calls) has no world to map.
+    provider = ScriptedProvider([ModelResponse(text="42")])
+    page = trace_to_html(Agent(model=provider).run("what is 6*7?").to_dict())
+    assert "Impact map" not in page
+
+
 def test_studio_shows_blocked_actions():
     page = trace_to_html({
         "model": "m", "episodes": ["go"], "output": "x",
