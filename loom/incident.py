@@ -40,6 +40,9 @@ def _analyze(data: dict) -> dict:
         "shield_events": data.get("shield_events") or [],
     }
 
+    from .risk import classify_all
+
+    facts["risk"] = {}  # category -> example signature
     for e in log:
         kind, result = e.get("kind", ""), e.get("result")
         if kind == "model" and isinstance(result, dict):
@@ -50,6 +53,11 @@ def _analyze(data: dict) -> dict:
             for tc in result.get("tool_calls") or []:
                 name = tc.get("name", "?")
                 facts["tool_counts"][name] = facts["tool_counts"].get(name, 0) + 1
+                cats = classify_all(name, tc.get("input", {}))
+                if cats:
+                    sig = f"{name}({json.dumps(tc.get('input', {}), sort_keys=True, default=str)})"
+                    for cat in cats:
+                        facts["risk"].setdefault(cat, _clip(sig, 90))
             if result.get("text"):
                 facts["final_words"] = (e.get("seq"), _clip(result["text"]))
         elif kind.startswith("tool:") and isinstance(result, str):
@@ -81,6 +89,7 @@ def _analyze(data: dict) -> dict:
                 secrets[k] = secrets.get(k, 0) + v
     facts["secrets"] = secrets
 
+    facts["denied"] = [ev for ev in facts["shield_events"] if ev.get("action") == "deny"]
     failed = (
         facts["stop_reason"] not in ("", "end_turn")
         or facts["truncated"] or facts["paused"]
@@ -88,7 +97,47 @@ def _analyze(data: dict) -> dict:
         or bool(facts["suspects"])
     )
     facts["failed"] = failed
+    facts["classification"] = _classify_incident(facts)
+    facts["severity"] = _severity(facts)
     return facts
+
+
+# Roughly "this many tokens in one run is worth a mention".
+_COST_ALERT_TOKENS = 200_000
+
+
+def _classify_incident(facts: dict) -> "list[str]":
+    """Human labels for what kind of incident this is."""
+    from .risk import ALARMING
+
+    tags = []
+    risk = facts["risk"]
+    if facts["secrets"] or "secret-read" in risk:
+        tags.append("secret exposure")
+    if ("secret-read" in risk or facts["secrets"]) and "network-egress" in risk:
+        tags.append("possible exfiltration")
+    if "fs-destructive" in risk:
+        tags.append("destructive filesystem action")
+    if any("curl" in s or "| sh" in s or "| bash" in s for _, s in facts["suspects"]):
+        tags.append("unsafe shell")
+    if facts["input_tokens"] + facts["output_tokens"] >= _COST_ALERT_TOKENS:
+        tags.append("cost blowup")
+    facts["_alarming"] = ALARMING & set(risk)
+    return tags
+
+
+def _severity(facts: dict) -> str:
+    """critical / high / medium / low, from what actually happened."""
+    cls = facts["classification"]
+    if "possible exfiltration" in cls or "destructive filesystem action" in cls:
+        return "critical"
+    if "secret exposure" in cls or "unsafe shell" in cls or facts["denied"]:
+        return "high"
+    # medium needs a genuinely dangerous capability or an actual failure --
+    # a clean run that merely executed pytest (code-exec) stays low.
+    if facts["failed"] or facts.get("_alarming") or "cost blowup" in cls:
+        return "medium"
+    return "low"
 
 
 def _prevention(facts: dict) -> list[str]:
@@ -137,9 +186,13 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
     if facts["suspects"]:
         reasons.append(f"{len(facts['suspects'])} failing tool call(s)")
 
+    sev_badge = {"critical": "🔴 critical", "high": "🟠 high",
+                 "medium": "🟡 medium", "low": "⚪ low"}[facts["severity"]]
     lines = [
         f"# Incident report: {prompt}",
         "",
+        f"**Severity:** {sev_badge}"
+        + (f" — {', '.join(facts['classification'])}" if facts["classification"] else ""),
         f"**Verdict:** {verdict}" + (f" ({', '.join(reasons)})" if reasons else ""),
     ]
     ws = data.get("workspace")
@@ -189,6 +242,18 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
     if facts["secrets"]:
         lines += ["", "## Secrets sighted"]
         lines += [f"- {count}× {kind} in tool results" for kind, count in sorted(facts["secrets"].items())]
+
+    if facts["risk"]:
+        from .risk import recommended_rule
+
+        lines += ["", "## Risky capabilities exercised"]
+        for cat, example in facts["risk"].items():
+            lines.append(f"- **{cat}**: `{example}`")
+        rules = [recommended_rule(c) for c in facts["risk"] if recommended_rule(c)]
+        if rules:
+            lines += ["", "## Recommended firewall rules"]
+            lines.append("Add to `loom record` (or a `--profile`):")
+            lines += [f"- `--{r}`" for r in rules]
 
     lines += ["", "## Root cause"]
     if why_output:

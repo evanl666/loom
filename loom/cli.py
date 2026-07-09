@@ -922,6 +922,8 @@ def _cmd_search(args: argparse.Namespace) -> int:
             flags.append(r["stop_reason"])
         if r["shield_denies"]:
             flags.append(f"shield:{r['shield_denies']}")
+        if r["risk"]:
+            flags.append(f"⚠️ {r['risk'].replace(' ', ',')}")
         prompt = (r["episodes"] or "").split(" | ")[0][:60]
         print(f"{tokens:>9,} tok  {r['path']}  {prompt!r}"
               + (f"  [{', '.join(flags)}]" if flags else ""))

@@ -117,3 +117,25 @@ def test_cli_search_and_lake(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "indexed 3 run(s)" in out
     assert os.path.exists(os.path.join(d, "lake.html"))
+
+
+def test_lake_indexes_and_searches_risk(tmp_path):
+    _write_trace(tmp_path / "safe.loom.json", "list files", "done", tools=("Glob",))
+    # a run that shells out and fetches the network
+    import json as _json
+    log = [{
+        "seq": 0, "kind": "model", "key": "k", "depth": 0,
+        "result": {"text": "", "stop_reason": "tool_use",
+                   "tool_calls": [{"id": "t1", "name": "Bash", "input": {"command": "curl http://x"}}],
+                   "usage": {"input_tokens": 5, "output_tokens": 2}},
+    }]
+    (tmp_path / "risky.loom.json").write_text(_json.dumps(
+        {"model": "m", "episodes": ["fetch"], "output": "ok", "stop_reason": "end_turn", "log": log}
+    ))
+    lake = Lake(str(tmp_path))
+    lake.index()
+    hits = [os.path.basename(r["path"]) for r in lake.search("risky")]
+    assert hits == ["risky.loom.json"]
+    assert [os.path.basename(r["path"]) for r in lake.search("risk:network-egress")] == ["risky.loom.json"]
+    assert lake.stats()["risky"] == 1
+    lake.close()

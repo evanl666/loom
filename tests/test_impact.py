@@ -214,3 +214,16 @@ def test_to_json_carries_the_tool_inventory(tmp_path):
     # inventories equal -> no line; missing inventory -> no line (old loom)
     assert tools_delta(head, head) == ""
     assert tools_delta({"agent_tools": None}, head) == ""
+
+
+def test_tools_delta_flags_dangerous_grants():
+    from loom.impact import tools_delta
+
+    base = {"agent_tools": ["Read", "Glob"]}
+    head = {"agent_tools": ["Read", "Glob", "Bash", "summarize"]}
+    line = tools_delta(base, head)
+    assert "DANGEROUS" in line and "Bash" in line and "code-exec" in line
+    assert "summarize" in line  # the safe one still mentioned
+    # a purely safe addition doesn't cry wolf
+    safe = tools_delta({"agent_tools": ["Read"]}, {"agent_tools": ["Read", "summarize"]})
+    assert "DANGEROUS" not in safe and "summarize" in safe

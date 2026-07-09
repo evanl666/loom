@@ -180,14 +180,30 @@ def to_json(impacts: list[Impact], agent=None) -> dict:
 
 
 def tools_delta(base: "dict", head: "dict") -> str:
-    """One-line capability verdict between two ``to_json()`` documents."""
+    """One-line capability verdict between two ``to_json()`` documents.
+
+    A newly-granted tool that carries a dangerous capability (shell, network,
+    secret read, destructive fs) is called out specifically -- that is a risk
+    signal a diff of recorded outputs cannot see.
+    """
+    from .risk import DANGEROUS, categories_for_names
+
     b, h = base.get("agent_tools"), head.get("agent_tools")
     if b is None or h is None:
         return ""
     added, removed = sorted(set(h) - set(b)), sorted(set(b) - set(h))
     parts = []
     if added:
-        parts.append("grants the agent new tool(s): " + ", ".join(added))
+        dangerous = sorted(t for t in added if categories_for_names([t]) & DANGEROUS)
+        if dangerous:
+            cats = sorted({c for t in dangerous for c in categories_for_names([t])})
+            parts.append("⚠️ grants DANGEROUS tool(s) [" + ", ".join(cats) + "]: "
+                         + ", ".join(dangerous))
+            safe = [t for t in added if t not in dangerous]
+            if safe:
+                parts.append("also new: " + ", ".join(safe))
+        else:
+            parts.append("grants the agent new tool(s): " + ", ".join(added))
     if removed:
         parts.append("removes tool(s): " + ", ".join(removed))
     return "this change " + "; ".join(parts) if parts else ""

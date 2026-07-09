@@ -35,15 +35,19 @@ CREATE TABLE IF NOT EXISTS runs (
     output_tokens INTEGER,
     tools TEXT,
     shield_denies INTEGER,
-    healed_by TEXT
+    healed_by TEXT,
+    risk TEXT
 );
 """
 
 
 def _summarize(path: str, data: dict) -> tuple:
+    from .risk import classify_all
+
     log = data.get("log") or []
     input_tokens = output_tokens = 0
     tools: list[str] = []
+    risk: set = set()
     for e in log:
         kind = e.get("kind", "")
         if kind == "model" and isinstance(e.get("result"), dict):
@@ -54,6 +58,7 @@ def _summarize(path: str, data: dict) -> tuple:
                 name = tc.get("name")
                 if name and name not in tools:
                     tools.append(name)
+                risk.update(classify_all(name or "", tc.get("input", {})))
         elif kind.startswith("tool:"):
             name = kind[5:]
             if name not in tools:
@@ -76,6 +81,7 @@ def _summarize(path: str, data: dict) -> tuple:
         " ".join(tools),
         denies,
         data.get("healed_by") or "",
+        " ".join(sorted(risk)),
     )
 
 
@@ -88,6 +94,12 @@ class Lake:
         self.db = sqlite3.connect(self.db_path)
         self.db.row_factory = sqlite3.Row
         self.db.execute(_SCHEMA)
+        # The index is a cache keyed by mtime; if an older loom created it
+        # without newer columns, rebuild rather than migrate in place.
+        cols = {r[1] for r in self.db.execute("PRAGMA table_info(runs)")}
+        if "risk" not in cols:
+            self.db.execute("DROP TABLE runs")
+            self.db.execute(_SCHEMA)
 
     def index(self) -> "tuple[int, int]":
         """Bring the index up to date. Returns (indexed now, total runs)."""
@@ -108,7 +120,7 @@ class Lake:
             except (OSError, json.JSONDecodeError):
                 continue
             self.db.execute(
-                "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT OR REPLACE INTO runs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 _summarize(path, data),
             )
         self.db.commit()
@@ -125,6 +137,9 @@ class Lake:
           ``failed``                stop_reason is not a clean end_turn
           ``shield:deny``           the firewall blocked something
           ``healed``                the run was repaired by heal()
+          ``risk:CATEGORY``         a call of this risk category (network-egress,
+                                    secret-read, code-exec, fs-destructive...)
+          ``risky``                 any risk category present
           anything else             substring over prompts + output
         """
         where, args = [], []
@@ -149,6 +164,11 @@ class Lake:
                 where.append("shield_denies > 0")
             elif term == "healed":
                 where.append("healed_by != ''")
+            elif term == "risky":
+                where.append("risk != ''")
+            elif term.startswith("risk:"):
+                where.append("(' ' || risk || ' ') LIKE ?")
+                args.append(f"% {term[5:]} %")
             else:
                 where.append("(episodes LIKE ? OR output LIKE ?)")
                 args.extend([f"%{term}%", f"%{term}%"])
@@ -171,9 +191,10 @@ class Lake:
         for (joined,) in self.db.execute("SELECT tools FROM runs"):
             for name in (joined or "").split():
                 tools[name] = tools.get(name, 0) + 1
+        risky = self.db.execute("SELECT COUNT(*) FROM runs WHERE risk != ''").fetchone()[0]
         by_cost = self.db.execute(
             "SELECT path, model, episodes, stop_reason, "
-            "(input_tokens + output_tokens) AS tokens, shield_denies "
+            "(input_tokens + output_tokens) AS tokens, shield_denies, risk "
             "FROM runs ORDER BY tokens DESC"
         ).fetchall()
         return {
@@ -182,6 +203,7 @@ class Lake:
             "output_tokens": row["output_tokens"],
             "denies": row["denies"],
             "failed": row["failed"] or 0,
+            "risky": risky,
             "top_tools": sorted(tools.items(), key=lambda kv: -kv[1])[:12],
             "by_cost": [dict(r) for r in by_cost],
         }
@@ -277,9 +299,12 @@ def dashboard_html(stats: dict, directory: str) -> str:
         label = os.path.basename(r["path"])
         prompt = (r["episodes"] or "").split(" | ")[0][:60]
         badge = '<span class="badge">shield</span>' if r["shield_denies"] else ""
+        if r.get("risk"):
+            badge += f'<span class="badge risk">⚠️ {_esc(r["risk"].split()[0])}</span>'
         run_items.append((label, prompt, r["tokens"], badge))
     tool_items = [(name, "", count, "") for name, count in stats["top_tools"]]
     failed = stats["failed"]
+    risky = stats.get("risky", 0)
     tiles = f"""
 <div class="tiles">
   <div class="tile"><div class="v">{stats["runs"]:,}</div><div class="k">runs</div></div>
@@ -289,6 +314,8 @@ def dashboard_html(stats: dict, directory: str) -> str:
     <div class="k">failed runs</div></div>
   <div class="tile"><div class="v{' warn' if stats["denies"] else ''}">{stats["denies"]:,}</div>
     <div class="k">shield blocks</div></div>
+  <div class="tile"><div class="v{' warn' if risky else ''}">{risky:,}</div>
+    <div class="k">risky runs</div></div>
 </div>"""
     return f"""<!doctype html>
 <html><head><meta charset="utf-8">
