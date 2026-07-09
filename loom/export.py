@@ -741,6 +741,62 @@ def _impact_map(data: dict) -> str:
             + "".join(parts) + "</div></div>")
 
 
+def _data_flow(data: dict) -> str:
+    """The Data Flow panel: where sensitive VALUES came from and where they
+    went. Sources (the reads that produced them) on the left, sinks (the
+    egress actions that carried them) on the right, red edges labeled with a
+    non-leaking value preview. Rendered only when taint paths exist."""
+    from .taint import taint_paths
+
+    paths = taint_paths(data)
+    if not paths:
+        return ""
+    sources = list(dict.fromkeys(
+        f"[{p['source']['step']}] {p['source']['tool']}" for p in paths))[:8]
+    sinks = list(dict.fromkeys(
+        f"[{p['sink']['step']}] {p['sink']['tool']} ({', '.join(p['sink']['via'])})"
+        for p in paths))[:8]
+    row_h, pad_top = 40, 26
+    height = max(len(sources), len(sinks)) * row_h + pad_top + 22
+    sy = {n: pad_top + i * row_h for i, n in enumerate(sources)}
+    ky = {n: pad_top + i * row_h for i, n in enumerate(sinks)}
+    lx, wx, w = 20, 452, 700
+
+    parts = [f'<svg viewBox="0 0 {w} {height}" width="100%" '
+             f'style="max-width:{w}px" role="img" aria-label="sensitive data flow">']
+    for p in paths:
+        src = f"[{p['source']['step']}] {p['source']['tool']}"
+        snk = f"[{p['sink']['step']}] {p['sink']['tool']} ({', '.join(p['sink']['via'])})"
+        if src not in sy or snk not in ky:
+            continue
+        y1, y2 = sy[src] + 12, ky[snk] + 12
+        cx = (lx + 190 + wx) / 2
+        parts.append(
+            f'<path d="M{lx + 190},{y1} C{cx},{y1} {cx},{y2} {wx},{y2}" fill="none" '
+            f'stroke="#e5484d" stroke-width="2" opacity="0.85"/>')
+        parts.append(
+            f'<text x="{cx}" y="{(y1 + y2) / 2 - 4}" text-anchor="middle" font-size="10" '
+            f'fill="#e5484d">⛓ {html.escape(p["kind"])} {html.escape(p["value_preview"])}</text>')
+    for label, y in sy.items():
+        parts.append(
+            f'<rect x="{lx}" y="{y}" width="190" height="24" rx="7" '
+            f'fill="var(--surface)" stroke="var(--ring)"/>'
+            f'<text x="{lx + 10}" y="{y + 16}" font-size="12" fill="var(--ink)">'
+            f'🔑 {html.escape(label[:24])}</text>')
+    for label, y in ky.items():
+        parts.append(
+            f'<rect x="{wx}" y="{y}" width="228" height="24" rx="7" '
+            f'fill="color-mix(in srgb, #e5484d 10%, var(--surface))" stroke="var(--ring)"/>'
+            f'<text x="{wx + 10}" y="{y + 16}" font-size="12" fill="var(--ink)">'
+            f'↗ {html.escape(label[:30])}</text>')
+    parts.append("</svg>")
+    return ('<div class="panel"><h2>Data flow — sensitive values that left the box</h2>'
+            '<div style="padding:.6rem .95rem;overflow-x:auto">' + "".join(parts)
+            + '</div><p style="padding:0 .95rem .8rem;color:var(--muted);font-size:.78rem">'
+              'verbatim value lineage (previews never show the value) — a paraphrased '
+              'leak would not appear here</p></div>')
+
+
 def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
     """Render a saved trace dict (``Run.to_dict`` / a ``.loom.json`` file) to HTML."""
     log = data.get("log", [])
@@ -836,6 +892,7 @@ def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
 </div>
 {_workspace_panel(data.get("workspace"))}
 {_impact_map(data)}
+{_data_flow(data)}
 <div class="cols">
   <div class="side">
     <div class="panel"><h2>Actions — what it did, why, what changed</h2>
