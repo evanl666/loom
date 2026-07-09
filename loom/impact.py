@@ -166,7 +166,24 @@ def report(impacts: list[Impact]) -> str:
 
 def to_json(impacts: list[Impact], agent=None) -> dict:
     """Machine-readable report, one branch's half of a cross-branch comparison."""
+    import hashlib
+    import json as _json
+
     sized = [i.est_input_tokens for i in impacts if i.est_input_tokens]
+    system = getattr(agent, "system", "") if agent is not None else None
+    # A per-tool schema hash so a *changed* (not just added) tool is detectable
+    # across branches -- the risk-blame needs to point at what actually moved.
+    tool_schemas = None
+    if agent is not None:
+        tool_schemas = {}
+        for name, t in agent.tools.items():
+            try:
+                schema = t.schema() if hasattr(t, "schema") else {}
+            except Exception:
+                schema = {}
+            tool_schemas[name] = hashlib.sha256(
+                _json.dumps(schema, sort_keys=True, default=str).encode()
+            ).hexdigest()[:12]
     return {
         "impacts": [i.to_dict() for i in impacts],
         "total": len(impacts),
@@ -176,7 +193,43 @@ def to_json(impacts: list[Impact], agent=None) -> dict:
         # PR granting (or revoking) capabilities -- a risk signal no diff of
         # recorded runs can carry, since dry replay never consults the model.
         "agent_tools": sorted(agent.tools) if agent is not None else None,
+        "tool_schemas": tool_schemas,
+        "system_hash": hashlib.sha256((system or "").encode()).hexdigest()[:12]
+        if system is not None else None,
     }
+
+
+def blame(base: "dict", head: "dict") -> "list[str]":
+    """Why did this change get riskier? Attribute each new risk to its cause.
+
+    Reads two ``to_json()`` documents and points at the specific config move --
+    a granted dangerous tool, an edited tool schema, a changed system prompt --
+    so a reviewer sees the line, not just the danger.
+    """
+    from .risk import DANGEROUS, categories_for_names
+
+    lines: list[str] = []
+    b_tools, h_tools = base.get("agent_tools"), head.get("agent_tools")
+    if b_tools is not None and h_tools is not None:
+        label = {"network-egress": "network egress", "secret-read": "secret reads",
+                 "code-exec": "shell execution", "fs-destructive": "destructive filesystem",
+                 "fs-write": "file writes"}
+        for t in sorted(set(h_tools) - set(b_tools)):
+            cats = categories_for_names([t]) & DANGEROUS
+            if cats:
+                lines.append(f"grants **{', '.join(label.get(c, c) for c in sorted(cats))}** "
+                             f"— you added the `{t}` tool")
+
+    # A tool whose schema changed (same name, different shape).
+    bs, hs = base.get("tool_schemas") or {}, head.get("tool_schemas") or {}
+    changed = sorted(n for n in set(bs) & set(hs) if bs[n] != hs[n])
+    for n in changed:
+        lines.append(f"the schema for the `{n}` tool changed")
+
+    if (base.get("system_hash") and head.get("system_hash")
+            and base["system_hash"] != head["system_hash"]):
+        lines.append("the system prompt changed")
+    return lines
 
 
 def tools_delta(base: "dict", head: "dict") -> str:

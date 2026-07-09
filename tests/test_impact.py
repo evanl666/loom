@@ -244,3 +244,37 @@ def test_risk_delta_groups_by_category():
     assert risk_delta({"agent_tools": ["Read"]}, {"agent_tools": ["Read", "summarize"]}) == ""
     # missing inventory -> no delta (old loom)
     assert risk_delta({"agent_tools": None}, head) == ""
+
+
+import tempfile as _tf
+def _saved(run):
+    p = _tf.mktemp(suffix=".loom.json")
+    run.save(p)
+    return p
+
+
+def test_blame_attributes_new_risk_to_its_cause():
+    from loom.impact import blame
+
+    base = {"agent_tools": ["Read"], "tool_schemas": {"Read": "a"}, "system_hash": "s1"}
+    head = {"agent_tools": ["Read", "Bash"], "tool_schemas": {"Read": "b", "Bash": "x"},
+            "system_hash": "s2"}
+    lines = blame(base, head)
+    joined = "\n".join(lines)
+    assert "shell execution" in joined and "added the `Bash` tool" in joined
+    assert "schema for the `Read` tool changed" in joined
+    assert "system prompt changed" in joined
+    # no change -> no blame
+    assert blame(base, base) == []
+
+
+def test_to_json_records_schema_and_system_hashes():
+    from loom.impact import assess, to_json
+
+    agent = build_agent(system="You are helpful.")
+    run = agent.run("What is 2+2?")
+    doc = to_json(assess([_saved(run)], agent), agent=agent)
+    assert doc["system_hash"] and doc["tool_schemas"]
+    # a different system prompt -> a different hash
+    other = to_json([], agent=build_agent(system="Totally different."))
+    assert other["system_hash"] != doc["system_hash"]
