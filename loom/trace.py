@@ -164,6 +164,29 @@ class Run:
 
         return _actions(self)
 
+    def undo_plans(self) -> list:
+        """Per-action undo/compensation plans, newest first (undo runs backwards).
+
+        Each entry is ``(action, plan)`` where ``plan`` comes from the domain
+        pack that owns the action -- a git revert for a file edit, a
+        compensating statement for a SQL INSERT, a follow-up correction for a
+        sent email. Actions no pack can reverse are omitted; plans with
+        ``reversible=False`` are compensations, not true undos.
+        """
+        from .action import actions as _actions
+        from .packs import install_builtin, undo_plan as _undo_plan
+
+        install_builtin()  # plans should cover every domain out of the box
+        data = self.to_dict()
+        out = []
+        for a in reversed(_actions(data)):
+            if a.type != "call":
+                continue
+            plan = _undo_plan(a, data)
+            if plan is not None:
+                out.append((a, plan))
+        return out
+
     def timeline(self) -> list[dict]:
         """A human-readable step-by-step summary of the run, with nesting depth."""
         out: list[dict] = []

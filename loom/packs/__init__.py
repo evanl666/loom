@@ -157,3 +157,13 @@ def undo_plan(action: Action, trace: dict) -> "UndoPlan | None":
     """The undo plan from whichever pack owns ``action`` (or None)."""
     p = pack_for(action)
     return p.undo(action, trace) if p else None
+
+
+def install_builtin() -> None:
+    """Register every built-in domain pack (coding, sql, browser, support).
+
+    Pack-aware surfaces (``loom undo --plan``, ``loom fork``,
+    ``Run.undo_plans``) call this so plans and hints cover every domain out
+    of the box; library users composing their own registry simply don't."""
+    for mod in ("coding", "sql", "browser", "support"):
+        __import__(f"loom.packs.{mod}")

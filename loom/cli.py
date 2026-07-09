@@ -915,6 +915,13 @@ def _cmd_scrub(args: argparse.Namespace) -> int:
     return 0
 
 
+def _import_builtin_packs() -> None:
+    """Register every built-in domain pack (for pack-aware CLI views)."""
+    from .packs import install_builtin
+
+    install_builtin()
+
+
 def _cmd_undo(args: argparse.Namespace) -> int:
     """Revert the file changes an agent made, from the trace's workspace record."""
     import os
@@ -922,11 +929,112 @@ def _cmd_undo(args: argparse.Namespace) -> int:
     from .undo import undo
 
     data = _load_trace_json(args.path)
+
+    if args.plan:
+        # The generic view: per-action undo/compensation plans from whichever
+        # domain pack owns each action (files, SQL, browser, CRM) -- newest
+        # first, because undo runs backwards.
+        from .action import actions as _actions
+        from .packs import undo_plan as _undo_plan
+
+        _import_builtin_packs()
+        shown = 0
+        for a in reversed([x for x in _actions(data) if x.type == "call"]):
+            plan = _undo_plan(a, data)
+            if plan is None:
+                continue
+            shown += 1
+            mark = {"revert": "↩", "compensate": "⇄", "noop": "✋"}.get(plan.kind, "·")
+            rev = "" if plan.reversible else "  [irreversible -- compensation only]"
+            step = f"[{a.step:>3}]" if a.step >= 0 else "[ - ]"
+            print(f"  {mark} {step} {a.tool}: {plan.summary}{rev}")
+            for c in plan.commands:
+                print(f"          $ {c}")
+        if not shown:
+            print("nothing to undo (no reversible actions recorded)")
+        else:
+            print(f"\n{shown} plan(s). File reverts can run via `loom undo {args.path}`;"
+                  " other domains list the compensating steps above.")
+        return 0
+
     ok, log = undo(data, os.getcwd(), only=args.only, dry_run=args.dry_run, force=args.force)
     for line in log:
         print(line)
     if not ok:
         return 1
+    return 0
+
+
+def _cmd_fork(args: argparse.Namespace) -> int:
+    """Fork a recorded run at a step/turn: replay the prefix free, continue live."""
+    from .trace import Run
+
+    data = _load_trace_json(args.path)
+    log = data.get("log", [])
+    turn_seqs = [e["seq"] for e in log
+                 if e.get("kind") == "model" and not e.get("depth", 0)]
+    if not turn_seqs:
+        raise CLIError("this trace has no model turns to fork from")
+
+    if args.turn is not None:
+        turn = args.turn
+    else:
+        # --from-step S rewinds to the turn containing step S.
+        matching = [i for i, s in enumerate(turn_seqs) if s <= args.from_step]
+        turn = matching[-1] if matching else 0
+    if turn < 0 or turn >= len(turn_seqs):
+        raise CLIError(f"turn {turn} out of range (run has {len(turn_seqs)} turns)")
+    fork_seq = turn_seqs[turn]
+
+    # Ask the owning packs how to restore external state before re-running:
+    # replaying is free, but the WORLD (db, browser, customers) isn't rewound.
+    from .action import actions as _actions
+    from .packs import pack_for
+
+    _import_builtin_packs()
+    hints: dict[str, str] = {}
+    for a in _actions(data):
+        if a.type == "call" and a.step >= fork_seq:
+            p = pack_for(a)
+            if p is not None:
+                hint = p.replay_hint(a)
+                if hint:
+                    hints.setdefault(p.name, hint)
+
+    print(f"fork at turn {turn} (step {fork_seq}): "
+          f"steps 0..{max(fork_seq - 1, 0)} replay free, the rest runs live")
+    if hints:
+        print("restore external state before continuing live:")
+        for name, hint in sorted(hints.items()):
+            print(f"  [{name}] {hint}")
+
+    if not args.agent:
+        print("\nno --agent given (module:attr), so nothing was run. To continue live:")
+        print(f"  loom fork {args.path} --turn {turn} --agent yourmodule:agent")
+        print("or in Python:")
+        print(f'  run = Run.load("{args.path}", agent=agent)')
+        print(f"  branch = run.fork(at={turn}, edit=lambda ctx: ...)")
+        return 0
+
+    agent, err = _load_agent(args.agent)
+    if agent is None:
+        raise CLIError(err)
+    run = Run.load(args.path, agent=agent)
+    edit = None
+    if args.inject:
+        note = args.inject
+
+        def edit(ctx, _note=note):  # a recorded edit: replays deterministically
+            ctx.add_user(_note, source="fork-edit")
+
+    branch = run.fork(at=turn, edit=edit)
+    base = args.path[: -len(".loom.json")] if args.path.endswith(".loom.json") else args.path
+    out = args.output or f"{base}.fork{turn}.loom.json"
+    branch.save(out)
+    spent = branch.cost(since=fork_seq)["total_tokens"]
+    print(f"\nbranch: {out}")
+    print(f"  output: {branch.output[:200]}")
+    print(f"  live tokens spent after the fork: {spent}")
     return 0
 
 
@@ -1705,7 +1813,22 @@ def build_parser() -> argparse.ArgumentParser:
                     help="show what would be reverted, change nothing")
     ud.add_argument("--force", action="store_true",
                     help="undo even if the tree changed since the recording")
+    ud.add_argument("--plan", action="store_true",
+                    help="show per-action undo/compensation plans for every domain "
+                         "(files, SQL, browser, CRM), newest first; changes nothing")
     ud.set_defaults(func=_cmd_undo)
+
+    fk = sub.add_parser("fork", help="fork a recorded run at a step: replay the prefix, continue live")
+    fk.add_argument("path")
+    group = fk.add_mutually_exclusive_group(required=True)
+    group.add_argument("--turn", type=int, default=None, help="fork at this top-level turn")
+    group.add_argument("--from-step", type=int, dest="from_step", default=None,
+                       help="fork at the turn containing this step")
+    fk.add_argument("--agent", default="", help="module:attr to continue the run live")
+    fk.add_argument("--inject", default="",
+                    help="append this user note to the context at the fork point")
+    fk.add_argument("-o", "--output", default="", help="where to save the branch trace")
+    fk.set_defaults(func=_cmd_fork)
 
     tls = sub.add_parser("tools", help="show an agent's tools and their capability contract")
     tls.add_argument("--agent", required=True, help="module:attr (Agent or zero-arg factory)")
