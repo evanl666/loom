@@ -111,3 +111,19 @@ def test_post_traversal_and_bad_body_rejected(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         _post(server.url + "/api/notes?p=env.loom.json", {"text": ""})
     assert e.value.code == 400
+
+
+def test_concurrent_comments_do_not_drop(server):
+    import concurrent.futures
+
+    base = server.url
+
+    def add(i):
+        return _post(base + "/api/notes?p=env.loom.json",
+                     {"step": i, "text": f"comment {i}", "by": "u"})
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(add, range(30)))
+
+    room = _get(base + "/run?p=env.loom.json")
+    assert "Step comments (30)" in room          # all 30 survived the race

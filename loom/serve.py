@@ -122,6 +122,14 @@ risk:CATEGORY, risky, failed, shield:deny, healed, cost&gt;N</footer>
 </body></html>"""
 
 
+import threading as _threading
+
+# Sidecar files (.notes.json / .room.json) are read-modify-written on POST.
+# Under ThreadingHTTPServer two concurrent comments would otherwise race and
+# drop one, so serialize sidecar mutations with a process-wide lock.
+_SIDECAR_LOCK = _threading.Lock()
+
+
 def _read_json(path: str, default):
     try:
         with open(path) as f:
@@ -131,8 +139,11 @@ def _read_json(path: str, default):
 
 
 def _write_json(path: str, data) -> None:
-    with open(path, "w") as f:
+    # Atomic replace so a reader never sees a half-written file.
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
+    os.replace(tmp, path)
 
 
 _ROOM_CSS = """
@@ -358,20 +369,22 @@ class _Handler(BaseHTTPRequestHandler):
 
             note = {"step": body.get("step"), "by": str(body.get("by") or ""),
                     "text": text[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            notes = _read_json(full + ".notes.json", [])
-            notes.append(note)
-            _write_json(full + ".notes.json", notes)
+            with _SIDECAR_LOCK:  # concurrent comments must not drop each other
+                notes = _read_json(full + ".notes.json", [])
+                notes.append(note)
+                _write_json(full + ".notes.json", notes)
             self._send(200, json.dumps({"ok": True, "notes": len(notes)}), "application/json")
             return
 
         # /api/room: root-cause label, owner, resolved -- the triage state.
-        room = _read_json(full + ".room.json", {})
-        for key in ("root_cause", "owner"):
-            if key in body:
-                room[key] = str(body[key])[:200]
-        if "resolved" in body:
-            room["resolved"] = bool(body["resolved"])
-        _write_json(full + ".room.json", room)
+        with _SIDECAR_LOCK:
+            room = _read_json(full + ".room.json", {})
+            for key in ("root_cause", "owner"):
+                if key in body:
+                    room[key] = str(body[key])[:200]
+            if "resolved" in body:
+                room["resolved"] = bool(body["resolved"])
+            _write_json(full + ".room.json", room)
         self._send(200, json.dumps({"ok": True, **room}), "application/json")
 
 
