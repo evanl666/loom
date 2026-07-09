@@ -1325,6 +1325,31 @@ def _slug_from(path: str) -> str:
     return _slug(path)
 
 
+def _cmd_demo(args: argparse.Namespace) -> int:
+    """One command: run a canonical incident and emit movie + autopsy + fix."""
+    from .demo import run_demo, scenarios
+
+    if args.scenario not in scenarios():
+        raise CLIError(f"unknown scenario {args.scenario!r}; try: {', '.join(scenarios())}")
+    r = run_demo(args.scenario, args.output or "loom-demo")
+    print(f"🎬 loom demo: {r['scenario']}\n")
+    print(f"  trace:   {r['trace']}")
+    print(f"  movie:   {r['movie']}   ← open this")
+    print(f"  autopsy: {r['autopsy']}")
+    print(f"  fix:     {r['fix_dir']}/")
+    if r["redteam"]:
+        v = r["redteam"]
+        mark = "🛡️ STOPPED" if v["stopped"] else "❌ GOT THROUGH"
+        print(f"\n  red team: the safe profile {mark} this attack "
+              f"({v['firewall']} on {v['attack_tool']})")
+    if args.open:
+        import os
+        import webbrowser
+
+        webbrowser.open(f"file://{os.path.abspath(r['movie'])}")
+    return 0
+
+
 def _cmd_autopsy(args: argparse.Namespace) -> int:
     """One report: diagnosis + score + impact map + data flow + fix + incident."""
     from .autopsy import autopsy_html
@@ -2900,6 +2925,13 @@ def build_parser() -> argparse.ArgumentParser:
     rg_from.add_argument("--open-pr", action="store_true", dest="open_pr",
                          help="create a branch + PR with the guard (needs git + gh)")
     rg_from.set_defaults(func=_cmd_regression)
+
+    dm = sub.add_parser("demo", help="one-command shock demo: record → catch → explain → fix")
+    dm.add_argument("--scenario", default="secret-leak",
+                    help="secret-leak | sql-delete | refund | browser")
+    dm.add_argument("-o", "--output", default="", help="output dir (default loom-demo/)")
+    dm.add_argument("--open", action="store_true", help="open the movie in the browser")
+    dm.set_defaults(func=_cmd_demo)
 
     ap = sub.add_parser("autopsy", help="one report: diagnosis+score+impact+data-flow+fix+incident")
     ap.add_argument("path")
