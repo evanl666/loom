@@ -1227,6 +1227,23 @@ def _slug_from(path: str) -> str:
     return _slug(path)
 
 
+def _cmd_movie(args: argparse.Namespace) -> int:
+    """Render the 30-second incident movie from a trace."""
+    from .movie import movie_html
+
+    data = _load_trace_json(args.path)
+    base = args.path[: -len(".loom.json")] if args.path.endswith(".loom.json") else args.path
+    out = args.output or f"{base}.movie.html"
+    with open(out, "w") as f:
+        f.write(movie_html(data))
+    print(f"movie -> {out}  (self-playing; safe to share after `loom share`)")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(f"file://{__import__('os').path.abspath(out)}")
+    return 0
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     """The behavior scorecard: security / side-effect / reversibility / ..."""
     from .diff import describe_score, score_breakdown
@@ -2510,6 +2527,12 @@ def build_parser() -> argparse.ArgumentParser:
     rg_from.add_argument("--open-pr", action="store_true", dest="open_pr",
                          help="create a branch + PR with the guard (needs git + gh)")
     rg_from.set_defaults(func=_cmd_regression)
+
+    mv = sub.add_parser("movie", help="the 30-second incident animation (self-playing HTML)")
+    mv.add_argument("path")
+    mv.add_argument("-o", "--output", default="", help="output file (default <trace>.movie.html)")
+    mv.add_argument("--open", action="store_true", help="open in the browser")
+    mv.set_defaults(func=_cmd_movie)
 
     sc = sub.add_parser("score", help="behavior scorecard: security/side-effect/reversibility/...")
     sc.add_argument("path")
