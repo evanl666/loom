@@ -1342,6 +1342,18 @@ def _cmd_movie(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_cost(args: argparse.Namespace) -> int:
+    """Token-burn root cause: bloat / looping / overfetch / result explosion."""
+    from .cost import analyze_cost, describe_cost
+
+    c = analyze_cost(_load_trace_json(args.path))
+    if args.json:
+        print(json.dumps(c, indent=2))
+    else:
+        print(describe_cost(c))
+    return 1 if (args.gate and c["findings"]) else 0
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     """The behavior scorecard: security / side-effect / reversibility / ..."""
     from .diff import describe_score, score_badge_svg, score_breakdown, score_markdown
@@ -2839,6 +2851,12 @@ def build_parser() -> argparse.ArgumentParser:
     mv.add_argument("-o", "--output", default="", help="output file (default <trace>.movie.html)")
     mv.add_argument("--open", action="store_true", help="open in the browser")
     mv.set_defaults(func=_cmd_movie)
+
+    ct = sub.add_parser("cost", help="token-burn RCA: bloat/looping/overfetch/result-explosion")
+    ct.add_argument("path")
+    ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
+    ct.add_argument("--json", action="store_true", help="machine-readable")
+    ct.set_defaults(func=_cmd_cost)
 
     sc = sub.add_parser("score", help="behavior scorecard: security/side-effect/reversibility/...")
     sc.add_argument("path")
