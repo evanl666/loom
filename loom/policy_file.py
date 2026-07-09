@@ -129,6 +129,9 @@ def to_shield_kwargs(doc: dict) -> dict:
     kwargs = {k: doc[k] for k in _SHIELD_KEYS if k in doc}
     for listkey in ("allow", "confirm", "deny", "sequence"):
         kwargs.setdefault(listkey, [])
+    # A policy file names it `require_approver`; the Shield kwarg is `approvers`.
+    if doc.get("require_approver"):
+        kwargs["approvers"] = doc["require_approver"]
     return kwargs
 
 

@@ -292,6 +292,22 @@ def _build_shield(args: argparse.Namespace):
             os.path.expanduser("~"), ".loom", "trust.json"
         )
         trust = TrustLedger(ledger_path)
+    import os
+
+    sign_key = None
+    if getattr(args, "sign_approvals_key_env", ""):
+        val = os.environ.get(args.sign_approvals_key_env)
+        if not val:
+            raise CLIError(f"env var {args.sign_approvals_key_env} is not set")
+        sign_key = val.encode()
+    # Approver policy from --require-approver 'pattern=a,b' plus any in the file.
+    approvers = dict(policy.get("approvers", {}) or {})
+    for spec in getattr(args, "require_approver", []) or []:
+        pattern, _, names = spec.partition("=")
+        if not names.strip():
+            raise CLIError(f"--require-approver needs 'PATTERN=NAMES', got {spec!r}")
+        approvers[pattern.strip()] = [n.strip() for n in names.split(",") if n.strip()]
+
     return Shield(
         deny=list(policy.get("deny", [])) + (args.deny or []),
         confirm=list(policy.get("confirm", [])) + (args.confirm or []),
@@ -304,6 +320,8 @@ def _build_shield(args: argparse.Namespace):
         trust=trust,
         trust_after=args.trust_after,
         sequence=list(policy.get("sequence", [])) + (args.rule or []),
+        sign_key=sign_key,
+        approvers=approvers,
     )
 
 
@@ -1609,6 +1627,25 @@ def _cmd_trace(args: argparse.Namespace) -> int:
         print(f"{args.path}: signed ({data['signature'][:24]}…)")
         return 0
 
+    if args.trace_cmd == "verify-approvals":
+        key = _signing_key(args)
+        if key is None:
+            raise CLIError("verify-approvals needs the signing key: --key-env VAR or --key-file PATH")
+        from .shield import verify_approvals
+
+        valid, invalid = verify_approvals(data, key)
+        if not valid and not invalid:
+            print(f"{args.path}: no signed approvals to verify")
+            return 0
+        for ev in valid:
+            by = ev.get("by", "?")
+            print(f"  ✓ {ev.get('action'):8} {ev.get('tool')}  by {by}  (id {ev.get('id', '?')})")
+        for ev in invalid:
+            print(f"  ✗ {ev.get('action'):8} {ev.get('tool')}  by {ev.get('by', '?')}  "
+                  "-- SIGNATURE INVALID (tampered or wrong key)")
+        print(f"\n{len(valid)} valid, {len(invalid)} invalid signed decision(s)")
+        return 1 if invalid else 0
+
     if args.trace_cmd == "explain-version":
         print(f"{args.path}: trace format version {version} (this loom writes v{TRACE_VERSION})")
         if version < TRACE_VERSION:
@@ -1905,6 +1942,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "operator approvals (see: loom trust)")
         sp.add_argument("--trust-ledger", dest="trust_ledger", default="", metavar="FILE",
                         help="where approval streaks live (default ~/.loom/trust.json)")
+        sp.add_argument("--sign-approvals-key-env", dest="sign_approvals_key_env", default="",
+                        metavar="VAR",
+                        help="HMAC-sign every operator decision with the key in this env var "
+                             "(verify later with: loom trace verify-approvals --key-env VAR)")
+        sp.add_argument("--require-approver", dest="require_approver", action="append",
+                        default=[], metavar="PATTERN=NAMES",
+                        help="only these identities may APPROVE a capability, e.g. "
+                             "'cap:money_movement=alice,bob' (repeatable; anyone may still deny)")
 
     def scrub_flag(sp) -> None:
         sp.add_argument("--scrub", action="store_true",
@@ -2078,11 +2123,12 @@ def build_parser() -> argparse.ArgumentParser:
         ("validate", "structure + checksum check (CI gate; exit 1 on problems)"),
         ("verify", "tamper check: checksum, or HMAC signature with --key-* (exit 1 on fail)"),
         ("sign", "add an HMAC signature with --key-env/--key-file (tamper-proof)"),
+        ("verify-approvals", "verify the HMAC on each signed shield decision (exit 1 on any invalid)"),
         ("explain-version", "report the trace format version and what to expect"),
     ]:
         sp = trsub.add_parser(cmd, help=helptext)
         sp.add_argument("path")
-        if cmd in ("sign", "verify"):
+        if cmd in ("sign", "verify", "verify-approvals"):
             sp.add_argument("--key-env", dest="key_env", default="",
                             help="read the signing key from this environment variable")
             sp.add_argument("--key-file", dest="key_file", default="",

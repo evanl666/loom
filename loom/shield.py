@@ -176,6 +176,8 @@ class Shield:
         trust=None,
         trust_after: int = 0,
         sequence: "list[str] | tuple" = (),
+        sign_key: "bytes | None" = None,
+        approvers: "dict[str, list[str]] | None" = None,
     ):
         if default not in (ALLOW, CONFIRM, DENY):
             raise ValueError(f"default must be allow/confirm/deny, not {default!r}")
@@ -199,6 +201,12 @@ class Shield:
         self.sequence = [
             r if isinstance(r, SequenceRule) else parse_sequence_rule(r) for r in sequence
         ]
+        # Signed decisions: an HMAC over each operator decision makes the audit
+        # trail tamper-PROOF (verify with the same key). Approver policy: a
+        # capability pattern -> the identities allowed to approve it, so a
+        # money-movement confirm can't be self-approved by just anyone.
+        self.sign_key = sign_key
+        self.approvers = dict(approvers or {})
         self.pending: dict[str, PendingApproval] = {}
         self.lock = threading.Lock()
 
@@ -230,15 +238,49 @@ class Shield:
         with self.lock:
             return [p.to_dict() for p in self.pending.values() if not p.event.is_set()]
 
+    def approver_allowed(self, name: str, tool_input, who: str) -> bool:
+        """Is ``who`` permitted to APPROVE this call under the approver policy?
+
+        A denial never needs a permitted identity -- anyone may stop a call.
+        An approval of a capability with a required-approver list must come
+        from a listed identity."""
+        if not self.approvers:
+            return True
+        from .capabilities import matches_cap
+
+        for pattern, allowed in self.approvers.items():
+            matches = (matches_cap(pattern, name, tool_input) if pattern.startswith("cap:")
+                       else fnmatch(name, pattern) or fnmatch(_signature(name, tool_input), pattern))
+            if matches and who not in allowed:
+                return False
+        return True
+
     def decide_pending(self, pending_id: str, approve: bool, who: str = "") -> bool:
         with self.lock:
             p = self.pending.get(pending_id)
             if p is None or p.event.is_set():
                 return False
+            # Approver policy: an unauthorized approval is refused outright (the
+            # call stays pending until an authorized approver or the timeout).
+            if approve and not self.approver_allowed(p.tool, p.input, who):
+                return False
             p.decision = "approve" if approve else "deny"
             p.decided_by = who
             p.event.set()
             return True
+
+    def _sign(self, event: dict) -> dict:
+        """Attach an HMAC over the decision fields, if a signing key is set."""
+        if not self.sign_key:
+            return event
+        import hmac
+
+        payload = json.dumps(
+            {k: event.get(k) for k in ("id", "tool", "action", "via", "by", "ts")},
+            sort_keys=True, default=str).encode()
+        event["signature"] = "hmac-sha256:" + hmac.new(
+            self.sign_key, payload, __import__("hashlib").sha256).hexdigest()
+        return event
 
     def _post_webhook(self, p: PendingApproval) -> None:
         import urllib.request
@@ -348,11 +390,11 @@ class Shield:
         # A tripped tripwire always gets a human: no trust-ratchet shortcut.
         base = {"ts": time.time(), "tool": name, "input": tool_input, "rule": confirm_rule}
         approved, via, pid, who = self._await_approval(name, tool_input, confirm_rule)
-        return approved, {
+        return approved, self._sign({
             **base, "id": pid, "action": "approve" if approved else "deny",
             "via": via if via != "operator" else "sequence-operator",
             **({"by": who} if who else {}),
-        }
+        })
 
     def _arm_after_rules(self, name: str, tool_input) -> None:
         """An allowed call arms every 'after' rule it matches."""
@@ -403,10 +445,10 @@ class Shield:
             # Only explicit human decisions move the ratchet; timeouts don't.
             self.trust.record(name, approved, {"id": pid, "ts": base["ts"], "rule": rule,
                                                "by": who})
-        return approved, {
+        return approved, self._sign({
             **base, "id": pid, "action": "approve" if approved else "deny", "via": via,
             **({"by": who} if who else {}),
-        }
+        })
 
     def _assess_risk(self, name: str, tool_input) -> "tuple[float, str, bool]":
         """Ask the judge model for a 0..1 risk score. Fail-open on any trouble."""
@@ -542,6 +584,28 @@ def _reason(event: "dict | None") -> str:
     if via == "timeout":
         return "approval timed out."
     return "denied by the operator."
+
+
+def verify_approvals(data: dict, key: bytes) -> "tuple[list[dict], list[dict]]":
+    """Verify the HMAC on every signed shield decision in a trace.
+
+    Returns (valid, invalid) -- events whose signature recomputes correctly
+    vs. those that were tampered with or signed with a different key. Events
+    without a signature are ignored (they were recorded unsigned)."""
+    import hashlib
+    import hmac
+
+    valid, invalid = [], []
+    for ev in data.get("shield_events") or []:
+        sig = ev.get("signature")
+        if not sig:
+            continue
+        payload = json.dumps(
+            {k: ev.get(k) for k in ("id", "tool", "action", "via", "by", "ts")},
+            sort_keys=True, default=str).encode()
+        expected = "hmac-sha256:" + hmac.new(key, payload, hashlib.sha256).hexdigest()
+        (valid if hmac.compare_digest(sig, expected) else invalid).append(ev)
+    return valid, invalid
 
 
 class TrustLedger:
