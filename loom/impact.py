@@ -164,15 +164,33 @@ def report(impacts: list[Impact]) -> str:
     return "\n".join(lines)
 
 
-def to_json(impacts: list[Impact]) -> dict:
-    """Machine-readable report, one branch's half of a cost comparison."""
+def to_json(impacts: list[Impact], agent=None) -> dict:
+    """Machine-readable report, one branch's half of a cross-branch comparison."""
     sized = [i.est_input_tokens for i in impacts if i.est_input_tokens]
     return {
         "impacts": [i.to_dict() for i in impacts],
         "total": len(impacts),
         "affected": sum(1 for i in impacts if i.changed),
         "est_input_tokens": sum(sized) if sized else None,
+        # The agent's tool inventory: comparing this across branches shows a
+        # PR granting (or revoking) capabilities -- a risk signal no diff of
+        # recorded runs can carry, since dry replay never consults the model.
+        "agent_tools": sorted(agent.tools) if agent is not None else None,
     }
+
+
+def tools_delta(base: "dict", head: "dict") -> str:
+    """One-line capability verdict between two ``to_json()`` documents."""
+    b, h = base.get("agent_tools"), head.get("agent_tools")
+    if b is None or h is None:
+        return ""
+    added, removed = sorted(set(h) - set(b)), sorted(set(b) - set(h))
+    parts = []
+    if added:
+        parts.append("grants the agent new tool(s): " + ", ".join(added))
+    if removed:
+        parts.append("removes tool(s): " + ", ".join(removed))
+    return "this change " + "; ".join(parts) if parts else ""
 
 
 def cost_delta(base: "list[dict]", head: "list[dict]") -> str:

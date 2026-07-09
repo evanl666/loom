@@ -194,3 +194,23 @@ def test_cli_impact_exit_codes(tmp_path, monkeypatch, capsys):
     assert main(["impact", str(tmp_path), "--agent", "myagent:changed"]) == 1
     out = capsys.readouterr().out
     assert "unchanged" in out and "inputs-differ" in out
+
+def test_to_json_carries_the_tool_inventory(tmp_path):
+    from loom.impact import assess, to_json, tools_delta
+
+    agent = build_agent()
+    run = agent.run("What is 2+2?")
+    path = str(tmp_path / "run.loom.json")
+    run.save(path)
+
+    head = to_json(assess([path], agent), agent=agent)
+    assert head["agent_tools"] == sorted(agent.tools)
+    assert to_json([], agent=None)["agent_tools"] is None
+
+    base = dict(head, agent_tools=[t for t in head["agent_tools"]][:0])
+    line = tools_delta(base, head)
+    assert "grants the agent new tool(s)" in line
+
+    # inventories equal -> no line; missing inventory -> no line (old loom)
+    assert tools_delta(head, head) == ""
+    assert tools_delta({"agent_tools": None}, head) == ""

@@ -32,7 +32,14 @@ inputs:
       Compare estimated input-token cost against the PR base branch and add a
       cost line to the report ("this change makes your agent 12% more
       expensive"). Free -- no API calls. Best-effort: skipped silently when
-      either branch cannot be sized.
+      either branch cannot be sized. Also compares the agent's tool inventory
+      across branches ("this change grants the agent new tool(s): ...").
+    default: 'true'
+  studio:
+    description: >-
+      Upload the affected traces as Studio HTML (a workflow artifact) and link
+      it from the PR comment, so reviewers can scrub through exactly the runs
+      this change touches.
     default: 'true'
 
 outputs:
@@ -61,7 +68,7 @@ runs:
         for t in $TRACES; do args+=("$t"); done
         args+=(--agent "$AGENT")
         if [ "$LIVE" = "true" ]; then args+=(--live); fi
-        loom "${args[@]}" > loom-impact-report.txt 2>&1
+        loom "${args[@]}" --json "$RUNNER_TEMP/loom-impact-head.json" > loom-impact-report.txt 2>&1
         code=$?
         cat loom-impact-report.txt
         if [ $code -eq 1 ]; then echo "affected=true" >> "$GITHUB_OUTPUT"; else echo "affected=false" >> "$GITHUB_OUTPUT"; fi
@@ -74,14 +81,13 @@ runs:
         TRACES: ${{ inputs.traces }}
         AGENT: ${{ inputs.agent }}
         BASE_SHA: ${{ github.event.pull_request.base.sha }}
-      # Best-effort throughout: any failure just means no cost line.
+      # Best-effort throughout: any failure just means no cost/tools line.
       run: |
         set +e
+        [ -f "$RUNNER_TEMP/loom-impact-head.json" ] || exit 0
         args=(impact)
         for t in $TRACES; do args+=("$t"); done
         args+=(--agent "$AGENT")
-        loom "${args[@]}" --json "$RUNNER_TEMP/loom-impact-head.json" > /dev/null 2>&1
-        [ -f "$RUNNER_TEMP/loom-impact-head.json" ] || exit 0
 
         git fetch --quiet --depth=1 origin "$BASE_SHA" > /dev/null 2>&1
         git worktree add --quiet --force "$RUNNER_TEMP/loom-base" "$BASE_SHA" > /dev/null 2>&1 || exit 0
@@ -90,10 +96,47 @@ runs:
         [ -f "$RUNNER_TEMP/loom-impact-base.json" ] || exit 0
 
         python3 -c "import os; from loom.impact import cost_delta_files; tmp = os.environ['RUNNER_TEMP']; print(cost_delta_files(tmp + '/loom-impact-base.json', tmp + '/loom-impact-head.json'))" > loom-cost-line.txt 2>/dev/null
-        if [ -s loom-cost-line.txt ]; then
-          echo "cost: $(cat loom-cost-line.txt)"
+        python3 -c "
+        import json, os
+        from loom.impact import tools_delta
+        tmp = os.environ['RUNNER_TEMP']
+        base = json.load(open(tmp + '/loom-impact-base.json'))
+        head = json.load(open(tmp + '/loom-impact-head.json'))
+        print(tools_delta(base, head))
+        " > loom-tools-line.txt 2>/dev/null
+        if [ -s loom-cost-line.txt ]; then echo "cost: $(cat loom-cost-line.txt)"; fi
+        if [ -s loom-tools-line.txt ]; then echo "tools: $(cat loom-tools-line.txt)"; fi
+        exit 0
+
+    - name: Export affected traces for Studio
+      id: studio
+      if: inputs.studio == 'true' && steps.impact.outputs.affected == 'true'
+      shell: bash
+      run: |
+        set +e
+        [ -f "$RUNNER_TEMP/loom-impact-head.json" ] || exit 0
+        mkdir -p loom-studio
+        python3 -c "
+        import json, os
+        head = json.load(open(os.environ['RUNNER_TEMP'] + '/loom-impact-head.json'))
+        for i in head['impacts']:
+            if i.get('verdict') not in (None, 'unchanged'):
+                print(i['path'])
+        " | while read -r trace; do
+          [ -f "$trace" ] && loom export "$trace" -o "loom-studio/$(basename "${trace%.loom.json}").html"
+        done
+        if [ -n "$(ls -A loom-studio 2>/dev/null)" ]; then
+          echo "exported=true" >> "$GITHUB_OUTPUT"
         fi
         exit 0
+
+    - name: Upload the Studio views
+      if: steps.studio.outputs.exported == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: loom-studio
+        path: loom-studio/
+        if-no-files-found: ignore
 
     - name: Post the report on the PR
       if: inputs.comment == 'true' && github.event_name == 'pull_request'
@@ -101,8 +144,10 @@ runs:
       env:
         GH_TOKEN: ${{ github.token }}
         AFFECTED: ${{ steps.impact.outputs.affected }}
+        EXPORTED: ${{ steps.studio.outputs.exported }}
         REPO: ${{ github.repository }}
         PR: ${{ github.event.pull_request.number }}
+        RUN_ID: ${{ github.run_id }}
       run: |
         marker='<!-- loom-impact-report -->'
         if [ "$AFFECTED" = "true" ]; then
@@ -120,6 +165,14 @@ runs:
           if [ -s loom-cost-line.txt ]; then
             echo
             echo "💸 $(cat loom-cost-line.txt)"
+          fi
+          if [ -s loom-tools-line.txt ]; then
+            echo
+            echo "🧰 $(cat loom-tools-line.txt)"
+          fi
+          if [ "$EXPORTED" = "true" ]; then
+            echo
+            echo "🔍 [Scrub through the affected runs in Studio](https://github.com/$REPO/actions/runs/$RUN_ID#artifacts) (\`loom-studio\` artifact)"
           fi
         } > loom-comment.md
         existing=$(gh api "repos/$REPO/issues/$PR/comments" \

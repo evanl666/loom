@@ -501,7 +501,7 @@ def _cmd_impact(args: argparse.Namespace) -> int:
         return 2
     if args.json:
         with open(args.json, "w") as f:
-            json.dump(to_json(impacts), f, indent=2)
+            json.dump(to_json(impacts, agent=agent), f, indent=2)
     print(report(impacts))
     return 1 if any(i.changed for i in impacts) else 0
 
