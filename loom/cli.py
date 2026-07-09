@@ -1054,7 +1054,25 @@ def _cmd_fork(args: argparse.Namespace) -> int:
 
     print(f"fork at turn {turn} (step {fork_seq}): "
           f"steps 0..{max(fork_seq - 1, 0)} replay free, the rest runs live")
-    if plans:
+
+    if args.restore:
+        # Actually execute the runnable restore plans (e.g. git checkout).
+        import subprocess
+
+        ran = 0
+        for name, plan in plans:
+            if not plan.executable:
+                print(f"  [{name}] skipped -- restore is manual: {plan.summary}")
+                continue
+            for c in plan.commands:
+                print(f"  [{name}] $ {c}")
+                r = subprocess.run(c, shell=True, capture_output=True, text=True)
+                if r.returncode != 0:
+                    print(f"      failed: {r.stderr.strip()[:120]}")
+                else:
+                    ran += 1
+        print(f"restored {ran} executable step(s).")
+    elif plans:
         print("restore external state before continuing live:")
         for name, plan in plans:
             mark = "▶ runnable" if plan.executable else "manual"
@@ -2833,6 +2851,9 @@ def build_parser() -> argparse.ArgumentParser:
     fk.add_argument("--inject", default="",
                     help="append this user note to the context at the fork point")
     fk.add_argument("-o", "--output", default="", help="where to save the branch trace")
+    fk.add_argument("--restore", action="store_true",
+                    help="execute the runnable world-restore plans (e.g. git checkout) "
+                         "before continuing -- rewinds the world, not just the trace")
     fk.set_defaults(func=_cmd_fork)
 
     pks = sub.add_parser("packs", help="list / lint / test domain packs")
