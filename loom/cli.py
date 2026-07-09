@@ -1191,6 +1191,33 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_alert(args: argparse.Namespace) -> int:
+    """Thresholds over the fleet: exit 1 (and webhook) on breach."""
+    from .alert import describe, evaluate, post_webhook
+
+    _import_builtin_packs()
+    paths = _expand_trace_paths(args.paths)
+    if not paths:
+        raise CLIError("no traces found")
+    config = _load_yaml_or_json(args.config) if args.config else {"alerts": []}
+    for spec in args.max or []:  # --max metric=value shortcuts
+        name, _, cap = spec.partition("=")
+        if not cap:
+            raise CLIError(f"--max needs 'METRIC=VALUE', got {spec!r}")
+        config.setdefault("alerts", []).append({"metric": name.strip(), "max": float(cap)})
+    if not config.get("alerts"):
+        raise CLIError("no alert rules (use --config alerts.yml or --max metric=value)")
+
+    results, metrics = evaluate(paths, config)
+    print(describe(results, metrics))
+    breached = [r for r in results if r["breached"]]
+    webhook = args.webhook or config.get("webhook", "")
+    if breached and webhook:
+        ok = post_webhook(webhook, breached, metrics["runs"])
+        print(f"webhook {'delivered' if ok else 'FAILED'} -> {webhook}")
+    return 1 if breached else 0
+
+
 def _cmd_kpi(args: argparse.Namespace) -> int:
     """Platform KPIs over a corpus: failure rate, PII/money exposure, cost p95."""
     from .kpi import compute_kpis, kpi_html, kpi_text
@@ -2588,6 +2615,14 @@ def build_parser() -> argparse.ArgumentParser:
     dg.add_argument("--plan", action="store_true", help="also emit the replay/fork verify commands")
     dg.add_argument("--json", action="store_true", help="machine-readable")
     dg.set_defaults(func=_cmd_diagnose)
+
+    al = sub.add_parser("alert", help="thresholds over the fleet: exit 1 + webhook on breach")
+    al.add_argument("paths", nargs="+", help="trace files and/or directories")
+    al.add_argument("--config", default="", help="alerts.yml ({alerts: [{metric, max}], webhook})")
+    al.add_argument("--max", action="append", default=[], metavar="METRIC=VALUE",
+                    help="inline rule, e.g. --max failure_rate=10 (repeatable)")
+    al.add_argument("--webhook", default="", help="Slack-compatible webhook to POST on breach")
+    al.set_defaults(func=_cmd_alert)
 
     kp = sub.add_parser("kpi", help="platform KPIs over a corpus (failure/PII/money/cost trends)")
     kp.add_argument("paths", nargs="+", help="trace files and/or directories")
