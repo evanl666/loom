@@ -198,20 +198,24 @@ agents it didn't build.
 ### The debugger's verbs
 
 ```
-loom why trace --step 17        # why did it do THAT? intent + the observations it drew on
+loom why trace --step 17        # why did it do THAT? intent + evidence + honest confidence
 loom map trace                  # side-effect map: everything the run changed or reached
 loom taint trace                # exfiltration paths by VALUE lineage (secret read → sent)
+loom diagnose trace --plan      # classify the failure, propose a fix + verify commands
+loom score trace                # behavior scorecard: security/reversibility/policy/evidence/cost
 loom undo trace --plan          # per-action undo/compensation plans, every domain
 loom fork trace --from-step 17  # replay the prefix free, continue live (+ world-restore plan)
-loom diff v1 v2 --actions       # behavior diff: run risk score 100 → 90 ⬇ (+user communication)
+loom diff v1 v2 --actions       # behavior score 100 → 82 ⬇ (security: exercised money-movement)
+loom regression from trace      # turn a bad run into fixture + policy + test + CI
 loom policy simulate runs/ --html report.html   # rollout blast radius before you ship a rule
 loom search runs/ "path:pii_access->user_communication"   # ordered leak-path search
-loom provenance trace           # each claim in the answer → its tool-result evidence
-loom graph trace                # the delegation tree across subagents
-loom flake runs/                # same task N times: where do runs diverge first?
-loom note trace --step 17 -m "root cause"   # shared annotations on a step
+loom provenance trace --gate    # answer claims → evidence; fail CI on unsupported claims
+loom flake --agent m:a -n 10 "task"   # record N runs, find the flakiest step
+loom kpi runs/ --html k.html    # platform trends: failure rate, PII/money exposure, cost p95
 loom serve runs/                # the team Replay Room: search, comment, triage, Studio
 loom packs lint --pack mypkg:MyPack         # certify a domain pack before you trust it
+loom retention runs/ --config r.yml --apply # age-based scrub/delete + audit
+loom artifacts externalize trace            # git-lfs for oversized tool results
 loom trace verify-approvals trace --key-env KEY   # tamper-check signed approvals
 ```
 
