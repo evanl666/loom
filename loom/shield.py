@@ -482,7 +482,12 @@ class Shield:
 
     def _confirm_flow(self, name: str, tool_input, rule: str, base: dict) -> "tuple[bool, dict]":
         """The confirm path: ratchet short-circuit, else wait for the operator."""
-        if self.trust is not None and 0 < self.trust_after <= self.trust.streak(name):
+        # The trust ratchet must NEVER bypass a required-approver policy: a tool
+        # that needs named (or multiple) approvers must always get them, no
+        # matter how long its streak -- otherwise a money-movement chain would
+        # silently auto-approve with zero approvers.
+        if (self.trust is not None and 0 < self.trust_after <= self.trust.streak(name)
+                and self._approval_spec(name, tool_input) is None):
             return True, {
                 **base, "action": "approve", "via": "ratchet", "streak": self.trust.streak(name)
             }

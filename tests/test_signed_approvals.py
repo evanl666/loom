@@ -206,3 +206,31 @@ def test_build_shield_parses_chain_syntax_and_break_glass():
     assert shield.approvers["cap:money_movement"] == {"names": ["alice", "bob"], "min": 2}
     assert shield.break_glass == ["oncall"]
     assert shield.required_approvals("issue_refund", {}) == 2
+
+
+def test_trust_ratchet_never_bypasses_an_approver_policy(tmp_path):
+    from loom.shield import TrustLedger
+
+    led = str(tmp_path / "trust.json")
+    trust = TrustLedger(led)
+    for _ in range(10):                      # a long approval streak
+        trust.record("issue_refund", True, {"id": "x", "ts": 0, "rule": "r", "by": "alice"})
+
+    # A money-movement tool with a required approver must STILL wait -- the
+    # ratchet must not auto-approve it with nobody.
+    shield = Shield(confirm=["cap:money_movement"],
+                    approvers={"cap:money_movement": {"names": ["alice"], "min": 1}},
+                    trust=trust, trust_after=3, timeout=1.0)
+    allowed, event = shield._judge("issue_refund", {"amount": 9999})
+    assert allowed is False and event["via"] != "ratchet"
+
+
+def test_trust_ratchet_still_works_for_tools_without_approver_policy(tmp_path):
+    from loom.shield import TrustLedger
+
+    trust = TrustLedger(str(tmp_path / "trust.json"))
+    for _ in range(5):
+        trust.record("Bash", True, {"id": "x", "ts": 0, "rule": "r", "by": "alice"})
+    shield = Shield(confirm=["Bash(*)"], trust=trust, trust_after=3, timeout=1.0)
+    allowed, event = shield._judge("Bash", {"command": "ls"})
+    assert allowed is True and event["via"] == "ratchet"
