@@ -261,7 +261,27 @@ def _cmd_record(args: argparse.Namespace) -> int:
         env["ANTHROPIC_BASE_URL"] = base
     print(f"loom record: proxying {args.target} on {base}", file=sys.stderr)
 
-    code = subprocess.call(command, env=env)
+    profile_path = ""
+    if args.sandbox:
+        from .sandbox import wrap_sandboxed
+
+        try:
+            command, profile_path = wrap_sandboxed(
+                command, ports=[server.port], allow=args.sandbox_allow
+            )
+        except RuntimeError as e:
+            print(f"loom: {e}", file=sys.stderr)
+            server.shutdown()
+            server.finalize()
+            return 2
+        print("loom record: sandboxed -- the proxy is the only network door",
+              file=sys.stderr)
+
+    try:
+        code = subprocess.call(command, env=env)
+    finally:
+        if profile_path:
+            os.unlink(profile_path)
     server.shutdown()
     server.finalize()
 
@@ -776,6 +796,11 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream API (use https://api.openai.com for OpenAI agents)")
     rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
+    rc.add_argument("--sandbox", action="store_true",
+                    help="deny the agent ALL network except the proxy (macOS sandbox-exec); "
+                         "shield rules become impossible to bypass")
+    rc.add_argument("--sandbox-allow", action="append", default=[], metavar="HOST:PORT",
+                    help="extra host:port the sandboxed agent may reach (repeatable)")
     shield_flags(rc)
     scrub_flag(rc)
     rc.set_defaults(func=_cmd_record)

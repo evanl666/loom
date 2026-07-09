@@ -190,6 +190,33 @@ out-think a deliberately adversarial model with rules alone — that's what
 payments or deletes production data, Shield is a layer, not a substitute for
 idempotency keys, RBAC, and sandboxes.
 
+### `--sandbox`: make the proxy the only door
+
+A proxy alone is a camera on a door in an open field — the agent can make
+other connections and walk around it. Add the OS sandbox and the field gets
+a wall:
+
+```
+loom record --sandbox --deny 'Read(*.env*)' \
+    --rule 'after Read(*secret*): deny *' -- python my_agent.py
+```
+
+The agent process (and everything it spawns) is denied **all network except
+the proxy port**. Now the deny rules and sequence tripwires can't be
+bypassed, and the trace is the *complete* account of the model's traffic —
+not the part that happened to go through the door with the camera. Built in
+on macOS (`sandbox-exec`, the same mechanism Claude Code's sandboxing uses);
+`--sandbox-allow host:port` opens explicit extra holes when the agent
+legitimately needs one. Network only — the filesystem is still yours, so
+pair it with a container when you need that too. On Linux, the same shape by
+hand:
+
+```
+docker network create --internal jail
+docker run --network jail -e ANTHROPIC_BASE_URL=http://proxy:8788 my-agent
+docker run --network jail --network bridge --name proxy -p 8788 loom-proxy
+```
+
 ## Share traces, not secrets
 
 Traces record everything the agent saw — which can include the API key it
