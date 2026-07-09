@@ -891,7 +891,7 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     """Run one task through several agents and compare their traces."""
     import os
 
-    from .bench import load_task, report, run_agent
+    from .bench import load_task, report, reset_workspace, run_agent, target_for
 
     try:
         task = load_task(args.task)
@@ -907,13 +907,51 @@ def _cmd_bench(args: argparse.Namespace) -> int:
     if not agents:
         raise CLIError("bench needs at least one --agent name:command")
 
+    # Workspace reset needs a clean baseline: refuse to nuke uncommitted work.
+    baseline = ""
+    if args.reset == "git":
+        from .workspace import _git
+
+        cwd = os.getcwd()
+        baseline = _git(["rev-parse", "HEAD"], cwd)
+        if not baseline:
+            raise CLIError("--reset git needs a git repo (none found here)")
+        if _git(["status", "--porcelain"], cwd, strip=False).strip() and not args.force:
+            raise CLIError("the workspace is dirty and --reset git would hard-reset it; "
+                           "commit or stash first, or pass --force")
+
     os.makedirs(args.outdir, exist_ok=True)
     shield = _build_shield(args)
     results = []
-    for name, command in agents:
-        print(f"running {name}...", file=sys.stderr)
-        results.append(run_agent(name, command, task, args.target,
-                                  shield=shield, outdir=args.outdir))
+    tmpdirs = []
+    for i, (name, command) in enumerate(agents):
+        workdir = None
+        if args.reset == "git" and i > 0:  # clean slate before each agent but the first
+            err = reset_workspace(args.reset, os.getcwd(), baseline)
+            if err:
+                raise CLIError(err)
+            print(f"reset workspace to {baseline[:10]}", file=sys.stderr)
+        elif args.reset == "copy":
+            import shutil
+            import tempfile
+
+            workdir = tempfile.mkdtemp(prefix=f"loom-bench-{name}-")
+            tmpdirs.append(workdir)
+            shutil.copytree(os.getcwd(), workdir, dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns(args.outdir, "bench-traces"))
+            print(f"{name}: isolated workspace {workdir}", file=sys.stderr)
+        agent_target = target_for(command, args.target)
+        print(f"running {name} ({'openai' if 'openai' in agent_target else 'anthropic'})...",
+              file=sys.stderr)
+        results.append(run_agent(name, command, task, agent_target,
+                                  shield=shield, outdir=args.outdir, studio=args.studio,
+                                  workdir=workdir))
+    if args.reset == "git" and len(agents) > 1:
+        reset_workspace(args.reset, os.getcwd(), baseline)  # leave a clean tree
+    for d in tmpdirs:
+        import shutil
+
+        shutil.rmtree(d, ignore_errors=True)
     text = report(args.task, results)
     print(text)
     if args.output:
@@ -1289,6 +1327,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="upstream API (https://api.openai.com for OpenAI agents)")
     bn.add_argument("--outdir", default="bench-traces", help="where per-agent traces go")
     bn.add_argument("-o", "--output", default="", help="also write the report here")
+    bn.add_argument("--reset", default="none", choices=["none", "git", "copy"],
+                    help="isolate agents so one's edits don't pollute the next: "
+                         "git = hard-reset to HEAD + clean between agents; "
+                         "copy = each agent runs in its own copy of the repo")
+    bn.add_argument("--force", action="store_true",
+                    help="allow --reset git on a dirty tree (destroys uncommitted work)")
+    bn.add_argument("--studio", action="store_true",
+                    help="export each agent's trace to Studio HTML (a clickable trace per cell)")
     shield_flags(bn)
     bn.set_defaults(func=_cmd_bench)
 

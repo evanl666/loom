@@ -54,8 +54,9 @@ def test_report_covers_shield_secrets_and_prevention(tmp_path):
     path, data = _failed_trace(tmp_path)
     report = build_report(data, path)
 
-    assert "## Firewall decisions" in report
-    assert "deny Bash" in report and "Bash(*curl*)" in report
+    assert "## What Loom prevented" in report
+    assert "🛡️ blocked" in report and "Bash(*curl*)" in report
+    assert "Blast radius:" in report and "stopped before reaching the agent" in report
     assert "## Secrets sighted" in report and "anthropic-key" in report
     assert "--scrub" in report                      # prevention: secrets seen
     assert "tool_timeout" in report                 # prevention: a tool timed out

@@ -21,6 +21,13 @@ import json
 _SNIP = 160
 
 
+def classify_all_for_event(ev: dict) -> bool:
+    """Did a blocked call carry network/exfiltration risk?"""
+    from .risk import classify_all
+
+    return "network-egress" in classify_all(ev.get("tool", ""), ev.get("input", {}))
+
+
 def _clip(s: str, n: int = _SNIP) -> str:
     s = " ".join(str(s).split())
     return s if len(s) <= n else s[: n - 3] + "..."
@@ -230,13 +237,30 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
     if not facts["suspects"] and not facts["final_words"]:
         lines.append("- (nothing obviously wrong in the effect log)")
 
-    if facts["shield_events"]:
-        lines += ["", "## Firewall decisions"]
-        for ev in facts["shield_events"]:
+    blocked = [ev for ev in facts["shield_events"] if ev.get("action") == "deny"]
+    if blocked:
+        lines += ["", "## What Loom prevented"]
+        for ev in blocked:
+            sig = f"{ev.get('tool', '?')}({json.dumps(ev.get('input', {}), sort_keys=True, default=str)})"
+            rule = ev.get("rule", "")
+            via = ev.get("via", "")
+            how = (f"sequence rule `{rule}`" if via == "sequence"
+                   else f"deny rule `{rule}`" if rule else "the shield default")
+            lines.append(f"- 🛡️ blocked `{_clip(sig, 90)}` — {how}")
+        egress = any(classify_all_for_event(ev) for ev in blocked)
+        lines.append(
+            f"\n**Blast radius:** {len(blocked)} call(s) stopped before reaching the agent; "
+            + ("a network/exfiltration attempt was cut off." if egress
+               else "none of them executed."))
+
+    other = [ev for ev in facts["shield_events"] if ev.get("action") != "deny"]
+    if other:
+        lines += ["", "## Other firewall decisions"]
+        for ev in other:
             sig = f"{ev.get('tool', '?')}({json.dumps(ev.get('input', {}), sort_keys=True, default=str)})"
             lines.append(
-                f"- {ev.get('action', '?')} {_clip(sig, 90)} — rule `{ev.get('rule', '')}`"
-                f" via {ev.get('via', '?')}"
+                f"- {ev.get('action', '?')} {_clip(sig, 90)}"
+                + (f" — rule `{ev.get('rule', '')}`" if ev.get("rule") else "")
             )
 
     if facts["health"]:

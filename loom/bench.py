@@ -76,11 +76,35 @@ def score(trace: dict, passed: bool) -> dict:
     }
 
 
+_DIALECTS = {"anthropic": "https://api.anthropic.com", "openai": "https://api.openai.com"}
+
+
+def target_for(command: str, default: str) -> str:
+    """Infer the API a benchmarked agent speaks from its command.
+
+    Claude and Codex want different dialects; a single --target can't serve a
+    mixed comparison, so guess per agent (codex/openai -> OpenAI) and fall back
+    to the run-wide default.
+    """
+    low = command.lower()
+    if "codex" in low or "openai" in low:
+        return _DIALECTS["openai"]
+    if "claude" in low or "anthropic" in low:
+        return _DIALECTS["anthropic"]
+    return default
+
+
 def run_agent(name: str, command: str, task: dict, target: str,
-              shield=None, outdir: str = ".", recorder_factory=None) -> dict:
-    """Record one agent against the task. Returns its scored result."""
+              shield=None, outdir: str = ".", studio: bool = False,
+              workdir: "str | None" = None) -> dict:
+    """Record one agent against the task. Returns its scored result.
+
+    ``workdir`` is where the agent runs and where the success oracle is
+    checked -- copy-reset mode gives each agent its own.
+    """
     from .proxy import ProxyServer
 
+    workdir = workdir or os.getcwd()
     prompt = task["prompt"]
     if "{prompt}" in command:
         argv = [p.replace("{prompt}", prompt) for p in shlex.split(command)]
@@ -98,7 +122,7 @@ def run_agent(name: str, command: str, task: dict, target: str,
 
     result: dict = {"name": name, "error": ""}
     try:
-        code = subprocess.call(argv, env=env)
+        code = subprocess.call(argv, env=env, cwd=workdir)
         result["exit_code"] = code
     except OSError as e:
         result["error"] = f"could not run {argv[0]!r}: {e}"
@@ -114,16 +138,45 @@ def run_agent(name: str, command: str, task: dict, target: str,
         return {**result, "passed": False, "tokens": 0, "steps": 0, "tools": 0, "blocked": 0}
 
     output = str(trace.get("output", ""))
-    passed, how = _oracle(task, output, os.getcwd())
+    passed, how = _oracle(task, output, workdir)
     result["how"] = how
     result["trace"] = save
+    if studio:  # a clickable trace behind every cell
+        from .export import trace_to_html
+
+        html_path = os.path.join(outdir, f"{name}.html")
+        with open(html_path, "w") as f:
+            f.write(trace_to_html(trace))
+        result["studio"] = html_path
     return {**result, **score(trace, passed)}
+
+
+def reset_workspace(mode: str, cwd: str, baseline: str) -> str:
+    """Restore a clean workspace between agents. Returns '' or an error string.
+
+    ``git`` mode hard-resets to ``baseline`` and removes untracked files, so
+    each agent starts from the same repo state -- otherwise the first agent's
+    edits pollute the next. Destructive by nature, which is why bench refuses
+    to start on a dirty tree unless --force.
+    """
+    from .workspace import _git
+
+    if mode == "git":
+        _git(["reset", "--hard", baseline], cwd)
+        _git(["clean", "-fd"], cwd)
+        return ""
+    if mode in ("", "none"):
+        return ""
+    return f"unknown reset mode {mode!r} (use: git, none)"
 
 
 def report(task_path: str, results: "list[dict]") -> str:
     """A comparison table, one row per agent."""
+    has_studio = any(r.get("studio") for r in results)
     lines = [f"Task: {task_path}", ""]
     header = f"{'agent':<14} {'pass':<5} {'tokens':>8} {'steps':>6} {'tools':>6} {'blocked':>8}"
+    if has_studio:
+        header += "  trace"
     lines.append(header)
     lines.append("-" * len(header))
     for r in results:
@@ -131,10 +184,13 @@ def report(task_path: str, results: "list[dict]") -> str:
             lines.append(f"{r['name']:<14} error: {r['error']}")
             continue
         mark = "✅" if r["passed"] else "❌"
-        lines.append(
-            f"{r['name']:<14} {mark:<5} {r['tokens']:>8,} {r['steps']:>6} "
-            f"{r['tools']:>6} {r['blocked']:>8}"
-        )
+        row = (f"{r['name']:<14} {mark:<5} {r['tokens']:>8,} {r['steps']:>6} "
+               f"{r['tools']:>6} {r['blocked']:>8}")
+        if has_studio and r.get("studio"):
+            import os as _os
+
+            row += f"  {_os.path.basename(r['studio'])}"
+        lines.append(row)
     ok = [r for r in results if r.get("passed")]
     if ok:
         cheapest = min(ok, key=lambda r: r["tokens"])
