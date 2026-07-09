@@ -267,6 +267,37 @@ def _recover_wirelog(save: str) -> None:
     print(f"loom: recovered a crashed session's wirelog -> {recovered}", file=sys.stderr)
 
 
+# Known coding agents: name -> (build argv from a prompt, the binary to check,
+# is it an OpenAI-dialect agent?). The shortcut form `loom record claude "..."`
+# expands through this; `loom record -- <anything>` bypasses it.
+AGENTS: dict = {
+    "claude": (lambda p: ["claude", "-p", p], "claude", False),
+    "codex": (lambda p: ["codex", "exec", p], "codex", True),
+}
+
+
+def _expand_agent_shortcut(command: "list[str]", args) -> "tuple[list[str], str]":
+    """Turn `[agent, prompt]` into the real argv. Returns (command, error)."""
+    if len(command) >= 1 and command[0] in AGENTS and not (
+        len(command) > 1 and command[1].startswith("-")
+    ):
+        name = command[0]
+        build, binary, is_openai = AGENTS[name]
+        if len(command) < 2:
+            return command, (f"`loom record {name}` needs a prompt, "
+                             f'e.g. loom record {name} "fix the failing test"')
+        prompt = " ".join(command[1:])
+        import shutil
+
+        if shutil.which(binary) is None:
+            return command, (f"{binary!r} is not on your PATH -- install the agent first, "
+                             f"or use the passthrough form: loom record -- <command>")
+        if is_openai and "openai" not in args.target:
+            args.target = "https://api.openai.com"  # route codex to the right dialect
+        return build(prompt), ""
+    return command, ""
+
+
 def _cmd_record(args: argparse.Namespace) -> int:
     """Black-box a real agent session: proxy up, env var set, command run."""
     import os
@@ -281,7 +312,13 @@ def _cmd_record(args: argparse.Namespace) -> int:
     if command and command[0] == "--":
         command = command[1:]
     if not command:
-        print("loom: record needs a command, e.g. loom record -- claude -p 'hi'", file=sys.stderr)
+        print("loom: record needs a command: `loom record claude \"fix the test\"` "
+              "or `loom record -- <command>`", file=sys.stderr)
+        return 2
+
+    command, err = _expand_agent_shortcut(command, args)
+    if err:
+        print(f"loom: {err}", file=sys.stderr)
         return 2
 
     shield = _build_shield(args)
@@ -354,6 +391,18 @@ def _cmd_record(args: argparse.Namespace) -> int:
                 print(f"    {e.get('tool')}({json.dumps(e.get('input', {}), sort_keys=True, default=str)})", file=sys.stderr)
         print(f"  replay it:  loom replay {args.save}", file=sys.stderr)
         print(f"  inspect it: loom studio {args.save}", file=sys.stderr)
+        if args.report:
+            base = args.save[: -len(".loom.json")] if args.save.endswith(".loom.json") else args.save
+            from .export import trace_to_html
+            from .incident import build_report
+
+            html_path = base + ".html"
+            with open(html_path, "w") as f:
+                f.write(trace_to_html(data))
+            md_path = base + ".incident.md"
+            with open(md_path, "w") as f:
+                f.write(build_report(data, args.save) + "\n")
+            print(f"  report:     {html_path}  +  {md_path}", file=sys.stderr)
     except (OSError, json.JSONDecodeError):
         print("\nno traffic recorded (did the agent talk to the API?)", file=sys.stderr)
         if "openai" not in args.target:
@@ -972,12 +1021,25 @@ def build_parser() -> argparse.ArgumentParser:
                         help="require this token in x-loom-auth on data-plane requests "
                              "(guards replay serving; needs an agent that can add a header)")
 
-    rc = sub.add_parser("record", help="black-box a real agent session: loom record -- <command>")
-    rc.add_argument("command", nargs=argparse.REMAINDER, help="the agent command to run")
+    rc = sub.add_parser(
+        "record",
+        help="black-box a real agent session",
+        description="Record an agent through a proxy. Two forms:\n"
+                    "  loom record [--profile P] [--report] claude \"fix the test\"\n"
+                    "  loom record [--profile P] -- <any command>\n"
+                    "(put loom's flags BEFORE the agent). Known shortcuts: "
+                    + ", ".join(sorted(AGENTS)),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    rc.add_argument("command", nargs=argparse.REMAINDER,
+                    help="`claude \"prompt\"` (a known agent) or `-- <command>`")
     rc.add_argument("--save", default="session.loom.json")
     rc.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream API (use https://api.openai.com for OpenAI agents)")
     rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
+    rc.add_argument("--report", action="store_true",
+                    help="after recording, also write <save>.html (Studio) and "
+                         "<save>.incident.md (postmortem)")
     rc.add_argument("--no-workspace", action="store_true",
                     help="don't record cwd/git/argv/os metadata with the trace")
     rc.add_argument("--sandbox", action="store_true",

@@ -15,10 +15,14 @@ a regression test.
 ```
 pip install loom-harness                       # zero dependencies (or: uvx --from loom-harness loom)
 
-loom record -- claude -p "fix the failing test"   # record a real Claude Code session
+loom record --profile claude-code-safe --report claude "fix the failing test"
+#      ^ firewall + recording + workspace metadata, then writes session.html + session.incident.md
 loom studio session.loom.json                     # time-travel through it in your browser
 loom proxy --replay session.loom.json             # serve it back -- zero API calls, fake key works
 ```
+
+`loom record claude "..."` is the shortcut; `loom record -- <any command>` records
+anything that speaks the Anthropic or OpenAI API, unmodified.
 
 ![Loom demo: record, read, replay, rewind](docs/demo.gif)
 
