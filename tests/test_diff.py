@@ -161,3 +161,23 @@ def test_score_breakdown_clean_run_is_high(tmp_path):
     a = _saved(tmp_path, "a.loom.json", [("Read", {"file_path": "a.py"})])
     bd = score_breakdown(json.load(open(a)))
     assert bd["overall"] >= 90  # a plain read scores near-perfect
+
+
+def test_score_badge_and_markdown(tmp_path, capsys):
+    import json
+
+    from loom.cli import main
+    from loom.diff import score_badge_svg
+
+    # badge colors track the score
+    assert "#4c1" in score_badge_svg(95)
+    assert "#e05d44" in score_badge_svg(20)
+    assert "92/100" in score_badge_svg(92)
+
+    b = _saved(tmp_path, "b.loom.json", [("issue_refund", {"amount": 5, "order_id": "A"})])
+    badge = tmp_path / "badge.svg"
+    assert main(["score", b, "--badge", str(badge), "--md", "-"]) == 0
+    out = capsys.readouterr().out
+    assert "badge ->" in out and "Agent behavior score:" in out
+    svg = badge.read_text()
+    assert svg.startswith("<svg") and "agent safety" in svg

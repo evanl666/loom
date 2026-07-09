@@ -218,6 +218,36 @@ def score_breakdown(trace: dict) -> dict:
     return {"overall": overall, "dimensions": dims}
 
 
+def score_badge_svg(overall: int, label: str = "agent safety") -> str:
+    """A shields.io-style SVG badge for the behavior score (self-contained)."""
+    color = "#4c1" if overall >= 90 else "#97ca00" if overall >= 75 else \
+            "#dfb317" if overall >= 60 else "#fe7d37" if overall >= 40 else "#e05d44"
+    value = f"{overall}/100"
+    lw, vw = 6 * len(label) + 12, 6 * len(value) + 12
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{lw + vw}" height="20" role="img" aria-label="{label}: {value}">
+  <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
+  <clipPath id="r"><rect width="{lw + vw}" height="20" rx="3" fill="#fff"/></clipPath>
+  <g clip-path="url(#r)">
+    <rect width="{lw}" height="20" fill="#555"/>
+    <rect x="{lw}" width="{vw}" height="20" fill="{color}"/>
+    <rect width="{lw + vw}" height="20" fill="url(#s)"/>
+  </g>
+  <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+    <text x="{lw / 2}" y="14">{label}</text>
+    <text x="{lw + vw / 2}" y="14">{value}</text>
+  </g>
+</svg>"""
+
+
+def score_markdown(b: dict) -> str:
+    """A PR-comment line + table for the scorecard."""
+    lines = [f"### 🧭 Agent behavior score: **{b['overall']}/100**", "",
+             "| dimension | score | why |", "|---|---:|---|"]
+    for name, d in b["dimensions"].items():
+        lines.append(f"| {name.replace('_', ' ')} | {d['score']} | {d['why']} |")
+    return "\n".join(lines)
+
+
 def describe_score(b: dict) -> str:
     lines = [f"behavior score: {b['overall']}/100"]
     for name, d in b["dimensions"].items():

@@ -1266,10 +1266,24 @@ def _cmd_movie(args: argparse.Namespace) -> int:
 
 def _cmd_score(args: argparse.Namespace) -> int:
     """The behavior scorecard: security / side-effect / reversibility / ..."""
-    from .diff import describe_score, score_breakdown
+    from .diff import describe_score, score_badge_svg, score_breakdown, score_markdown
 
     _import_builtin_packs()
     b = score_breakdown(_load_trace_json(args.path))
+    if args.badge:
+        with open(args.badge, "w") as f:
+            f.write(score_badge_svg(b["overall"]))
+        print(f"badge -> {args.badge}  ({b['overall']}/100; embed it in your README)")
+    if args.md:
+        out = score_markdown(b)
+        if args.md == "-":
+            print(out)
+        else:
+            with open(args.md, "w") as f:
+                f.write(out + "\n")
+            print(f"scorecard (markdown) -> {args.md}")
+    if args.badge or args.md:
+        return 0
     if args.json:
         print(json.dumps(b, indent=2))
     else:
@@ -2566,6 +2580,10 @@ def build_parser() -> argparse.ArgumentParser:
     sc = sub.add_parser("score", help="behavior scorecard: security/side-effect/reversibility/...")
     sc.add_argument("path")
     sc.add_argument("--json", action="store_true", help="machine-readable breakdown")
+    sc.add_argument("--badge", default="", metavar="FILE",
+                    help="write a shields-style SVG badge (Agent Safety 92/100)")
+    sc.add_argument("--md", default="", metavar="FILE",
+                    help="write a Markdown scorecard for a PR comment ('-' = stdout)")
     sc.set_defaults(func=_cmd_score)
 
     tt = sub.add_parser("taint", help="value-lineage exfiltration paths (secret/PII → egress)")
