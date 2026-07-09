@@ -181,3 +181,31 @@ def test_cli_dlp_gate(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "worst severity critical" in out and "[secret]" in out
     assert SECRET not in out
+
+
+def test_no_false_positive_on_ordinary_numbers():
+    from loom.taint import _sensitive_values
+
+    # order ids, ISBNs, timestamps must NOT read as card/phone/PII
+    for text in ("order 1234567890123456 shipped", "SKU 9780470059029",
+                 "timestamp 1699999999 id 12345678", "42 items, 100 total"):
+        flagged = [k for k, _ in _sensitive_values(text) if k in ("credit-card", "phone")]
+        assert flagged == [], (text, flagged)
+
+
+def test_luhn_valid_card_and_shaped_phone_are_detected():
+    from loom.taint import _sensitive_values
+
+    assert "credit-card" in [k for k, _ in _sensitive_values("card 4111 1111 1111 1111")]
+    assert "credit-card" in [k for k, _ in _sensitive_values("4111111111111111")]
+    assert "phone" in [k for k, _ in _sensitive_values("call +1 555 123 4567")]
+    assert "phone" in [k for k, _ in _sensitive_values("(415) 555-0100")]
+
+
+def test_a_card_is_not_double_flagged_as_a_phone():
+    from loom.taint import _sensitive_values
+
+    kinds = [k for k, _ in _sensitive_values("card 4111 1111 1111 1111 on file")]
+    assert kinds.count("credit-card") == 1 and "phone" not in kinds
+    # and an SSN isn't also a phone
+    assert [k for k, _ in _sensitive_values("SSN 123-45-6789")] == ["ssn"]

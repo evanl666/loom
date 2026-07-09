@@ -27,12 +27,33 @@ from typing import Any
 from .action import Action, actions
 
 # PII value shapes (the scrub PATTERNS cover credentials; these add people-data).
+# email/ssn are distinctive; card and phone need validation (see below) because
+# a bare run of digits is far more often an order id / timestamp than a card or
+# a phone -- flagging those would make `loom taint`/`loom dlp` cry wolf.
 _PII = [
     ("email", re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")),
     ("ssn", re.compile(r"\b\d{3}-\d{2}-\d{4}\b")),
-    ("credit-card", re.compile(r"\b(?:\d[ -]?){13,16}\b")),
-    ("phone", re.compile(r"\b\+?\d[\d\-() ]{8,}\d\b")),
 ]
+# Candidate card: 13-16 digits with optional space/dash separators -- ACCEPTED
+# only if it passes the Luhn checksum (real cards do; random ids mostly don't).
+_CARD = re.compile(r"\b(?:\d[ -]?){13,16}\b")
+# Candidate phone: must LOOK like a phone (a leading + country code, or grouped
+# with separators/parens) -- a bare digit run is treated as an id, not a phone.
+_PHONE = re.compile(r"\+\d[\d ().\-]{7,}\d|\(?\d{2,4}\)?[ .\-]\d{2,4}[ .\-]\d{2,4}")
+
+
+def _luhn(digits: str) -> bool:
+    d = [int(c) for c in digits if c.isdigit()]
+    if not 13 <= len(d) <= 19:
+        return False
+    total, parity = 0, len(d) % 2
+    for i, n in enumerate(d):
+        if i % 2 == parity:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
 
 _MIN_FRAGMENT = 12  # a shared substring shorter than this is too weak to claim
 
@@ -64,15 +85,32 @@ def _sensitive_values(text: str) -> "list[tuple[str, str]]":
     from .scrub import PATTERNS
 
     out: list[tuple[str, str]] = []
+    claimed: list[tuple[int, int]] = []  # spans already taken, most-specific first
+
+    def _take(kind: str, val: str, span: "tuple[int, int]") -> None:
+        # Skip a match overlapping one already claimed by a higher-priority
+        # detector, so a card/SSN isn't ALSO reported as a phone.
+        if any(span[0] < c1 and span[1] > c0 for c0, c1 in claimed):
+            return
+        claimed.append(span)
+        out.append((kind, val))
+
     for kind, pattern in PATTERNS:
         for m in pattern.finditer(text):
             # credential-assignment captures the value in group 3; others whole.
             val = m.group(3) if kind == "credential-assignment" and m.lastindex and m.lastindex >= 3 else m.group(0)
             if val and len(val) >= 8:
-                out.append((kind, val))
-    for kind, pattern in _PII:
+                _take(kind, val, m.span())
+    for kind, pattern in _PII:  # email, ssn -- distinctive, high priority
         for m in pattern.finditer(text):
-            out.append((kind, m.group(0)))
+            _take(kind, m.group(0), m.span())
+    # cards: only Luhn-valid numbers (rejects order ids, ISBNs, timestamps).
+    for m in _CARD.finditer(text):
+        if _luhn(m.group(0)):
+            _take("credit-card", m.group(0).strip(), m.span())
+    # phones: only phone-shaped strings (a + country code or grouped digits).
+    for m in _PHONE.finditer(text):
+        _take("phone", m.group(0).strip(), m.span())
     return out
 
 
