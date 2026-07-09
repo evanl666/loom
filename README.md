@@ -214,6 +214,23 @@ decisions — and answers with seq numbers you can jump to in `loom studio`,
 fork, or bisect. The diagnosis is itself a loom run: save it, replay it, ask
 why about the why.
 
+## Search every run you've ever recorded
+
+Traces are files — commit them, rsync them, drop them in a shared folder.
+`loom search` makes the folder queryable, no service to run:
+
+```
+loom search runs/ 'cost>50000'          # the expensive ones
+loom search runs/ 'tool:Bash failed'    # failed runs that shelled out
+loom search runs/ 'shield:deny'         # runs where the firewall fired
+loom search runs/ 'database migration'  # free text over prompts + outputs
+loom lake runs/ --open                  # cost dashboard for the whole corpus
+```
+
+The index is a SQLite file inside the directory, refreshed incrementally by
+mtime. `loom lake` renders a self-contained HTML dashboard: total spend,
+failed runs, shield blocks, every run ranked by token cost.
+
 ## Loom is also a harness
 
 Recording is the front door. Underneath is a full agent framework whose kernel

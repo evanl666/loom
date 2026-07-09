@@ -613,6 +613,60 @@ def _cmd_trust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_search(args: argparse.Namespace) -> int:
+    """Query an auto-indexed directory of traces."""
+    from .lake import Lake
+
+    lake = Lake(args.directory)
+    lake.index()
+    try:
+        rows = lake.search(args.query)
+    except ValueError as e:
+        print(f"loom: {e}", file=sys.stderr)
+        return 2
+    finally:
+        lake.close()
+    if not rows:
+        print("no matching runs")
+        return 1
+    for r in rows:
+        tokens = r["input_tokens"] + r["output_tokens"]
+        flags = []
+        if r["stop_reason"] not in ("end_turn", ""):
+            flags.append(r["stop_reason"])
+        if r["shield_denies"]:
+            flags.append(f"shield:{r['shield_denies']}")
+        prompt = (r["episodes"] or "").split(" | ")[0][:60]
+        print(f"{tokens:>9,} tok  {r['path']}  {prompt!r}"
+              + (f"  [{', '.join(flags)}]" if flags else ""))
+    print(f"\n{len(rows)} run(s)")
+    return 0
+
+
+def _cmd_lake(args: argparse.Namespace) -> int:
+    """Index a trace corpus and render its cost dashboard."""
+    import os
+
+    from .lake import Lake, dashboard_html
+
+    lake = Lake(args.directory)
+    fresh, total = lake.index()
+    stats = lake.stats()
+    lake.close()
+    print(f"indexed {total} run(s) ({fresh} new/changed) in {args.directory}")
+    print(f"  tokens: {stats['input_tokens'] + stats['output_tokens']:,}"
+          f"  failed: {stats['failed']}  shield blocks: {stats['denies']}")
+    out = args.output or os.path.join(args.directory, "lake.html")
+    with open(out, "w") as f:
+        f.write(dashboard_html(stats, args.directory))
+    print(f"dashboard -> {out}")
+    if args.open:
+        import webbrowser
+
+        webbrowser.open(f"file://{os.path.abspath(out)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="loom", description="Read, replay, and rewind agent runs.")
     p.add_argument("--version", action="version", version=f"loom {__version__}")
@@ -760,6 +814,19 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
     ap.set_defaults(func=_cmd_approve)
+
+    se = sub.add_parser("search", help="query a directory of traces (auto-indexed)")
+    se.add_argument("directory")
+    se.add_argument("query", nargs="?", default="",
+                    help="terms: cost>N cost<N tool:NAME model:GLOB failed "
+                         "shield:deny healed, plus free text (all must hold)")
+    se.set_defaults(func=_cmd_search)
+
+    lk = sub.add_parser("lake", help="index a trace corpus + cost dashboard HTML")
+    lk.add_argument("directory")
+    lk.add_argument("-o", "--output", default="", help="dashboard path (default <dir>/lake.html)")
+    lk.add_argument("--open", action="store_true", help="open the dashboard in a browser")
+    lk.set_defaults(func=_cmd_lake)
 
     sc = sub.add_parser("scrub", help="redact secrets from a trace before sharing it")
     sc.add_argument("path")
