@@ -25,6 +25,57 @@ from typing import Any
 from .tools import Tool
 
 
+def mcp_manifest(tools: "list[Tool]") -> "list[dict]":
+    """A capability + risk manifest for a set of (MCP) tools.
+
+    The MCP gateway's core value: before you let an agent reach a server's
+    tools, see what each one CAN DO -- its capabilities (read/write/exec/
+    network/secret/... plus business classes), its risk category, whether it
+    declared its own capabilities, and its input schema. This is what a policy
+    is written against.
+    """
+    from .capabilities import capabilities
+    from .risk import classify
+
+    out = []
+    for t in tools:
+        declared = getattr(t, "capabilities", None)
+        caps = sorted(capabilities(t.name, {}, declared=declared))
+        out.append({
+            "tool": t.name,
+            "capabilities": caps,
+            "risk": classify(t.name, {}),
+            "declared": bool(declared),
+            "schema": getattr(t, "input_schema", {}),
+        })
+    return out
+
+
+def guarded_tools(tools: "list[Tool]", shield) -> "list[Tool]":
+    """Wrap tools so every call is screened by ``shield`` before it runs.
+
+    A denied call never reaches the server -- the tool returns a BLOCKED
+    result the model sees, exactly like Shield at the proxy, so MCP tools used
+    directly (not just via the recording proxy) are still firewalled. Confirm
+    rules here fall back to deny (there is no human in a direct call path).
+    """
+    from dataclasses import replace
+
+    wrapped = []
+    for t in tools:
+        inner = t.fn
+
+        def screened(_inner=inner, _name=t.name, **kwargs):
+            action, rule = shield.classify(_name, kwargs)
+            if action in ("deny", "confirm"):
+                return (f"BLOCKED: {_name} was not run -- firewall {action}"
+                        + (f" (rule: {rule})" if rule else ""))
+            return _inner(**kwargs)
+
+        wrapped.append(replace(t, fn=screened))
+    return wrapped
+
+
 def _require_mcp():
     try:
         from mcp import ClientSession, StdioServerParameters
@@ -86,6 +137,14 @@ class MCPServer:
             )
             for t in listed.tools
         ]
+
+    def manifest(self) -> "list[dict]":
+        """The capability + risk manifest for this server's tools."""
+        return mcp_manifest(self.tools())
+
+    def guarded_tools(self, shield) -> "list[Tool]":
+        """This server's tools, each screened by ``shield`` before it runs."""
+        return guarded_tools(self.tools(), shield)
 
     def call(self, name: str, **kwargs: Any) -> str:
         """Call one tool synchronously, flattening the reply to text."""

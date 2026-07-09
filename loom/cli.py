@@ -1260,6 +1260,34 @@ def _cmd_alert(args: argparse.Namespace) -> int:
     return 1 if breached else 0
 
 
+def _cmd_mcp(args: argparse.Namespace) -> int:
+    """MCP gateway: a capability manifest for an MCP server's tools."""
+    from .mcp import MCPServer, mcp_manifest
+
+    try:
+        server = MCPServer(args.command, args=args.args or [])
+    except ImportError as e:
+        raise CLIError(str(e))
+    except Exception as e:
+        raise CLIError(f"could not start MCP server: {e}")
+    try:
+        manifest = mcp_manifest(server.tools())
+    finally:
+        server.close()
+    if args.json:
+        print(json.dumps(manifest, indent=2))
+        return 0
+    print(f"MCP server exposes {len(manifest)} tool(s):")
+    for m in manifest:
+        risk = f"  ⚠ {m['risk']}" if m["risk"] else ""
+        caps = ", ".join(m["capabilities"]) or "(none)"
+        mark = "declared" if m["declared"] else "inferred"
+        print(f"  {m['tool']:<28} {caps:<40}{risk}  [{mark}]")
+    print("\nwrite a policy against these capabilities: --deny cap:exec, "
+          "--confirm cap:network, ...")
+    return 0
+
+
 def _cmd_leaderboard(args: argparse.Namespace) -> int:
     """Rank agents by safety/cost/risk over a corpus (<dir>/<agent>/*.loom.json)."""
     import os
@@ -2916,6 +2944,14 @@ def build_parser() -> argparse.ArgumentParser:
     dg.add_argument("--plan", action="store_true", help="also emit the replay/fork verify commands")
     dg.add_argument("--json", action="store_true", help="machine-readable")
     dg.set_defaults(func=_cmd_diagnose)
+
+    mc = sub.add_parser("mcp", help="MCP gateway: capability manifest for an MCP server")
+    mcsub = mc.add_subparsers(dest="mcp_cmd", required=True)
+    mc_man = mcsub.add_parser("manifest", help="list an MCP server's tools + their capabilities")
+    mc_man.add_argument("command", help="the MCP server command, e.g. npx")
+    mc_man.add_argument("args", nargs="*", help="arguments to the server command")
+    mc_man.add_argument("--json", action="store_true", help="machine-readable")
+    mc_man.set_defaults(func=_cmd_mcp)
 
     lb = sub.add_parser("leaderboard", help="rank agents by safety/cost/risk (<dir>/<agent>/*.loom.json)")
     lb.add_argument("directory")
