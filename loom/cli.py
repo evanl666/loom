@@ -1053,6 +1053,28 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """Serve a trace directory to the team: list, search, Studio, incidents."""
+    import os
+
+    from .serve import TraceServer
+
+    if not os.path.isdir(args.directory):
+        raise CLIError(f"{args.directory} is not a directory")
+    server = TraceServer(args.directory, host=args.host, port=args.port)
+    print(f"loom trace server: {server.url}  (dir: {os.path.abspath(args.directory)})")
+    if args.host not in ("127.0.0.1", "localhost"):
+        print("  ⚠️  serving beyond localhost -- there is no auth; trusted networks only")
+    print("  Ctrl-C to stop")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        server.shutdown()
+    return 0
+
+
 def _cmd_tools(args: argparse.Namespace) -> int:
     """Show the capability contract of an agent's tools."""
     from .capabilities import manifest
@@ -1916,6 +1938,14 @@ def build_parser() -> argparse.ArgumentParser:
                     help="append this user note to the context at the fork point")
     fk.add_argument("-o", "--output", default="", help="where to save the branch trace")
     fk.set_defaults(func=_cmd_fork)
+
+    sv = sub.add_parser("serve", help="serve a trace directory to the team (list, search, "
+                                      "Studio, incidents)")
+    sv.add_argument("directory", nargs="?", default=".", help="directory of *.loom.json")
+    sv.add_argument("--port", type=int, default=8790)
+    sv.add_argument("--host", default="127.0.0.1",
+                    help="bind address (0.0.0.0 shares on the LAN; no auth)")
+    sv.set_defaults(func=_cmd_serve)
 
     tls = sub.add_parser("tools", help="show an agent's tools and their capability contract")
     tls.add_argument("--agent", required=True, help="module:attr (Agent or zero-arg factory)")
