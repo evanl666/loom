@@ -1081,6 +1081,39 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_retention(args: argparse.Namespace) -> int:
+    """Age-based lifecycle for a trace corpus: scrub-in-place / delete + audit."""
+    import os
+
+    from .retention import apply_retention, load_retention, summarize
+
+    if not os.path.isdir(args.directory):
+        raise CLIError(f"{args.directory} is not a directory")
+    config = load_retention(args.config) if args.config else {
+        k: v for k, v in (("scrub_after", args.scrub_after), ("delete_after", args.delete_after))
+        if v
+    }
+    if not config:
+        raise CLIError("provide --config FILE or --scrub-after/--delete-after")
+    if args.pii:
+        config["redact_pii"] = True
+
+    audit = apply_retention(args.directory, config, dry_run=not args.apply)
+    for a in audit:
+        if a["action"] != "keep":
+            mark = {"scrub": "🧽", "delete": "🗑"}.get(a["action"], " ")
+            print(f"  {mark} {a['action']:6} {a['path']}  ({a['age_days']}d)"
+                  + (f"  -- {a['error']}" if a.get("error") else ""))
+    print("\n" + summarize(audit))
+    if args.apply and args.audit:
+        with open(args.audit, "w") as f:
+            json.dump(audit, f, indent=2)
+        print(f"audit log -> {args.audit}")
+    if not args.apply:
+        print("(dry run -- pass --apply to make these changes)")
+    return 0
+
+
 def _cmd_diagnose(args: argparse.Namespace) -> int:
     """Classify a run's failure and propose a categorized fix + verify plan."""
     import os
@@ -2380,6 +2413,18 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    rt = sub.add_parser("retention", help="age-based lifecycle for a corpus (scrub/delete + audit)")
+    rt.add_argument("directory")
+    rt.add_argument("--config", default="", help="retention.yml (scrub_after/delete_after/redact_pii)")
+    rt.add_argument("--scrub-after", dest="scrub_after", default="",
+                    help="scrub traces older than this in place, e.g. 30d (if no --config)")
+    rt.add_argument("--delete-after", dest="delete_after", default="",
+                    help="delete traces older than this, e.g. 90d (if no --config)")
+    rt.add_argument("--pii", action="store_true", help="also redact PII (emails/SSNs/cards/phones)")
+    rt.add_argument("--apply", action="store_true", help="make the changes (default: dry run)")
+    rt.add_argument("--audit", default="", help="write a JSON audit log of what was done")
+    rt.set_defaults(func=_cmd_retention)
 
     dg = sub.add_parser("diagnose", help="classify a failure and propose a fix + verify plan")
     dg.add_argument("path")
