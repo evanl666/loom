@@ -200,12 +200,22 @@ class Shield:
     # -- rules ------------------------------------------------------------
 
     def classify(self, name: str, tool_input) -> "tuple[str, str]":
-        """First matching action wins, checked deny > allow > confirm."""
+        """First matching action wins, checked deny > allow > confirm.
+
+        A ``cap:<capability>`` pattern matches by inferred tool capability
+        (read/write/exec/network/secret/destructive) rather than by name, so
+        ``deny cap:exec`` blocks every shell-shaped tool whatever it's called.
+        """
         sig = _signature(name, tool_input)
         norm = _normalize(sig)
         for patterns, action in ((self.deny, DENY), (self.allow, ALLOW), (self.confirm, CONFIRM)):
             for p in patterns:
-                if fnmatch(name, p) or fnmatch(sig, p) or fnmatch(norm, p):
+                if p.startswith("cap:"):
+                    from .capabilities import matches_cap
+
+                    if matches_cap(p, name, tool_input):
+                        return action, p
+                elif fnmatch(name, p) or fnmatch(sig, p) or fnmatch(norm, p):
                     return action, p
         return self.default, ""
 

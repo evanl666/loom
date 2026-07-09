@@ -33,6 +33,9 @@ class Tool:
     description: str
     fn: Callable[..., Any]
     input_schema: dict
+    # Optional capability contract (read/write/exec/network/secret/destructive/
+    # idempotent). When set, policy `cap:` rules trust this over inference.
+    capabilities: "set[str] | None" = None
 
     def schema(self) -> dict:
         """The neutral schema passed to a provider."""
@@ -77,8 +80,14 @@ def tool(
     *,
     name: "str | None" = None,
     description: "str | None" = None,
+    capabilities: "set[str] | None" = None,
 ) -> Any:
-    """Turn a function into a ``Tool``. Usable bare (``@tool``) or with args."""
+    """Turn a function into a ``Tool``. Usable bare (``@tool``) or with args.
+
+    ``capabilities`` declares the tool's capability contract (read/write/exec/
+    network/secret/destructive/idempotent) so ``cap:`` policy rules can trust
+    it instead of inferring from the name.
+    """
 
     def wrap(f: Callable) -> Tool:
         return Tool(
@@ -86,6 +95,7 @@ def tool(
             description=(description or inspect.getdoc(f) or "").strip(),
             fn=f,
             input_schema=_build_schema(f),
+            capabilities=set(capabilities) if capabilities else None,
         )
 
     return wrap(fn) if fn is not None else wrap

@@ -239,7 +239,20 @@ def _doctor_environment() -> int:
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
-    """Render a saved trace to a self-contained HTML page."""
+    """Render a saved trace to HTML, or flatten it to observability events."""
+    if args.jsonl or args.otel:
+        from .events import export_events
+
+        paths = _expand_trace_paths([args.path])
+        dest = args.jsonl or "-"
+        if dest == "-":
+            n = export_events(paths, sys.stdout, otel=args.otel)
+        else:
+            with open(dest, "w") as f:
+                n = export_events(paths, f, otel=args.otel)
+            print(f"wrote {n} event(s) -> {dest}", file=sys.stderr)
+        return 0
+
     from .export import trace_to_html
 
     data = _load_trace_json(args.path)
@@ -881,6 +894,27 @@ def _cmd_undo(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tools(args: argparse.Namespace) -> int:
+    """Show the capability contract of an agent's tools."""
+    from .capabilities import manifest
+
+    agent, err = _load_agent(args.agent)
+    if agent is None:
+        raise CLIError(err)
+    rows = manifest(agent.tools)
+    if not rows:
+        print("this agent has no tools")
+        return 0
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+    for r in rows:
+        mark = "declared" if r["declared"] else "inferred"
+        caps = ", ".join(r["capabilities"]) or "(none)"
+        print(f"  {r['tool']:<24} {caps:<45} [{mark}]")
+    return 0
+
+
 def _cmd_pack(args: argparse.Namespace) -> int:
     """Bundle a trace + incident + studio + patch into a shareable .loompack."""
     from .pack import build_pack
@@ -1347,9 +1381,14 @@ def build_parser() -> argparse.ArgumentParser:
     df.add_argument("b")
     df.set_defaults(func=_cmd_diff)
 
-    ex = sub.add_parser("export", help="render a saved trace to self-contained HTML")
-    ex.add_argument("path")
-    ex.add_argument("-o", "--output", default="", help="output path (default: <trace>.html)")
+    ex = sub.add_parser("export", help="render a trace to HTML, or --jsonl/--otel events")
+    ex.add_argument("path", help="a trace file or a directory of *.loom.json")
+    ex.add_argument("-o", "--output", default="", help="HTML output path (default: <trace>.html)")
+    ex.add_argument("--jsonl", default="", metavar="FILE",
+                    help="flatten to one JSON event per effect (FILE, or '-' for stdout) "
+                         "for Datadog/Splunk/Grafana ingestion")
+    ex.add_argument("--otel", action="store_true",
+                    help="with --jsonl (or alone -> stdout): OpenTelemetry-style log records")
     ex.set_defaults(func=_cmd_export)
 
     dr = sub.add_parser("doctor",
@@ -1621,6 +1660,11 @@ def build_parser() -> argparse.ArgumentParser:
     ud.add_argument("--force", action="store_true",
                     help="undo even if the tree changed since the recording")
     ud.set_defaults(func=_cmd_undo)
+
+    tls = sub.add_parser("tools", help="show an agent's tools and their capability contract")
+    tls.add_argument("--agent", required=True, help="module:attr (Agent or zero-arg factory)")
+    tls.add_argument("--json", action="store_true", help="machine-readable manifest")
+    tls.set_defaults(func=_cmd_tools)
 
     pk = sub.add_parser("pack", help="bundle trace + incident + studio + patch into a .loompack")
     pk.add_argument("path")

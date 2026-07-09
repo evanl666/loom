@@ -159,6 +159,19 @@ Patterns are shell globs over the tool name (`WebFetch`) or its full signature
 Precedence is deny > allow > confirm, so `--confirm '*' --allow 'Read(*)'`
 means "ask me about everything except reads".
 
+**Rules on capability, not name.** A `deny 'Bash*'` rule is brittle — the next
+agent calls its shell tool `run_command` and sails through. A `cap:` rule
+matches what a tool *does*, inferred from the call (or declared by the tool):
+
+```
+loom record claude "..." --deny 'cap:exec' --deny 'cap:secret' --confirm 'cap:network'
+```
+
+Capabilities: `read`, `write`, `exec`, `network`, `secret`, `destructive`,
+`idempotent`. `loom tools --agent module:attr` prints the capability contract
+of an agent's tools; a tool can declare its own with
+`@tool(capabilities={"network"})`.
+
 A **deny** is replaced in-flight with a notice the model can read:
 
 > `[loom shield] Blocked tool call Read({"file_path": "/app/.env"}) — matched
@@ -420,6 +433,17 @@ loom lake runs/ --open                  # cost dashboard for the whole corpus
 The index is a SQLite file inside the directory, refreshed incrementally by
 mtime. `loom lake` renders a self-contained HTML dashboard: total spend,
 failed runs, shield blocks, every run ranked by token cost.
+
+**Into your own stack.** Your company already runs Datadog/Splunk/Grafana — it
+won't watch an HTML file. `loom export --jsonl` flattens a trace (or a whole
+directory) into one normalized JSON event per effect — run id, seq, tool,
+tokens, capabilities, risk, shield action — ready to ship:
+
+```
+loom export session.loom.json --jsonl events.jsonl
+loom export runs/ --jsonl - | vector          # a corpus, streamed to a collector
+loom export runs/ --jsonl - --otel            # OpenTelemetry-style log records
+```
 
 ## Loom is also a harness
 
