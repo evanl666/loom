@@ -1915,9 +1915,26 @@ def _cmd_serve(args: argparse.Namespace) -> int:
 
 
 def _cmd_tools(args: argparse.Namespace) -> int:
-    """Show the capability contract of an agent's tools."""
+    """Show an agent's tool contract, or per-tool trust across a corpus."""
     from .capabilities import manifest
 
+    if args.trust:
+        # Cross-run reputation: which tools error/get-blocked/take risk most.
+        from .kpi import tool_trust, tool_trust_text
+
+        _import_builtin_packs()
+        paths = _expand_trace_paths([args.trust])
+        if not paths:
+            raise CLIError(f"no traces found under {args.trust}")
+        rows = tool_trust(paths)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            print(tool_trust_text(rows))
+        return 0
+
+    if not args.agent:
+        raise CLIError("tools needs --agent module:attr, or --trust <corpus>")
     agent, err = _load_agent(args.agent)
     if agent is None:
         raise CLIError(err)
@@ -2892,9 +2909,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="bind address (0.0.0.0 shares on the LAN; no auth)")
     sv.set_defaults(func=_cmd_serve)
 
-    tls = sub.add_parser("tools", help="show an agent's tools and their capability contract")
-    tls.add_argument("--agent", required=True, help="module:attr (Agent or zero-arg factory)")
-    tls.add_argument("--json", action="store_true", help="machine-readable manifest")
+    tls = sub.add_parser("tools", help="an agent's capability contract, or per-tool trust")
+    tls.add_argument("--agent", default="", help="module:attr (Agent or zero-arg factory)")
+    tls.add_argument("--trust", default="", metavar="CORPUS",
+                     help="instead: a per-tool trust score over a directory of traces "
+                          "(error/blocked/risky rates + undo support)")
+    tls.add_argument("--json", action="store_true", help="machine-readable")
     tls.set_defaults(func=_cmd_tools)
 
     pk = sub.add_parser("pack", help="bundle trace + incident + studio + patch into a .loompack")

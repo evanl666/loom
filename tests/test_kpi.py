@@ -75,3 +75,26 @@ def test_cli_kpi_html(tmp_path, capsys):
     assert main(["kpi", str(tmp_path), "--html", str(out)]) == 0
     assert "money_movement" in out.read_text()
     assert "KPI dashboard ->" in capsys.readouterr().out
+
+
+def test_tool_trust_ranks_by_risk_and_undo(tmp_path):
+    import glob
+    from loom.kpi import tool_trust
+
+    _corpus(tmp_path)
+    rows = {r["tool"]: r for r in tool_trust(glob.glob(str(tmp_path / "*.loom.json")))}
+    # a plain Read is fully trusted; a risky tool scores lower
+    assert rows["Read"]["trust"] == 100
+    assert rows["get_customer"]["trust"] < 100 and rows["get_customer"]["risky_rate"] == 100
+    # undo support lifts a risky tool above one without it
+    assert rows["issue_refund"]["undo_support"] == 100
+    assert rows["issue_refund"]["trust"] > rows["get_customer"]["trust"]
+
+
+def test_cli_tools_trust(tmp_path, capsys):
+    from loom.cli import main
+
+    _corpus(tmp_path)
+    assert main(["tools", "--trust", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "trust" in out and "get_customer" in out and "Read" in out

@@ -166,3 +166,73 @@ def kpi_html(k: dict) -> str:
 <table><tr><th>tool</th><th>risky calls</th></tr>
 {tool_rows or '<tr><td colspan=2>none</td></tr>'}</table>
 </body></html>"""
+
+
+def tool_trust(paths: "list[str]") -> "list[dict]":
+    """Per-tool reputation across a corpus -- the tool/MCP-server risk profile.
+
+    For each tool: how often it errored, was blocked by the firewall, needed
+    approval, exercised risk, and whether it supports undo. A trust score
+    (0-100) folds these into one number so a pack registry / MCP gateway can
+    rank tools and servers.
+    """
+    import json
+
+    from .action import actions as _actions
+    from .packs import install_builtin, undo_plan
+
+    install_builtin()
+    stats: dict[str, dict] = {}
+    for p in paths:
+        try:
+            with open(p) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        for a in _actions(data):
+            if a.type != "call" or a.step < 0:
+                continue
+            s = stats.setdefault(a.tool, {"calls": 0, "errors": 0, "blocked": 0,
+                                          "approved": 0, "risky": 0, "undoable": 0})
+            s["calls"] += 1
+            if a.observation is not None and a.observation.error:
+                s["errors"] += 1
+            if a.policy is not None:
+                if a.policy.blocked:
+                    s["blocked"] += 1
+                elif a.policy.action in ("approve",):
+                    s["approved"] += 1
+            if a.risky:
+                s["risky"] += 1
+            if undo_plan(a, data) is not None:
+                s["undoable"] += 1
+
+    rows = []
+    for name, s in stats.items():
+        n = s["calls"] or 1
+        # Penalize error/blocked/risky rates; reward undo support. Bounded 0-100.
+        err = 40 * s["errors"] / n
+        blk = 30 * s["blocked"] / n
+        risk = 25 * s["risky"] / n
+        undo_bonus = 10 * s["undoable"] / n if s["risky"] else 0
+        trust = max(0, min(100, round(100 - err - blk - risk + undo_bonus)))
+        rows.append({"tool": name, "calls": s["calls"],
+                     "error_rate": round(100 * s["errors"] / n),
+                     "blocked_rate": round(100 * s["blocked"] / n),
+                     "risky_rate": round(100 * s["risky"] / n),
+                     "undo_support": round(100 * s["undoable"] / n),
+                     "trust": trust})
+    rows.sort(key=lambda r: r["trust"])   # least-trusted first (what to review)
+    return rows
+
+
+def tool_trust_text(rows: "list[dict]") -> str:
+    if not rows:
+        return "no tools found"
+    lines = [f"{'tool':<26} {'trust':>6} {'calls':>6} {'err%':>5} "
+             f"{'blk%':>5} {'risk%':>6} {'undo%':>6}", "-" * 64]
+    for r in rows:
+        lines.append(f"{r['tool']:<26} {r['trust']:>6} {r['calls']:>6} "
+                     f"{r['error_rate']:>4}% {r['blocked_rate']:>4}% "
+                     f"{r['risky_rate']:>5}% {r['undo_support']:>5}%")
+    return "\n".join(lines)
