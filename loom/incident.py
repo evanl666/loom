@@ -141,6 +141,24 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
         f"# Incident report: {prompt}",
         "",
         f"**Verdict:** {verdict}" + (f" ({', '.join(reasons)})" if reasons else ""),
+    ]
+    ws = data.get("workspace")
+    if ws:
+        bits = []
+        if ws.get("git"):
+            g = ws["git"]
+            bits.append(f"commit `{g.get('commit', '')[:10]}`"
+                        + (" (dirty tree)" if g.get("dirty") else "")
+                        + (f" on {g['branch']}" if g.get("branch") else ""))
+        if ws.get("cwd"):
+            bits.append(f"cwd `{ws['cwd']}`")
+        if ws.get("os"):
+            bits.append(ws["os"])
+        if ws.get("argv"):
+            bits.append("`" + " ".join(ws["argv"][:6]) + "`")
+        if bits:
+            lines.append(f"**Where:** {' · '.join(bits)}")
+    lines += [
         f"**Blast radius:** {facts['input_tokens'] + facts['output_tokens']:,} tokens "
         f"across {facts['model_calls']} model call(s); tools touched: "
         + (", ".join(f"{n}×{c}" for n, c in sorted(facts["tool_counts"].items())) or "none"),

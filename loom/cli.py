@@ -289,6 +289,10 @@ def _cmd_record(args: argparse.Namespace) -> int:
                          shield=shield, scrub=args.scrub,
                          max_body=args.max_body_mb * 1024 * 1024,
                          upstream_timeout=args.upstream_timeout, auth=args.auth)
+    if not args.no_workspace:
+        from .workspace import collect
+
+        server.recorder.workspace = collect(command=command, target=args.target)
     if shield is not None:
         shield.notify = _shield_notifier(server.port)
         _print_shield_rules(shield)
@@ -974,6 +978,8 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream API (use https://api.openai.com for OpenAI agents)")
     rc.add_argument("--port", type=int, default=0, help="proxy port (default: pick a free one)")
+    rc.add_argument("--no-workspace", action="store_true",
+                    help="don't record cwd/git/argv/os metadata with the trace")
     rc.add_argument("--sandbox", action="store_true",
                     help="deny the agent ALL network except the proxy (macOS sandbox-exec); "
                          "shield rules become impossible to bypass")

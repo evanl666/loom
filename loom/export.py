@@ -355,6 +355,19 @@ def _tokens_of(e: dict) -> int:
     return u.get("input_tokens", 0) + u.get("output_tokens", 0)
 
 
+def _workspace_tile(ws: "dict | None") -> str:
+    if not ws:
+        return ""
+    g = ws.get("git") or {}
+    label = g.get("commit", "")[:10] or ws.get("os", "?")
+    if g.get("dirty"):
+        label += " ·dirty"
+    return (
+        '<div class="tile"><div class="k">workspace</div>'
+        f'<div class="v" title="{html.escape(ws.get("cwd", ""))}">{html.escape(label)}</div></div>'
+    )
+
+
 def trace_to_html(data: dict) -> str:
     """Render a saved trace dict (``Run.to_dict`` / a ``.loom.json`` file) to HTML."""
     log = data.get("log", [])
@@ -433,6 +446,7 @@ def trace_to_html(data: dict) -> str:
   <div class="tile"><div class="k">turns</div><div class="v">{turns}</div></div>
   <div class="tile"><div class="k">input tokens</div><div class="v">{inp}</div></div>
   <div class="tile"><div class="k">output tokens</div><div class="v">{out}</div></div>
+  {_workspace_tile(data.get("workspace"))}
 </div>
 {paused_html}
 <div class="deck">

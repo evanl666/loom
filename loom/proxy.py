@@ -66,6 +66,7 @@ class WireRecorder:
         self.output = ""
         self._tool_names: dict[str, str] = {}  # tool_use_id -> tool name
         self._seen_messages = 0
+        self.workspace: "dict | None" = None  # cwd/git/argv/os, set by the recorder
 
     def record(self, request: dict, response: dict) -> None:
         self.model = request.get("model", self.model)
@@ -197,6 +198,7 @@ class WireRecorder:
             "log": [e.to_dict() for e in self.log],
             "wire": self.wire,
             "shield_events": self.shield_events,
+            **({"workspace": self.workspace} if self.workspace else {}),
         }
 
     def save(self, path: str) -> None:
