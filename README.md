@@ -198,7 +198,17 @@ agents it didn't build.
 ### The debugger's verbs
 
 ```
+loom demo                       # one command → a recorded incident + movie + fix (no key)
 loom movie trace --open         # the 30-second incident animation (shareable HTML)
+loom autopsy trace              # one report: diagnosis + score + impact + data-flow + fix
+loom dlp trace                  # data flows by sensitivity class (secret/pii/payment) + policy
+loom inject trace               # indirect prompt injection: untrusted results that steered it
+loom redteam run --profile P    # does your policy stop secret-exfil / sql-destroy / refund-abuse?
+loom cost trace                 # token-burn RCA: context bloat / looping / overfetch
+loom harden --scenario support  # deployment wizard: recommended policy + flags
+loom leaderboard runs/          # rank agents by safety score, cost, risk, failure
+loom tools --trust runs/        # per-tool reputation (error/blocked/risky rate + undo)
+loom mcp manifest npx ...       # MCP gateway: capability manifest for a server's tools
 loom why trace --step 17        # why did it do THAT? intent + evidence + honest confidence
 loom map trace                  # side-effect map: everything the run changed or reached
 loom taint trace                # exfiltration paths by VALUE lineage (secret read → sent)
