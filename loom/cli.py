@@ -735,7 +735,7 @@ def _cmd_diff(args: argparse.Namespace) -> int:
     """Compare two saved traces; exit 0 if identical, 1 if they diverge."""
     from .diff import diff_logs
 
-    if getattr(args, "actions", False):
+    if getattr(args, "actions", False) or getattr(args, "html", ""):
         # Behavior diff: what does run B DO differently -- new/removed actions
         # and the exercised-risk movement. The PR-review view.
         from .diff import describe_action_diff, diff_actions
@@ -743,7 +743,17 @@ def _cmd_diff(args: argparse.Namespace) -> int:
         data_a = _load_trace_json(args.a)
         data_b = _load_trace_json(args.b)
         d = diff_actions(data_a, data_b)
-        if getattr(args, "json", False):
+        if getattr(args, "html", ""):
+            import os
+
+            from .diff import diff_replay_html
+
+            with open(args.html, "w") as f:
+                f.write(diff_replay_html(data_a, data_b,
+                                         label_a=os.path.basename(args.a),
+                                         label_b=os.path.basename(args.b)))
+            print(f"diff replay -> {args.html}  (side-by-side action timelines)")
+        elif getattr(args, "json", False):
             print(json.dumps(d, indent=2))
         else:
             print(describe_action_diff(d))
@@ -2216,6 +2226,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="behavior diff at the Action level: added/removed actions "
                          "and the exercised-risk movement (exit 1 on any change)")
     df.add_argument("--json", action="store_true", help="machine-readable (--actions only)")
+    df.add_argument("--html", default="", metavar="FILE",
+                    help="side-by-side diff replay: two action timelines, first "
+                         "divergence highlighted")
     df.set_defaults(func=_cmd_diff)
 
     ex = sub.add_parser("export", help="render a trace to HTML, or --jsonl/--otel events")

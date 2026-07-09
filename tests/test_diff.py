@@ -181,3 +181,19 @@ def test_score_badge_and_markdown(tmp_path, capsys):
     assert "badge ->" in out and "Agent behavior score:" in out
     svg = badge.read_text()
     assert svg.startswith("<svg") and "agent safety" in svg
+
+
+def test_diff_replay_html_side_by_side(tmp_path, capsys):
+    from loom.cli import main
+
+    a = _saved(tmp_path, "a.loom.json", [("Read", {"file_path": "a.py"})])
+    b = _saved(tmp_path, "b.loom.json", [("Read", {"file_path": "a.py"}),
+                                          ("send_email", {"to": "jane@x.com"})])
+    out = tmp_path / "replay.html"
+    assert main(["diff", a, b, "--html", str(out)]) == 1  # behavior changed
+    page = out.read_text()
+    assert "Agent diff replay: behavior score" in page
+    assert "first divergence at step" in page
+    assert 'class="row div"' in page               # divergent rows marked
+    assert "send_email" in page and "user-comm" in page
+    assert "a.loom.json" in page and "b.loom.json" in page   # both columns

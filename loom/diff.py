@@ -323,3 +323,79 @@ def describe_action_diff(d: dict) -> str:
         lines.append("  same actions on both sides "
                      f"({d['calls']['a']} vs {d['calls']['b']} calls)")
     return "\n".join(lines)
+
+
+def diff_replay_html(trace_a: dict, trace_b: dict,
+                     label_a: str = "v1", label_b: str = "v2") -> str:
+    """Side-by-side diff replay: two action timelines, first divergence marked.
+
+    git diff, but for agent behavior -- one glance shows "this prompt change
+    made the agent send an extra email at step 5".
+    """
+    import html as _html
+
+    from .action import actions as _actions
+    from .effect import EffectEntry
+    from .packs import install_builtin
+
+    install_builtin()
+    d = diff_actions(trace_a, trace_b)
+    logs = [[EffectEntry.from_dict(e) for e in t.get("log", [])]
+            for t in (trace_a, trace_b)]
+    first_div = diff_logs(logs[0], logs[1]).first_divergence
+
+    def column(trace, label):
+        rows = []
+        for a in _actions(trace):
+            if a.type not in ("call", "answer") or a.step < 0:
+                continue
+            diverged = first_div is not None and a.step >= first_div
+            cls = "row div" if diverged else "row"
+            if a.type == "answer":
+                body = f"✅ {_html.escape(a.intent[:70])}"
+            else:
+                risk = (f'<span class="risk">⚠ {_html.escape(a.risk)}</span>'
+                        if a.risk else "")
+                sd = (f'<span class="sd">Δ {_html.escape(a.state_diff.summary[:44])}</span>'
+                      if a.state_diff else "")
+                blocked = ('<span class="blocked">🛡 blocked</span>'
+                           if a.policy and a.policy.blocked else "")
+                body = f"🔧 {_html.escape(a.tool)} {risk} {sd} {blocked}"
+            rows.append(f'<div class="{cls}"><span class="step">{a.step}</span>{body}</div>')
+        return (f'<div class="col"><h2>{_html.escape(label)}</h2>'
+                + ("".join(rows) or '<div class="row">no actions</div>') + "</div>")
+
+    sa, sb = d["score"]["a"], d["score"]["b"]
+    arrow = "→" if sa == sb else ("⬇" if sb < sa else "⬆")
+    moved = "".join(
+        f'<li>{m["dimension"]}: {m["a"]} → {m["b"]} ({_html.escape(m["why"])})</li>'
+        for m in d.get("score_moved", []))
+    div_note = (f"first divergence at step {first_div}" if first_div is not None
+                else "traces are structurally identical")
+    css = """body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    background:#f9f9f7;color:#0b0b0b;max-width:1100px;margin:0 auto;padding:28px}
+    @media(prefers-color-scheme:dark){body{background:#0d0d0d;color:#fff}
+    .col{background:#1a1a19!important;border-color:#2c2c2a!important}
+    .row{border-color:#2c2c2a!important}}
+    h1{font-size:20px}.sub{color:#898781;margin:4px 0 18px}
+    .cols{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+    .col{background:#fff;border:1px solid #e1e0d9;border-radius:12px;overflow:hidden}
+    .col h2{font-size:12px;color:#898781;text-transform:uppercase;letter-spacing:.06em;
+    padding:10px 14px;border-bottom:1px solid #e1e0d9}
+    .row{padding:7px 14px;border-top:1px solid #eee;font-size:13.5px}
+    .row .step{color:#898781;font-variant-numeric:tabular-nums;display:inline-block;
+    min-width:2rem}
+    .row.div{background:color-mix(in srgb,#e5484d 7%,transparent);
+    border-left:3px solid #e5484d}
+    .risk{color:#b3261e;font-size:12px}.sd{color:#4a3aa7;font-size:12px}
+    .blocked{color:#e5484d;font-size:12px;font-weight:600}
+    ul{margin:6px 0 0 20px;color:#52514e;font-size:13.5px}"""
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Diff replay — {_html.escape(label_a)} vs {_html.escape(label_b)}</title>
+<style>{css}</style></head><body>
+<h1>Agent diff replay: behavior score {sa} {arrow} {sb}</h1>
+<p class="sub">{div_note} · red rows follow the divergence</p>
+{f"<ul>{moved}</ul>" if moved else ""}
+<div class="cols">{column(trace_a, label_a)}{column(trace_b, label_b)}</div>
+</body></html>"""
