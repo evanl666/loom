@@ -998,6 +998,22 @@ def _cmd_policy(args: argparse.Namespace) -> int:
         print(f"wrote {out} (from profile {args.name!r}) -- edit, then: loom record ... --policy {out}")
         return 0
 
+    if args.policy_cmd == "lint":
+        from .policy_file import lint, load_document
+
+        doc = load_document(args.policy) if args.policy else PROFILES.get(args.profile, {})
+        if not doc:
+            raise CLIError("lint needs --policy FILE or --profile NAME")
+        problems = lint(doc)
+        for w in problems:
+            print(f"  ⚠️  {w}")
+        if problems:
+            print(f"\n{len(problems)} issue(s) -- these rules may not do what they look like",
+                  file=sys.stderr)
+            return 1
+        print("policy looks good")
+        return 0
+
     if args.policy_cmd == "explain":
         # Explain how the policy would classify each tool call in a trace.
         shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
@@ -1032,11 +1048,58 @@ def _cmd_policy(args: argparse.Namespace) -> int:
         line = f"{status} {action:8} {case['name']}({json.dumps(case.get('input', {}), default=str)})"
         if expected and expected != action:
             line += f"   expected {expected}"
+        if case.get("why"):
+            line += f"   — {case['why']}"
         print(line)
     if failures:
         print(f"\n{failures} case(s) did not match expectations", file=sys.stderr)
         return 1
     print(f"\nall {len(cases)} case(s) as expected")
+    return 0
+
+
+def _cmd_trace(args: argparse.Namespace) -> int:
+    """Validate / verify / explain-version a trace's format contract."""
+    from .trace import TRACE_VERSION, trace_checksum
+    from .testing import verify_trace
+
+    data = _load_trace_json(args.path)
+    version = data.get("version", 1)
+
+    if args.trace_cmd == "explain-version":
+        print(f"{args.path}: trace format version {version} (this loom writes v{TRACE_VERSION})")
+        if version < TRACE_VERSION:
+            print("  older format: effect keys were computed differently, so strict replay "
+                  "and `loom impact` may report inputs-differ. Bring it forward: loom migrate")
+        elif version > TRACE_VERSION:
+            print("  newer format: written by a newer loom; upgrade loom-harness if anything "
+                  "looks off.")
+        else:
+            print("  current: strict replay and impact are apples-to-apples.")
+        return 0
+
+    if args.trace_cmd == "verify":
+        stored = data.get("checksum")
+        if not stored:
+            print(f"{args.path}: no checksum (written by an older loom or hand-made)")
+            return 0
+        if stored == trace_checksum(data):
+            print(f"{args.path}: checksum OK — unmodified since it was written")
+            return 0
+        print(f"loom: {args.path} was MODIFIED after it was written (checksum mismatch)",
+              file=sys.stderr)
+        return 1
+
+    # validate: structure + checksum together, the CI gate
+    problems = verify_trace(args.path)
+    if version > TRACE_VERSION:
+        problems.append(f"trace version {version} is newer than this loom's v{TRACE_VERSION}")
+    if problems:
+        for p in problems:
+            print(f"  ✗ {p}")
+        print(f"\n{len(problems)} problem(s)", file=sys.stderr)
+        return 1
+    print(f"{args.path}: valid (v{version}, structure + checksum OK)")
     return 0
 
 
@@ -1372,6 +1435,21 @@ def build_parser() -> argparse.ArgumentParser:
     po_exp.add_argument("--profile", default="")
     po_exp.add_argument("--policy", default="")
     po_exp.set_defaults(func=_cmd_policy)
+    po_lint = posub.add_parser("lint", help="catch rules that don't do what they look like")
+    po_lint.add_argument("--policy", default="", help="policy file to lint")
+    po_lint.add_argument("--profile", default="", help="or a built-in profile to lint")
+    po_lint.set_defaults(func=_cmd_policy)
+
+    tr_p = sub.add_parser("trace", help="validate / verify / explain a trace's format")
+    trsub = tr_p.add_subparsers(dest="trace_cmd", required=True)
+    for cmd, helptext in [
+        ("validate", "structure + checksum check (CI gate; exit 1 on problems)"),
+        ("verify", "checksum tamper check (exit 1 if modified since written)"),
+        ("explain-version", "report the trace format version and what to expect"),
+    ]:
+        sp = trsub.add_parser(cmd, help=helptext)
+        sp.add_argument("path")
+        sp.set_defaults(func=_cmd_trace)
 
     ic = sub.add_parser("incident", help="write an agent postmortem from a saved trace")
     ic.add_argument("path")

@@ -140,3 +140,60 @@ def test_cli_policy_explain_labels_a_trace(tmp_path, capsys):
     assert main(["policy", "explain", path, "--profile", "claude-code-safe"]) == 0
     out = capsys.readouterr().out
     assert "deny" in out and "Read(" in out
+
+
+def test_lint_catches_common_footguns():
+    from loom.policy_file import lint
+
+    problems = lint({
+        "default": "allow",
+        "deny": ["rm -rf", "Read(.env)"],   # command-shaped; wildcard-less signature
+        "allow": ["Bash(*)"],
+    })
+    joined = " ".join(problems)
+    assert "TOOL NAMED 'rm -rf'" in joined
+    assert "no wildcard" in joined and "Read(*.env*)" in joined
+
+
+def test_lint_flags_shadowed_allow():
+    from loom.policy_file import lint
+
+    problems = lint({"deny": ["Bash(*)"], "allow": ["Bash(*)"]})
+    assert any("shadowed by deny" in p for p in problems)
+
+
+def test_lint_flags_empty_policy():
+    from loom.policy_file import lint
+
+    assert any("blocks nothing" in p for p in lint({"default": "allow"}))
+
+
+def test_builtin_profiles_lint_clean():
+    from loom.policy_file import PROFILES, lint
+
+    for name, prof in PROFILES.items():
+        assert lint(prof) == [], f"{name} should lint clean"
+
+
+def test_cli_policy_lint(tmp_path, capsys):
+    from loom.cli import main
+
+    p = tmp_path / "bad.yml"
+    p.write_text("default: allow\ndeny:\n  - rm -rf\n")
+    assert main(["policy", "lint", "--policy", str(p)]) == 1
+    assert "TOOL NAMED" in capsys.readouterr().out
+    assert main(["policy", "lint", "--profile", "ci-safe"]) == 0
+
+
+def test_cli_policy_test_echoes_why(tmp_path, capsys):
+    import json as _json
+
+    from loom.cli import main
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(_json.dumps([
+        {"name": "Read", "input": {"file_path": "/.env"}, "expect": "deny",
+         "why": "never read env files"},
+    ]))
+    assert main(["policy", "test", str(cases), "--profile", "claude-code-safe"]) == 0
+    assert "never read env files" in capsys.readouterr().out

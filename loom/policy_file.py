@@ -135,6 +135,49 @@ def load_document(path: str) -> dict:
     return data
 
 
+def lint(doc: dict) -> "list[str]":
+    """Catch the misconfigurations that make a policy quietly not work.
+
+    The classic footgun: ``deny: rm -rf`` looks like it blocks ``rm -rf`` but
+    actually targets a TOOL NAMED 'rm -rf', which never exists -- so it never
+    fires. We flag command-shaped patterns, wildcard-less signatures, rules
+    shadowed by a broader deny, and an empty policy.
+    """
+    warnings: list[str] = []
+    kw = to_shield_kwargs(doc)
+    all_patterns = [(a, p) for a in ("deny", "allow", "confirm") for p in kw.get(a, [])]
+    if not all_patterns and not kw.get("sequence") and doc.get("default", "allow") == "allow":
+        warnings.append("policy is empty and defaults to allow -- it blocks nothing")
+
+    for action, p in all_patterns:
+        has_sig = "(" in p and p.endswith(")")
+        # A pattern with a space but no signature parens targets a tool *named*
+        # that string -- almost always a mistake for a Bash command.
+        if " " in p and not has_sig:
+            cmd = p.strip("*")
+            warnings.append(
+                f"{action} '{p}': matches a TOOL NAMED '{p}', not a command. "
+                f"For a shell command use a signature glob, e.g. `Bash(*{cmd}*)`."
+            )
+        # A signature with no wildcard only matches that exact argument string.
+        elif has_sig:
+            inside = p[p.index("(") + 1: -1]
+            if inside and "*" not in inside and "?" not in inside:
+                warnings.append(
+                    f"{action} '{p}': the argument has no wildcard, so it matches only "
+                    f"that exact value. Did you mean `{p[:p.index('(')]}(*{inside}*)`?"
+                )
+
+    # An allow shadowed by a broader deny never takes effect (deny > allow).
+    from fnmatch import fnmatch
+
+    for a in kw.get("allow", []):
+        for d in kw.get("deny", []):
+            if fnmatch(a, d) or a == d:
+                warnings.append(f"allow '{a}' is shadowed by deny '{d}' (deny wins)")
+    return warnings
+
+
 def _clone(d: dict) -> dict:
     return json.loads(json.dumps(d))
 

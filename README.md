@@ -201,9 +201,16 @@ read is cut), `ci-safe` (deny-by-default, no human in the loop), `prod-data-safe
 
 ```
 loom policy init claude-code-safe          # writes loom-policy.yml
+loom policy lint --policy loom-policy.yml   # catch rules that don't do what they look like
 loom policy test cases.json --policy loom-policy.yml   # does it classify as you expect?
 loom policy explain session.loom.json --profile claude-code-safe  # what would it do to this run?
 ```
+
+`loom policy lint` catches the classic footgun — `deny: rm -rf` looks like it
+blocks `rm -rf` but actually targets a *tool named* `rm -rf`, which never
+exists, so it never fires (you meant `Bash(*rm -rf*)`). Trace files carry a
+version and a checksum; `loom trace validate` / `verify` / `explain-version`
+make the format contract a CI gate.
 
 A policy is exactly the Shield the flags build — deny/allow/confirm precedence,
 sequence rules, the default action — so anything below is expressible in it, and

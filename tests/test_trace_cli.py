@@ -1,0 +1,50 @@
+"""loom trace validate / verify / explain-version: the format contract."""
+
+import json
+
+from loom import Agent
+from loom.cli import main
+from loom.providers import ModelResponse, ScriptedProvider
+
+
+def _trace(tmp_path):
+    run = Agent(model=ScriptedProvider([ModelResponse(text="hi")])).run("q")
+    path = str(tmp_path / "t.loom.json")
+    run.save(path)
+    return path
+
+
+def test_validate_passes_a_fresh_trace(tmp_path, capsys):
+    assert main(["trace", "validate", _trace(tmp_path)]) == 0
+    assert "valid" in capsys.readouterr().out
+
+
+def test_verify_detects_tampering(tmp_path, capsys):
+    path = _trace(tmp_path)
+    assert main(["trace", "verify", path]) == 0
+
+    data = json.load(open(path))
+    data["output"] = "tampered"
+    json.dump(data, open(path, "w"))
+    assert main(["trace", "verify", path]) == 1
+    assert "MODIFIED" in capsys.readouterr().err
+
+
+def test_explain_version_reports_current(tmp_path, capsys):
+    assert main(["trace", "explain-version", _trace(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "version 2" in out and "current" in out
+
+
+def test_validate_flags_a_future_version(tmp_path, capsys):
+    path = _trace(tmp_path)
+    data = json.load(open(path))
+    data["version"] = 99
+    json.dump(data, open(path, "w"))
+    assert main(["trace", "validate", path]) == 1
+    assert "newer than" in capsys.readouterr().out
+
+
+def test_trace_on_missing_file_is_friendly(capsys):
+    assert main(["trace", "verify", "/nope.loom.json"]) == 2
+    assert "no such file" in capsys.readouterr().err
