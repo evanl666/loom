@@ -1163,16 +1163,37 @@ def _cmd_flake(args: argparse.Namespace) -> int:
     """Divergence heatmap across repeated recordings of the same task."""
     from .insight import describe_flakiness, flakiness
 
-    paths = _expand_trace_paths(args.paths)
     traces = []
-    for p in paths:
-        try:
-            with open(p) as f:
-                traces.append(json.load(f))
-        except (OSError, json.JSONDecodeError):
-            continue
+    if args.agent:
+        # Auto-record N live runs of one task, then analyze -- the flaky-test
+        # analyzer for agents. Each run is a fresh trace.
+        if not args.prompt:
+            raise CLIError("flake --agent needs a prompt to run")
+        agent, err = _load_agent(args.agent)
+        if agent is None:
+            raise CLIError(err)
+        import os
+
+        outdir = args.output or "loom-flake"
+        os.makedirs(outdir, exist_ok=True)
+        print(f"recording {args.n} run(s) of {args.prompt!r}...")
+        for i in range(args.n):
+            run = agent.run(args.prompt)
+            path = os.path.join(outdir, f"run-{i:02d}.loom.json")
+            run.save(path)
+            traces.append(run.to_dict())
+        print(f"saved {args.n} run(s) -> {outdir}/\n")
+    else:
+        for p in _expand_trace_paths(args.paths):
+            try:
+                with open(p) as f:
+                    traces.append(json.load(f))
+            except (OSError, json.JSONDecodeError):
+                continue
+
     if len(traces) < 2:
-        raise CLIError("flake needs at least two traces of the same task")
+        raise CLIError("flake needs at least two traces of the same task "
+                       "(pass files/dirs, or --agent module:attr --n N \"prompt\")")
     print(describe_flakiness(flakiness(traces)))
     return 0
 
@@ -2324,7 +2345,11 @@ def build_parser() -> argparse.ArgumentParser:
     pv.set_defaults(func=_cmd_provenance)
 
     fl = sub.add_parser("flake", help="divergence heatmap across repeated runs of one task")
-    fl.add_argument("paths", nargs="+", help="trace files and/or directories (first = baseline)")
+    fl.add_argument("paths", nargs="*", help="trace files and/or directories (first = baseline)")
+    fl.add_argument("--agent", default="", help="module:attr to record N fresh runs of a task")
+    fl.add_argument("--prompt", default="", help="the task prompt to run (with --agent)")
+    fl.add_argument("-n", dest="n", type=int, default=10, help="how many runs to record (default 10)")
+    fl.add_argument("-o", "--output", default="", help="where to save recorded runs")
     fl.set_defaults(func=_cmd_flake)
 
     nt = sub.add_parser("note", help="annotate a trace step (shared sidecar notes)")

@@ -165,3 +165,44 @@ def test_studio_why_disclosure_present():
     assert '<details class="why">' in page
     assert "stated intent" in page and "correlation, not proof" in page
     assert "wjump" in page  # evidence links jump to the step
+
+
+def test_cli_flake_auto_records_and_analyzes(tmp_path, capsys, monkeypatch):
+    # A provider that alternates behavior by call-count -> deterministic flake.
+    (tmp_path / "flakemod.py").write_text(
+        "from loom import Agent, tool\n"
+        "from loom.providers import ModelProvider, ModelResponse, ToolCall\n"
+        "_N = {'i': 0}\n"
+        "@tool\n"
+        "def check(x: int) -> str:\n"
+        "    'check'\n"
+        "    return 'ok'\n"
+        "class Flaky(ModelProvider):\n"
+        "    model = 'flaky'\n"
+        "    def complete(self, system, messages, tools):\n"
+        "        asst = [m for m in messages if m['role']=='assistant']\n"
+        "        if not asst:\n"
+        "            return ModelResponse(tool_calls=[ToolCall('t','check',{'x':1})], stop_reason='tool_use')\n"
+        "        # even-numbered runs take an extra tool step -> diverge at step 2\n"
+        "        _N['i'] += 1\n"
+        "        tools_seen = [m for m in messages if m['role']=='tool']\n"
+        "        if _N['i'] % 2 == 0 and len(tools_seen) < 2:\n"
+        "            return ModelResponse(tool_calls=[ToolCall('t2','check',{'x':2})], stop_reason='tool_use')\n"
+        "        return ModelResponse(text='done')\n"
+        "agent = Agent(model=Flaky(), tools=[check])\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert main(["flake", "--agent", "flakemod:agent", "--prompt", "go", "-n", "6",
+                 "-o", str(tmp_path / "out")]) == 0
+    out = capsys.readouterr().out
+    assert "recording 6 run(s)" in out
+    assert "6 run(s):" in out and "flakiest step" in out
+    # the runs were saved
+    assert len(list((tmp_path / "out").glob("run-*.loom.json"))) == 6
+
+
+def test_cli_flake_needs_two_traces(tmp_path, capsys):
+    one = str(tmp_path / "a.loom.json")
+    _support_run().save(one)
+    assert main(["flake", one]) == 2          # CLIError -> friendly exit 2
+    assert "at least two traces" in capsys.readouterr().err
