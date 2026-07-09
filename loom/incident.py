@@ -211,6 +211,10 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
             bits.append("`" + " ".join(ws["argv"][:6]) + "`")
         if bits:
             lines.append(f"**Where:** {' · '.join(bits)}")
+        ch = ws.get("changes") or {}
+        if ch.get("stat"):
+            lines.append(f"**Workspace changes:** {ch['stat']}"
+                         + (f" · dirty-hash `{ch['dirty_hash']}`" if ch.get("dirty_hash") else ""))
     lines += [
         f"**Blast radius:** {facts['input_tokens'] + facts['output_tokens']:,} tokens "
         f"across {facts['model_calls']} model call(s); tools touched: "
@@ -242,6 +246,17 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
     if facts["secrets"]:
         lines += ["", "## Secrets sighted"]
         lines += [f"- {count}× {kind} in tool results" for kind, count in sorted(facts["secrets"].items())]
+
+    changes = (data.get("workspace") or {}).get("changes") or {}
+    if changes.get("files"):
+        lines += ["", "## Files the agent changed"]
+        for f in changes["files"][:40]:
+            tag = {"M": "modified", "A": "added", "D": "deleted"}.get(
+                f["status"][:1], f["status"])
+            note = "  _(already modified before the run)_" if f.get("pre_existing") else ""
+            lines.append(f"- `{f['path']}` — {tag}{note}")
+        if changes.get("agent_exit_code") is not None:
+            lines.append(f"\nThe agent process exited **{changes['agent_exit_code']}**.")
 
     if facts["risk"]:
         from .risk import recommended_rule

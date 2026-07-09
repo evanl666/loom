@@ -314,13 +314,21 @@ loom incident failed.loom.json -o postmortem.md
 ```
 
 An agent incident becomes a structured RCA, computed **from the flight
-recording, offline**: verdict, blast radius (tokens, tools touched), a
-suspect timeline (failing tool calls, the model's final words), firewall
-decisions, context-health findings, whether the run ever *saw* credentials —
-then concrete prevention flags and the exact commands that turn the incident
-into a regression test. Add `--why` for an investigated root-cause narrative
-(the `loom why` debugger agent reads the trace and cites seqs; its diagnosis
-is itself a recorded run).
+recording, offline**: severity and classification, blast radius (tokens,
+tools touched), a suspect timeline (failing tool calls, the model's final
+words), **the files the agent changed** (from a git diff taken before and
+after the run — the agent's edits, distinguished from what was already
+dirty), firewall decisions, context-health findings, whether the run ever
+*saw* credentials — then recommended firewall rules and the exact commands
+that turn the incident into a regression test. Add `--why` for an
+investigated root-cause narrative (the `loom why` debugger agent reads the
+trace and cites seqs; its diagnosis is itself a recorded run).
+
+Replaying the API traffic reproduces what the model *said*; it doesn't
+reproduce what it *did* to your files. So `loom record` snapshots `git diff`
+around the agent and stores the delta — which files changed (M/A/D), a
+diff-stat, and a working-tree hash for "does this trace still match the
+repo?". `--capture-diff` embeds the full patch (scrub before sharing).
 
 ## Search every run you've ever recorded
 

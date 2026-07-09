@@ -378,10 +378,19 @@ def _workspace_tile(ws: "dict | None") -> str:
     label = g.get("commit", "")[:10] or ws.get("os", "?")
     if g.get("dirty"):
         label += " ·dirty"
-    return (
+    tiles = (
         '<div class="tile"><div class="k">workspace</div>'
         f'<div class="v" title="{html.escape(ws.get("cwd", ""))}">{html.escape(label)}</div></div>'
     )
+    changes = ws.get("changes") or {}
+    if changes.get("files"):
+        n = len(changes["files"])
+        detail = html.escape(changes.get("stat", "") or f"{n} file(s)")
+        tiles += (
+            '<div class="tile"><div class="k">files changed</div>'
+            f'<div class="v" title="{detail}">{n}</div></div>'
+        )
+    return tiles
 
 
 def trace_to_html(data: dict) -> str:
