@@ -37,3 +37,4 @@ examples/flight-recorder/artifacts/
 .loom-lake.db
 lake.html
 bench-traces/
+*.wirelog
