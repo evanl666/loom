@@ -179,8 +179,10 @@ class WireRecorder:
             self.output = text
 
     def to_dict(self) -> dict:
+        from .trace import TRACE_VERSION
+
         return {
-            "version": 1,
+            "version": TRACE_VERSION,
             "recorded_via": "proxy",
             "model": self.model,
             "system": self.system,

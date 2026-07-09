@@ -89,6 +89,7 @@ class Recorder:
         self.journal = None  # optional write-ahead Journal; set by the agent
         self.cache = None  # optional EffectCache; set by the agent
         self.executing = False  # True while an effect's thunk runs (see loom/ambient.py)
+        self.strict = False  # replay-time key verification; set by Recorder.replay
 
     # -- constructors -----------------------------------------------------
 
@@ -97,8 +98,18 @@ class Recorder:
         return cls(log=None, replay_until=0, allow_live=True)
 
     @classmethod
-    def replay(cls, log: list[EffectEntry]) -> "Recorder":
-        return cls(log=log, replay_until=len(log), allow_live=False)
+    def replay(cls, log: list[EffectEntry], strict: bool = True) -> "Recorder":
+        """Serve every effect from the log; never go live.
+
+        ``strict`` (the default) also recomputes each effect's input key and
+        raises ``ReplayMismatch`` if it differs from the recording -- proof
+        that the agent as configured NOW is equivalent to the one that
+        recorded, not merely that the old log can be walked to the end. Pass
+        ``strict=False`` to inspect a trace with a changed configuration.
+        """
+        rec = cls(log=log, replay_until=len(log), allow_live=False)
+        rec.strict = strict
+        return rec
 
     @classmethod
     def fork(cls, log: list[EffectEntry], at: int) -> "Recorder":
@@ -128,6 +139,18 @@ class Recorder:
                 raise ReplayMismatch(
                     f"at seq {seq}: recorded kind {entry.kind!r} but replay wants {kind!r}"
                 )
+            # "resumed" marks a human answer injected by Run.resume(): its key
+            # is a sentinel, not an input hash -- nothing to verify against.
+            if self.strict and entry.key != "resumed":
+                computed = _key([kind, payload])
+                if computed != entry.key:
+                    raise ReplayMismatch(
+                        f"at seq {seq} ({kind}): inputs differ from the recording "
+                        f"(recorded key {entry.key[:12]}, current {computed[:12]}). "
+                        f"The agent's configuration is not equivalent to the one that "
+                        f"recorded this trace -- `loom impact` shows a per-run report; "
+                        f"replay(strict=False) walks the old log anyway."
+                    )
             self._cursor += 1
             return decode(entry.result)
 

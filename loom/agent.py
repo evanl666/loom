@@ -360,7 +360,10 @@ class Agent:
                 messages = ctx.messages()
                 resp = rec.run(
                     "model",
-                    {"system": self.system, "messages": messages},
+                    # Everything the provider receives is in the key: a tool
+                    # added or a schema edited must fail strict replay and
+                    # show up in impact, exactly like a prompt change.
+                    {"system": self.system, "messages": messages, "tools": tool_schemas},
                     lambda messages=messages: self.provider.complete(
                         self.system, messages, tool_schemas
                     ),

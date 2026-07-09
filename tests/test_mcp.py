@@ -80,4 +80,7 @@ def test_replay_needs_no_server(server, tmp_path):
     stub = Tool(name="add", description="stub", fn=boom, input_schema={"type": "object"})
     offline_agent = Agent(model=ScriptedProvider([]), tools=[stub])
     loaded = Run.load(path, agent=offline_agent)
-    assert loaded.replay().output == "3"
+    # The stub's schema differs from the real server tool's, so this is a
+    # changed config -- strict replay would (rightly) flag it. strict=False
+    # is the documented way to walk a trace without the original tools.
+    assert loaded.replay(strict=False).output == "3"

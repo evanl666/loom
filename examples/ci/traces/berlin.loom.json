@@ -2,9 +2,9 @@
   "version": 1,
   "model": "rule",
   "system": "You are a city inspector.",
-  "prompt": "How is Berlin doing?",
+  "prompt": "Check Berlin.",
   "episodes": [
-    "How is Berlin doing?"
+    "Check Berlin."
   ],
   "output": "Berlin looks fine.",
   "truncated": false,
@@ -16,7 +16,7 @@
     {
       "seq": 0,
       "kind": "model",
-      "key": "30f99962b7a9",
+      "key": "e773c7afaf2c",
       "result": {
         "text": "",
         "tool_calls": [
@@ -43,7 +43,7 @@
     {
       "seq": 2,
       "kind": "model",
-      "key": "c6ebf2f78a7a",
+      "key": "df5ce090d1ac",
       "result": {
         "text": "Berlin looks fine.",
         "tool_calls": [],

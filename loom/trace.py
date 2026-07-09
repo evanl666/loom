@@ -15,7 +15,37 @@ from .context import Context
 from .effect import EffectEntry, Recorder
 from .providers.base import ModelResponse
 
-TRACE_VERSION = 1
+# The trace format version, embedded in every saved trace.
+#
+# Compatibility policy: fields are only ever ADDED at the same version --
+# readers must ignore keys they don't know. The version bumps only when the
+# meaning of existing data changes (so far: how effect keys are computed),
+# because that silently breaks strict replay and impact verdicts.
+#
+#   1 -- original format; model-effect keys hash {system, messages} only
+#   2 -- model-effect keys also hash the tool schemas (a tool added or a
+#        schema edited now fails strict replay / shows up in impact)
+TRACE_VERSION = 2
+
+
+def _check_trace_version(data: dict, path: str) -> None:
+    """Warn (never fail) when a trace's format version isn't ours."""
+    import warnings
+
+    found = data.get("version", 1)
+    if found > TRACE_VERSION:
+        warnings.warn(
+            f"{path} was written by a newer loom (trace version {found}, this loom "
+            f"reads {TRACE_VERSION}); upgrade loom-harness if anything looks off.",
+            stacklevel=3,
+        )
+    elif found < TRACE_VERSION:
+        warnings.warn(
+            f"{path} uses trace version {found} (current: {TRACE_VERSION}); effect keys "
+            f"were computed differently, so strict replay and `loom impact` will report "
+            f"inputs-differ. Re-record the trace, or use replay(strict=False).",
+            stacklevel=3,
+        )
 
 
 class Run:
@@ -159,6 +189,7 @@ class Run:
         """Load a trace. Pass the same ``agent`` to replay/fork it live."""
         with open(path) as f:
             data = json.load(f)
+        _check_trace_version(data, path)
         log = [EffectEntry.from_dict(e) for e in data["log"]]
         rec = Recorder.replay(log)
         run = cls(
@@ -232,14 +263,18 @@ class Run:
 
     # -- time travel ------------------------------------------------------
 
-    def replay(self) -> "Run":
+    def replay(self, strict: bool = True) -> "Run":
         """Re-run deterministically from the log -- zero API calls.
 
-        The result must match the original; if the log is exhausted the run has
-        diverged (a bug), which surfaces as ``ReplayExhausted``.
+        Strict by default: every effect's inputs are re-derived and verified
+        against the recording, so a passing replay proves the agent as
+        configured now is equivalent to the one that recorded -- a prompt or
+        tool-schema change surfaces as ``ReplayMismatch`` at the first
+        differing effect. ``strict=False`` merely walks the old log (useful
+        for inspecting a trace with a deliberately changed configuration).
         """
         self._require_agent("replay")
-        rec = Recorder.replay(self.log)
+        rec = Recorder.replay(self.log, strict=strict)
         return self.agent.run(self.episodes, recorder=rec)
 
     def ask(self, prompt: str) -> "Run":

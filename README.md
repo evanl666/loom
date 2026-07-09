@@ -667,6 +667,24 @@ def test_agent_fixtures():
         verify_replay(path, agent=build_agent())
 ```
 
+**The strict-replay guarantee.** Replay never consults the model, so "the
+output matched" alone would prove very little. `verify_replay` and
+`Run.replay()` are therefore **strict by default**: every effect's inputs —
+system prompt, rebuilt messages, tool schemas — are re-derived from your
+current agent and hashed against the recording. A passing strict replay means
+*this configuration is input-equivalent to the one that recorded the trace*;
+a prompt tweak or an added tool fails at the exact seq where inputs first
+diverge, with a pointer to `loom impact` for the per-run report.
+`replay(strict=False)` remains for deliberately walking an old log with a
+changed config (e.g. replaying without the original tools).
+
+**Trace format stability.** Every trace carries a `version` field. Fields are
+only ever *added* within a version — readers ignore unknown keys, so older
+looms read newer traces of the same version fine. The version bumps only when
+the meaning of existing data changes (v2: tool schemas joined the effect-key
+hash), and loading a trace from a different version warns with exactly what
+to expect instead of failing or silently lying.
+
 ## Sweep: cheap counterfactuals
 
 `sweep` is the batch version of `fork`: test N hypotheses from the same rewind

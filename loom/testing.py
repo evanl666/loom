@@ -46,17 +46,20 @@ def verify_trace(path: str) -> list[str]:
     return problems
 
 
-def verify_replay(path: str, agent) -> None:
-    """Replay a trace against your agent and assert the output matches.
+def verify_replay(path: str, agent, strict: bool = True) -> None:
+    """Replay a trace against your agent and assert equivalence.
 
-    Raises AssertionError on mismatch and ReplayMismatch/ReplayExhausted if the
-    agent's control flow no longer matches the recording -- both mean behavior
-    changed. Costs zero API calls.
+    Strict (the default) verifies every effect's INPUTS against the recording,
+    so a system-prompt or tool-schema change fails here even though replay
+    never consults the model -- ``ReplayMismatch`` names the first differing
+    effect. ``strict=False`` only checks that the old log can be walked and
+    the output matches: a much weaker claim, kept as an escape hatch.
+    Costs zero API calls either way.
     """
     from .trace import Run
 
     original = Run.load(path, agent=agent)
-    replayed = original.replay()
+    replayed = original.replay(strict=strict)
     assert replayed.output == original.output, (
         f"replayed output diverged for {path}:\n"
         f"  stored:   {original.output!r}\n"
