@@ -778,6 +778,13 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
     if shield is not None and not args.replay:
         shield.notify = _shield_notifier(server.port)
         _print_shield_rules(shield)
+    live_url = f"http://127.0.0.1:{server.port}/loom/live"
+    print(f"  live studio: {live_url}")
+    if args.live:
+        import webbrowser
+
+        # Open once the server is accepting connections (a beat after start).
+        threading.Timer(0.6, lambda: webbrowser.open(live_url)).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1544,6 +1551,9 @@ def build_parser() -> argparse.ArgumentParser:
     px.add_argument("--target", default="https://api.anthropic.com")
     px.add_argument("--save", default="session.loom.json", help="trace written after every exchange")
     px.add_argument("--replay", default="", help="serve recorded responses from this trace instead")
+    px.add_argument("--live", action="store_true",
+                    help="open Live Studio in a browser: watch the run in real time, "
+                         "approve/deny held tool calls")
     shield_flags(px)
     scrub_flag(px)
     px.set_defaults(func=_cmd_proxy)

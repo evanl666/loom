@@ -608,6 +608,20 @@ byte-identically to one that didn't. Auth and bad-request errors never retry.
 A timed-out tool becomes an `ERROR:` result the model can react to — same as
 any other tool failure — and the worker is abandoned, not awaited.
 
+## Live Studio: watch it happen, approve as it goes
+
+```
+loom proxy --live --confirm 'cap:network'      # opens the live viewer in your browser
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8788
+# ...run Claude Code; watch every step land in real time
+```
+
+`--live` opens a page that streams the run as it happens — every model call,
+tool call, token, and firewall decision — and shows a card with **Approve /
+Deny** buttons for anything the shield is holding. It's the same recorder and
+the same control plane as everything else; the trace it's building is the one
+you replay afterward. "Watch Claude Code work, and stop it mid-step."
+
 ## Loom Studio: visual time travel
 
 `loom studio` opens any saved trace as a self-contained HTML time-travel

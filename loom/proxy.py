@@ -700,6 +700,26 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {"pending": shield.pending_list()})
             return
+        if self.path == "/loom/live":
+            from .live import live_html
+
+            page = live_html(self.server.port, self.server.control_token or "").encode()
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+            return
+        if self.path == "/loom/live/state":
+            # Gated by the control token when there's a shield (so its
+            # approve/deny controls aren't exposed unauthenticated).
+            if self.server.control_token and not self._control_authorized():
+                self._send_json(403, {"error": "missing or wrong x-loom-token header"})
+                return
+            from .live import live_state
+
+            self._send_json(200, live_state(self.server))
+            return
         if self.server.auth and self.headers.get("x-loom-auth", "") != self.server.auth:
             self._send_json(401, {"error": "missing or wrong x-loom-auth header"})
             return
