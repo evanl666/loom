@@ -206,3 +206,31 @@ def test_cli_flake_needs_two_traces(tmp_path, capsys):
     _support_run().save(one)
     assert main(["flake", one]) == 2          # CLIError -> friendly exit 2
     assert "at least two traces" in capsys.readouterr().err
+
+
+def test_evidence_coverage_and_gate(tmp_path, capsys):
+    from loom import Agent, tool
+    from loom.insight import evidence_coverage
+    from loom.providers import ModelResponse, ScriptedProvider, ToolCall
+
+    @tool
+    def search(q: str) -> str:
+        "search"
+        return "The capital of France is Paris. Population 67 million."
+
+    run = Agent(model=ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t", "search", {"q": "france"})], stop_reason="tool_use"),
+        ModelResponse(text="The capital of France is Paris. The stock market rose today."),
+    ]), tools=[search]).run("q")
+    cov = evidence_coverage(run.to_dict())
+    assert cov["claims"] == 2 and cov["supported"] == 1
+    assert cov["coverage"] == 0.5
+    assert "The stock market rose today." in cov["unsupported"][0]
+
+    path = str(tmp_path / "r.loom.json")
+    run.save(path)
+    # gate below coverage -> fail; gate at/under coverage -> pass
+    assert main(["provenance", path, "--gate", "--min-coverage", "0.8"]) == 1
+    capsys.readouterr()
+    assert main(["provenance", path, "--gate", "--min-coverage", "0.5"]) == 0
+    assert "evidence coverage: 1/2" in capsys.readouterr().out

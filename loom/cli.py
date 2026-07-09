@@ -1158,10 +1158,11 @@ def _cmd_graph(args: argparse.Namespace) -> int:
 
 def _cmd_provenance(args: argparse.Namespace) -> int:
     """Link each claim in the final answer to the tool results behind it."""
-    from .insight import provenance
+    from .insight import evidence_coverage, provenance
 
     _import_builtin_packs()
-    rows = provenance(_load_trace_json(args.path))
+    data = _load_trace_json(args.path)
+    rows = provenance(data)
     if not rows:
         print("no final answer to attribute")
         return 1
@@ -1174,8 +1175,15 @@ def _cmd_provenance(args: argparse.Namespace) -> int:
         else:
             unsupported += 1
             print("    ⤷ (no supporting tool result found)")
-    if unsupported:
-        print(f"\n⚠️  {unsupported} claim(s) without supporting evidence")
+    cov = evidence_coverage(data)
+    print(f"\nevidence coverage: {cov['supported']}/{cov['claims']} "
+          f"claim(s) supported ({int(cov['coverage'] * 100)}%)")
+    if args.gate:
+        if cov["coverage"] < args.min_coverage:
+            print(f"loom: coverage {int(cov['coverage'] * 100)}% is below the "
+                  f"{int(args.min_coverage * 100)}% gate", file=sys.stderr)
+            return 1
+        return 0
     return 0
 
 
@@ -2368,6 +2376,10 @@ def build_parser() -> argparse.ArgumentParser:
     pv = sub.add_parser("provenance",
                         help="link each claim in the final answer to its tool-result evidence")
     pv.add_argument("path")
+    pv.add_argument("--gate", action="store_true",
+                    help="exit 1 if evidence coverage is below --min-coverage (CI gate)")
+    pv.add_argument("--min-coverage", dest="min_coverage", type=float, default=0.8,
+                    help="minimum supported-claim ratio for --gate (default 0.8)")
     pv.set_defaults(func=_cmd_provenance)
 
     fl = sub.add_parser("flake", help="divergence heatmap across repeated runs of one task")

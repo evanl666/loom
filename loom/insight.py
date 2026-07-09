@@ -147,6 +147,23 @@ def provenance(source: Any) -> "list[dict]":
     return out
 
 
+def evidence_coverage(source: Any) -> dict:
+    """How well the final answer is backed by tool results.
+
+    Returns total/supported/unsupported claim counts, a 0-1 coverage ratio,
+    and the unsupported claims -- the input to a CI quality gate for
+    research/support/data agents ("don't ship an answer that cites nothing")."""
+    rows = provenance(source)
+    supported = [r for r in rows if r["evidence"]]
+    unsupported = [r["claim"] for r in rows if not r["evidence"]]
+    return {
+        "claims": len(rows),
+        "supported": len(supported),
+        "unsupported": unsupported,
+        "coverage": round(len(supported) / len(rows), 3) if rows else 1.0,
+    }
+
+
 # -- side-effect map ----------------------------------------------------------
 
 def side_effect_map(source: Any) -> dict:
