@@ -197,3 +197,22 @@ def test_cli_policy_test_echoes_why(tmp_path, capsys):
     ]))
     assert main(["policy", "test", str(cases), "--profile", "claude-code-safe"]) == 0
     assert "never read env files" in capsys.readouterr().out
+
+
+def test_cli_policy_simulate_is_explain(tmp_path, capsys):
+    from loom import Agent, tool
+    from loom.providers import ModelResponse, ScriptedProvider, ToolCall
+
+    @tool
+    def Read(file_path: str) -> str:
+        "read"
+        return "x"
+
+    path = str(tmp_path / "r.loom.json")
+    Agent(model=ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t1", "Read", {"file_path": "/app/.env"})],
+                      stop_reason="tool_use"),
+        ModelResponse(text="done"),
+    ]), tools=[Read]).run("go").save(path)
+    assert main(["policy", "simulate", path, "--profile", "claude-code-safe"]) == 0
+    assert "deny" in capsys.readouterr().out

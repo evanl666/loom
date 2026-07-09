@@ -1029,8 +1029,8 @@ def _cmd_policy(args: argparse.Namespace) -> int:
         print("policy looks good")
         return 0
 
-    if args.policy_cmd == "explain":
-        # Explain how the policy would classify each tool call in a trace.
+    if args.policy_cmd in ("explain", "simulate"):
+        # Explain/simulate how the policy would classify each tool call in a trace.
         shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
         data = _load_trace_json(args.path)
         seen: dict = {}
@@ -1073,13 +1073,43 @@ def _cmd_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _signing_key(args) -> "bytes | None":
+    """Resolve --key-env / --key-file into signing-key bytes, or None."""
+    import os
+
+    if getattr(args, "key_env", ""):
+        val = os.environ.get(args.key_env)
+        if not val:
+            raise CLIError(f"env var {args.key_env} is not set")
+        return val.encode()
+    if getattr(args, "key_file", ""):
+        try:
+            with open(args.key_file, "rb") as f:
+                return f.read().strip()
+        except OSError as e:
+            raise CLIError(f"could not read key file: {e}")
+    return None
+
+
 def _cmd_trace(args: argparse.Namespace) -> int:
-    """Validate / verify / explain-version a trace's format contract."""
-    from .trace import TRACE_VERSION, trace_checksum
+    """Validate / verify / sign / explain-version a trace's format contract."""
+    from .trace import TRACE_VERSION, trace_checksum, trace_signature
     from .testing import verify_trace
 
     data = _load_trace_json(args.path)
     version = data.get("version", 1)
+
+    if args.trace_cmd == "sign":
+        key = _signing_key(args)
+        if key is None:
+            raise CLIError("sign needs a key: --key-env VAR or --key-file PATH")
+        data["signature"] = trace_signature(data, key)
+        if "checksum" in data:
+            data["checksum"] = trace_checksum(data)
+        with open(args.path, "w") as f:
+            json.dump(data, f, indent=2)
+        print(f"{args.path}: signed ({data['signature'][:24]}…)")
+        return 0
 
     if args.trace_cmd == "explain-version":
         print(f"{args.path}: trace format version {version} (this loom writes v{TRACE_VERSION})")
@@ -1094,6 +1124,20 @@ def _cmd_trace(args: argparse.Namespace) -> int:
         return 0
 
     if args.trace_cmd == "verify":
+        key = _signing_key(args)
+        if key is not None:  # cryptographic verification against a shared secret
+            sig = data.get("signature")
+            if not sig:
+                print(f"loom: {args.path} is not signed", file=sys.stderr)
+                return 1
+            import hmac
+
+            if hmac.compare_digest(sig, trace_signature(data, key)):
+                print(f"{args.path}: signature valid — authentic and unmodified")
+                return 0
+            print(f"loom: {args.path} signature INVALID (wrong key or tampered)",
+                  file=sys.stderr)
+            return 1
         stored = data.get("checksum")
         if not stored:
             print(f"{args.path}: no checksum (written by an older loom or hand-made)")
@@ -1454,16 +1498,28 @@ def build_parser() -> argparse.ArgumentParser:
     po_lint.add_argument("--policy", default="", help="policy file to lint")
     po_lint.add_argument("--profile", default="", help="or a built-in profile to lint")
     po_lint.set_defaults(func=_cmd_policy)
+    po_sim = posub.add_parser("simulate",
+                              help="alias of explain: what the policy would do to a trace's calls")
+    po_sim.add_argument("path", help="a saved trace")
+    po_sim.add_argument("--profile", default="")
+    po_sim.add_argument("--policy", default="")
+    po_sim.set_defaults(func=_cmd_policy)
 
-    tr_p = sub.add_parser("trace", help="validate / verify / explain a trace's format")
+    tr_p = sub.add_parser("trace", help="validate / verify / sign / explain a trace's format")
     trsub = tr_p.add_subparsers(dest="trace_cmd", required=True)
     for cmd, helptext in [
         ("validate", "structure + checksum check (CI gate; exit 1 on problems)"),
-        ("verify", "checksum tamper check (exit 1 if modified since written)"),
+        ("verify", "tamper check: checksum, or HMAC signature with --key-* (exit 1 on fail)"),
+        ("sign", "add an HMAC signature with --key-env/--key-file (tamper-proof)"),
         ("explain-version", "report the trace format version and what to expect"),
     ]:
         sp = trsub.add_parser(cmd, help=helptext)
         sp.add_argument("path")
+        if cmd in ("sign", "verify"):
+            sp.add_argument("--key-env", dest="key_env", default="",
+                            help="read the signing key from this environment variable")
+            sp.add_argument("--key-file", dest="key_file", default="",
+                            help="read the signing key from this file")
         sp.set_defaults(func=_cmd_trace)
 
     ic = sub.add_parser("incident", help="write an agent postmortem from a saved trace")

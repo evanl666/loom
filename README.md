@@ -210,7 +210,10 @@ loom policy explain session.loom.json --profile claude-code-safe  # what would i
 blocks `rm -rf` but actually targets a *tool named* `rm -rf`, which never
 exists, so it never fires (you meant `Bash(*rm -rf*)`). Trace files carry a
 version and a checksum; `loom trace validate` / `verify` / `explain-version`
-make the format contract a CI gate.
+make the format contract a CI gate, and `loom trace sign --key-env KEY`
+adds a tamper-**proof** HMAC signature for traces you don't fully trust the
+storage of. Formats are documented: [trace](docs/trace-format.md),
+[policy](docs/policy-schema.md), [bench task](docs/bench-task-schema.md).
 
 A policy is exactly the Shield the flags build — deny/allow/confirm precedence,
 sequence rules, the default action — so anything below is expressible in it, and

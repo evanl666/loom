@@ -55,6 +55,21 @@ def _check_integrity(data: dict, path: str) -> None:
         )
 
 
+def trace_signature(data: dict, key: bytes) -> str:
+    """HMAC-SHA256 over the trace content (excluding checksum/signature).
+
+    The checksum is tamper-EVIDENT (anyone can recompute it); a signature made
+    with a shared secret is tamper-PROOF to anyone without the key.
+    """
+    import hmac
+
+    body = {k: v for k, v in sorted(data.items()) if k not in ("checksum", "signature")}
+    digest = hmac.new(
+        key, json.dumps(body, sort_keys=True, default=str).encode(), hashlib.sha256
+    ).hexdigest()
+    return f"hmac-sha256:{digest}"
+
+
 def _check_trace_version(data: dict, path: str) -> None:
     """Warn (never fail) when a trace's format version isn't ours."""
     import warnings
