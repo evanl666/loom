@@ -105,3 +105,18 @@ def test_pii_then_email_is_exfiltration(tmp_path):
     report = build_report(data, path)
     assert "PII exfiltration" in report
     assert "🔴 critical" in report
+
+
+def test_incident_lists_affected_systems_for_business_agents(tmp_path):
+    # The generic incident report: a support agent's blast radius reads in
+    # business terms (records touched, money moved), not files.
+    data, path = _incident(
+        tmp_path,
+        [("issue_refund", {"amount": 500, "order_id": "A-17"}),
+         ("send_email", {"to": "jane@x.com", "body": "done"})],
+    )
+    report = build_report(data, path)
+    assert "customers/records affected:" in report
+    assert "moved money: 500 (A-17)" in report
+    assert "messaged jane@x.com" in report
+    assert "cap:money_movement" in report      # prevention speaks capabilities

@@ -121,5 +121,10 @@ def test_domain_packs_are_opt_in():
     # With none of them registered, a SQL call gets only core inference.
     for name in ("sql", "browser", "support"):  # order-independent: force-clear
         unregister(name)
-    a = _call(_trace("run_query", {"query": "INSERT INTO orders VALUES (1)"}))
-    assert a.state_diff is None
+    try:
+        a = _call(_trace("run_query", {"query": "INSERT INTO orders VALUES (1)"}))
+        assert a.state_diff is None
+    finally:
+        from loom.packs import install_builtin
+
+        install_builtin()  # restore the default registry for later tests

@@ -63,9 +63,17 @@ def test_registry_is_idempotent_by_name(sql_pack):
 
 def test_no_packs_is_a_noop():
     # With nothing registered, enrichment leaves Actions untouched.
-    call = [a for a in actions(_sql_trace()) if a.type == "call"][0]
-    assert call.state_diff is None
-    assert enrich([call], _sql_trace()) == [call]
+    # (Order-independent: another test may have installed the built-ins.)
+    for name in ("coding", "sql", "browser", "support"):
+        unregister(name)
+    try:
+        call = [a for a in actions(_sql_trace()) if a.type == "call"][0]
+        assert call.state_diff is None
+        assert enrich([call], _sql_trace()) == [call]
+    finally:
+        from loom.packs import install_builtin
+
+        install_builtin()  # restore the default registry for later tests
 
 
 def test_pack_for_finds_the_owner(sql_pack):

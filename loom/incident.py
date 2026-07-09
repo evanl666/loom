@@ -210,6 +210,33 @@ def _executive_summary(facts: dict, data: dict) -> str:
     return f"{sentence} Severity **{facts['severity']}**."
 
 
+def _affected_systems(data: dict) -> "dict[str, list[str]]":
+    """StateDiff summaries grouped by world kind (file/database/dom/record).
+
+    This is what makes the incident report agent-type aware: the same section
+    reads "files affected: wrote src/app.py" for a coding agent and
+    "customers/records affected: moved money: 50 (A-17)" for a support agent.
+    """
+    from collections import Counter
+
+    try:
+        from .action import actions as _actions
+        from .packs import install_builtin
+
+        install_builtin()
+        acts = _actions(data)
+    except Exception:
+        return {}
+    grouped: dict[str, Counter] = {}
+    for a in acts:
+        if a.type == "call" and a.state_diff is not None:
+            grouped.setdefault(a.state_diff.kind, Counter())[a.state_diff.summary] += 1
+    return {
+        kind: [s if n == 1 else f"{s} (x{n})" for s, n in counts.most_common()]
+        for kind, counts in grouped.items()
+    }
+
+
 def build_report(data: dict, path: str, why_output: str = "") -> str:
     """The incident report as markdown. Deterministic given the trace."""
     facts = _analyze(data)
@@ -302,6 +329,14 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
                      + "  _(* = already dirty before the run)_")
         if changes.get("agent_exit_code") is not None:
             lines.append(f"- agent process exited {changes['agent_exit_code']}")
+    # Affected systems, from each owning pack's StateDiff -- the generic view:
+    # a support agent's blast radius is customers and money, not files.
+    affected = _affected_systems(data)
+    for kind, summaries in sorted(affected.items()):
+        label = {"file": "files", "database": "database", "dom": "browser",
+                 "record": "customers/records", "field": "records"}.get(kind, kind)
+        lines.append(f"- {label} affected: " + "; ".join(summaries[:8])
+                     + (" …" if len(summaries) > 8 else ""))
     if facts["risk"]:
         lines.append("- risky capabilities exercised: " + ", ".join(sorted(facts["risk"])))
     if facts["secrets"]:

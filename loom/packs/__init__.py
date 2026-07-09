@@ -162,8 +162,16 @@ def undo_plan(action: Action, trace: dict) -> "UndoPlan | None":
 def install_builtin() -> None:
     """Register every built-in domain pack (coding, sql, browser, support).
 
-    Pack-aware surfaces (``loom undo --plan``, ``loom fork``,
-    ``Run.undo_plans``) call this so plans and hints cover every domain out
-    of the box; library users composing their own registry simply don't."""
-    for mod in ("coding", "sql", "browser", "support"):
-        __import__(f"loom.packs.{mod}")
+    Pack-aware surfaces (``loom undo --plan``, ``loom fork``, ``Run.undo_plans``,
+    the incident report) call this so plans and hints cover every domain out of
+    the box; library users composing their own registry simply don't.
+
+    Registers explicit instances (idempotent by name) rather than relying on
+    import side effects -- an import happens once per process, so a registry
+    cleared later (tests, custom setups) could never get the packs back."""
+    from . import browser, coding, sql, support
+
+    register(coding.CodingPack())
+    register(sql.SqlPack())
+    register(browser.BrowserPack())
+    register(support.SupportPack())
