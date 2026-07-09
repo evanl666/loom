@@ -153,6 +153,17 @@ class Run:
 
         return parse_as(output_type, self.output)
 
+    def actions(self) -> list:
+        """The generic Action timeline for this run (see ``loom.action``).
+
+        Each Action carries intent, input, capabilities, risk, the observation,
+        the firewall decision, and a replay point -- the world-neutral view the
+        Action Debugger renders. Packs enrich Actions with a StateDiff.
+        """
+        from .action import actions as _actions
+
+        return _actions(self)
+
     def timeline(self) -> list[dict]:
         """A human-readable step-by-step summary of the run, with nesting depth."""
         out: list[dict] = []

@@ -18,6 +18,7 @@ Quickstart:
     print(run.output)
 """
 
+from .action import Action, Observation, PolicyDecision, ReplayPoint, StateDiff, actions
 from .agent import Agent, HumanInputRequired, HumanTool, SubagentTool, ask_human
 from .ambient import now, random
 from .context import Context, Item
@@ -40,6 +41,12 @@ __version__ = "0.21.0"
 
 __all__ = [
     "Agent",
+    "Action",
+    "Observation",
+    "StateDiff",
+    "PolicyDecision",
+    "ReplayPoint",
+    "actions",
     "Run",
     "SweepResult",
     "TraceDiff",
