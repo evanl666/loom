@@ -199,23 +199,51 @@ def test_cli_policy_test_echoes_why(tmp_path, capsys):
     assert "never read env files" in capsys.readouterr().out
 
 
-def test_cli_policy_simulate_is_explain(tmp_path, capsys):
+def _save_run(tmp_path, name, tool_name, tool_input):
     from loom import Agent, tool
     from loom.providers import ModelResponse, ScriptedProvider, ToolCall
 
     @tool
-    def Read(file_path: str) -> str:
-        "read"
+    def t(**kwargs) -> str:
+        "a tool"
         return "x"
+    t.name = tool_name
 
-    path = str(tmp_path / "r.loom.json")
+    path = str(tmp_path / name)
     Agent(model=ScriptedProvider([
-        ModelResponse(tool_calls=[ToolCall("t1", "Read", {"file_path": "/app/.env"})],
+        ModelResponse(tool_calls=[ToolCall("t1", tool_name, tool_input)],
                       stop_reason="tool_use"),
         ModelResponse(text="done"),
-    ]), tools=[Read]).run("go").save(path)
-    assert main(["policy", "simulate", path, "--profile", "claude-code-safe"]) == 0
-    assert "deny" in capsys.readouterr().out
+    ]), tools=[t]).run("go").save(path)
+    return path
+
+
+def test_cli_policy_simulate_reports_rollout_impact(tmp_path, capsys):
+    # Two runs: one would be denied (and completed fine -> candidate false
+    # positive), one untouched. The report is the rollout blast radius.
+    _save_run(tmp_path, "bad.loom.json", "Read", {"file_path": "/app/.env"})
+    _save_run(tmp_path, "ok.loom.json", "Read", {"file_path": "src/x.py"})
+    assert main(["policy", "simulate", str(tmp_path), "--profile", "claude-code-safe"]) == 0
+    out = capsys.readouterr().out
+    assert "simulated policy over 2 run(s)" in out
+    assert "would DENY in       1 run(s)  (50%)" in out
+    assert "untouched           1 run(s)  (50%)" in out
+    assert "candidate false positives" in out
+    assert "Read(*.env*)" in out and "x1" in out    # per-rule hits
+
+
+def test_cli_policy_simulate_fail_on_deny_gates_ci(tmp_path, capsys):
+    _save_run(tmp_path, "bad.loom.json", "Read", {"file_path": "/app/.env"})
+    assert main(["policy", "simulate", str(tmp_path), "--profile", "claude-code-safe",
+                 "--fail-on-deny"]) == 1
+    capsys.readouterr()
+
+
+def test_cli_policy_simulate_clean_corpus_passes_the_gate(tmp_path, capsys):
+    _save_run(tmp_path, "ok.loom.json", "Read", {"file_path": "src/x.py"})
+    assert main(["policy", "simulate", str(tmp_path), "--profile", "claude-code-safe",
+                 "--fail-on-deny"]) == 0
+    assert "untouched           1 run(s)" in capsys.readouterr().out
 
 
 def test_new_policy_packs_classify_sensibly():
