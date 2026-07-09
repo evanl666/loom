@@ -425,11 +425,21 @@ class ProxyServer(ThreadingHTTPServer):
     def __init__(self, port: int = 8788, target: str = DEFAULT_TARGET,
                  save_path: "str | None" = None, replay_path: "str | None" = None,
                  shield=None, scrub: bool = False,
-                 save_interval: float = 5.0, eager_saves: int = 20):
+                 save_interval: float = 5.0, eager_saves: int = 20,
+                 max_body: int = 64 * 1024 * 1024, upstream_timeout: float = 600.0,
+                 auth: str = ""):
         self.target = target.rstrip("/")
         self.save_path = save_path
         self.shield = shield  # loom.shield.Shield, screens tool calls in responses
         self.scrub = scrub  # redact secrets at the persist boundary (storage only)
+        self.max_body = max_body  # 413 for anything larger; 0 disables the cap
+        self.upstream_timeout = upstream_timeout
+        # Optional data-plane auth: with a token set, /v1/* requests must carry
+        # it in x-loom-auth. The control plane has its own per-session token;
+        # this one guards the DATA plane -- above all replay mode, where the
+        # proxy would otherwise serve a recorded conversation to any local
+        # process that asks. Only agents that can add a header can use it.
+        self.auth = auth
         self.recorder = WireRecorder()
         self.lock = threading.Lock()
         self.replay_wire: "list[dict] | None" = None
@@ -555,8 +565,19 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         length = int(self.headers.get("content-length", 0))
+        if self.server.max_body and length > self.server.max_body:
+            self._send_json(413, {
+                "error": f"request body {length} bytes exceeds the proxy cap "
+                         f"({self.server.max_body}); raise it with --max-body-mb"
+            })
+            return
         request = json.loads(self.rfile.read(length) or b"{}")
         wants_stream = bool(request.get("stream"))
+
+        if (self.server.auth and not self.path.startswith("/loom/")
+                and self.headers.get("x-loom-auth", "") != self.server.auth):
+            self._send_json(401, {"error": "missing or wrong x-loom-auth header"})
+            return
 
         if self.path == "/loom/shield/decide":
             shield = self.server.shield
@@ -601,7 +622,7 @@ class _Handler(BaseHTTPRequestHandler):
             method="POST",
         )
         try:
-            upstream = urllib.request.urlopen(upstream_req, timeout=600)
+            upstream = urllib.request.urlopen(upstream_req, timeout=self.server.upstream_timeout)
         except urllib.error.HTTPError as e:
             body = e.read()
             try:
@@ -669,6 +690,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(403, {"error": "missing or wrong x-loom-token header"})
             else:
                 self._send_json(200, {"pending": shield.pending_list()})
+            return
+        if self.server.auth and self.headers.get("x-loom-auth", "") != self.server.auth:
+            self._send_json(401, {"error": "missing or wrong x-loom-auth header"})
             return
         if self.server.replay_wire is not None:
             self._send_json(404, {"error": "replay mode serves recorded POSTs only"})

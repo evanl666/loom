@@ -246,7 +246,9 @@ def _cmd_record(args: argparse.Namespace) -> int:
 
     shield = _build_shield(args)
     server = ProxyServer(port=args.port, target=args.target, save_path=args.save,
-                         shield=shield, scrub=args.scrub)
+                         shield=shield, scrub=args.scrub,
+                         max_body=args.max_body_mb * 1024 * 1024,
+                         upstream_timeout=args.upstream_timeout, auth=args.auth)
     if shield is not None:
         shield.notify = _shield_notifier(server.port)
         _print_shield_rules(shield)
@@ -466,6 +468,9 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
         replay_path=args.replay or None,
         shield=shield if not args.replay else None,
         scrub=args.scrub,
+        max_body=args.max_body_mb * 1024 * 1024,
+        upstream_timeout=args.upstream_timeout,
+        auth=args.auth,
     )
     mode = f"replaying {args.replay}" if args.replay else f"recording -> {args.save}"
     print(f"loom proxy on http://127.0.0.1:{server.port} ({mode})")
@@ -757,6 +762,13 @@ def build_parser() -> argparse.ArgumentParser:
     def scrub_flag(sp) -> None:
         sp.add_argument("--scrub", action="store_true",
                         help="redact secrets (API keys, tokens...) before the trace is written")
+        sp.add_argument("--max-body-mb", dest="max_body_mb", type=int, default=64,
+                        help="reject request bodies larger than this (default 64; 0 = no cap)")
+        sp.add_argument("--upstream-timeout", dest="upstream_timeout", type=float, default=600.0,
+                        help="seconds to wait on the upstream API (default 600)")
+        sp.add_argument("--auth", default="",
+                        help="require this token in x-loom-auth on data-plane requests "
+                             "(guards replay serving; needs an agent that can add a header)")
 
     rc = sub.add_parser("record", help="black-box a real agent session: loom record -- <command>")
     rc.add_argument("command", nargs=argparse.REMAINDER, help="the agent command to run")

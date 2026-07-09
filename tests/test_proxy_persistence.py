@@ -145,3 +145,60 @@ def test_scrub_redacts_the_trace_but_not_the_client_response(tmp_path):
     proxy.finalize()
     on_disk = open(path).read()
     assert SECRET not in on_disk and "[scrubbed:anthropic-key]" in on_disk
+
+
+# ----------------------------------------------------------------- hardening
+
+
+def test_oversized_body_is_rejected_before_reading(tmp_path):
+    upstream = _serve(_FakeUpstream([FINAL_ANSWER]))
+    proxy, _ = _proxy(tmp_path, upstream, max_body=1024)
+    big = {"model": "m", "messages": [{"role": "user", "content": "x" * 5000}]}
+    try:
+        _post(proxy.port, big)
+        assert False, "expected 413"
+    except urllib.error.HTTPError as e:
+        assert e.code == 413
+        assert "max-body-mb" in json.load(e)["error"]
+    # a normal-sized request still works
+    assert _post(proxy.port) == FINAL_ANSWER
+    proxy.shutdown()
+    upstream.shutdown()
+
+
+def test_data_plane_auth_guards_replay_serving(tmp_path):
+    # Record a session, then serve it in replay mode WITH auth: an anonymous
+    # local process gets 401, the token holder gets the conversation.
+    upstream = _serve(_FakeUpstream([FINAL_ANSWER]))
+    proxy, path = _proxy(tmp_path, upstream)
+    _post(proxy.port)
+    proxy.shutdown()
+    upstream.shutdown()
+    proxy.finalize()
+
+    replayer = _serve(ProxyServer(port=0, replay_path=path, auth="secret-token"))
+    try:
+        _post(replayer.port)
+        assert False, "expected 401"
+    except urllib.error.HTTPError as e:
+        assert e.code == 401
+    got = _post(replayer.port, headers={"x-loom-auth": "secret-token"})
+    assert got == FINAL_ANSWER
+    replayer.shutdown()
+
+
+def test_shield_control_plane_is_not_gated_by_data_auth(tmp_path):
+    from loom.shield import Shield
+
+    upstream = _serve(_FakeUpstream([FINAL_ANSWER]))
+    proxy, _ = _proxy(tmp_path, upstream, shield=Shield(deny=["Never*"]), auth="tok")
+    # control plane uses its own x-loom-token, not x-loom-auth
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{proxy.port}/loom/shield/pending",
+        headers={"x-loom-token": proxy.control_token},
+    )
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert json.load(r) == {"pending": []}
+    proxy.shutdown()
+    upstream.shutdown()
+    proxy.finalize()
