@@ -80,6 +80,53 @@ def test_studio_workspace_panel_and_dirty_banner():
     assert "view patch" in html and "+new" in html  # the embedded diff
 
 
+def test_studio_action_debugger_panel():
+    """The main view is an action timeline: why / input / output / state diff /
+    risk / policy decision, world-neutral."""
+
+    @tool
+    def Edit(file_path: str, old: str, new: str) -> str:
+        "Edit a file."
+        return "edited"
+
+    provider = ScriptedProvider([
+        ModelResponse(text="Fixing the bug in app.py.",
+                      tool_calls=[ToolCall("t1", "Edit",
+                                           {"file_path": "src/app.py", "old": "a", "new": "b"})],
+                      stop_reason="tool_use"),
+        ModelResponse(text="done"),
+    ])
+    run = Agent(model=provider, tools=[Edit]).run("fix the bug")
+    data = run.to_dict()
+    data["workspace"] = {"changes": {"files": [
+        {"path": "src/app.py", "status": "M", "pre_existing": False}]}}
+    data["shield_events"] = [
+        {"tool": "Edit", "input": {"file_path": "src/app.py"}, "action": "approve",
+         "rule": "cap:write", "via": "operator", "by": "evan"},
+    ]
+    page = trace_to_html(data)
+    assert "Actions — what it did, why, what changed" in page
+    assert "Fixing the bug in app.py." in page            # why (intent)
+    assert "fs-write" in page                             # risk badge
+    assert "Δ wrote src/app.py" in page                   # state diff (Coding Pack)
+    assert "🛡 approve · cap:write" in page               # policy decision
+    assert 'data-seq=' in page                            # wired to the scrubber
+    assert ">Raw effects</h2>" in page                    # effect log demoted
+
+
+def test_studio_shows_blocked_actions():
+    page = trace_to_html({
+        "model": "m", "episodes": ["go"], "output": "x",
+        "log": [{"seq": 0, "kind": "model", "key": "k",
+                 "result": {"text": "reading env", "tool_calls": [], "stop_reason": "end_turn",
+                            "usage": {}}}],
+        "shield_events": [{"tool": "Read", "input": {"file_path": "/app/.env"},
+                           "action": "deny", "rule": "Read(*.env*)", "via": "rule"}],
+    })
+    assert "🛡 blocked · Read(*.env*)" in page
+    assert "secret-read" in page
+
+
 def test_studio_action_buttons_use_the_trace_path():
     from loom.export import trace_to_html
 

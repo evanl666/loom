@@ -227,6 +227,42 @@ footer { color: var(--muted); font-size: .78rem; margin-top: 1.4rem;
 .timeline::-webkit-scrollbar, .convo::-webkit-scrollbar { width: 8px; }
 .timeline::-webkit-scrollbar-thumb, .convo::-webkit-scrollbar-thumb {
   background: var(--grid); border-radius: 99px; }
+
+/* -- Action Debugger ------------------------------------------------- */
+.actionsview { max-height: 70vh; overflow-y: auto; }
+.action { padding: .6rem .95rem; border-top: 1px solid var(--grid);
+  border-left: 3px solid transparent; cursor: pointer;
+  transition: background .15s, opacity .3s, border-color .15s; }
+.action:hover { background: color-mix(in srgb, var(--model) 6%, transparent); }
+.action.sel { background: color-mix(in srgb, var(--model) 12%, transparent);
+  border-left-color: var(--model); }
+.action.future { opacity: .3; }
+.action .head { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+.action .verb { font-weight: 640; font-size: .88rem; }
+.action .kv { display: grid; grid-template-columns: 4.6rem 1fr; gap: .12rem .6rem;
+  margin-top: .35rem; font-size: .83rem; }
+.action .kv b { color: var(--muted); font-weight: 500; font-size: .74rem;
+  text-transform: uppercase; letter-spacing: .06em; }
+.action .kv span { color: var(--ink-2); overflow-wrap: anywhere;
+  white-space: pre-wrap; }
+.badge { display: inline-flex; align-items: center; gap: .3rem;
+  font-size: .7rem; font-weight: 640; padding: .1rem .55rem;
+  border-radius: 99px; white-space: nowrap; }
+.badge.risk { color: #b4232a;
+  background: color-mix(in srgb, #e5484d 13%, transparent); }
+.badge.warncap { color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.badge.cap { color: var(--muted);
+  background: color-mix(in srgb, var(--ink) 6%, transparent); }
+.badge.allow { color: var(--tool);
+  background: color-mix(in srgb, var(--tool) 12%, transparent); }
+.badge.deny { color: #b4232a;
+  background: color-mix(in srgb, #e5484d 13%, transparent); }
+.badge.statediff { color: var(--meta);
+  background: color-mix(in srgb, var(--meta) 11%, transparent); }
+@media (prefers-color-scheme: dark) {
+  .badge.risk, .badge.deny { color: #ff8f92; }
+}
 """
 
 _JS = """
@@ -237,6 +273,7 @@ const playBtn = document.getElementById('play');
 const tip = document.getElementById('tip');
 const rows = Array.from(document.querySelectorAll('.step'));
 const cells = Array.from(document.querySelectorAll('.strip .cell'));
+const acts = Array.from(document.querySelectorAll('.action[data-seq]'));
 let selected = N - 1;
 let timer = null;
 
@@ -307,6 +344,11 @@ function apply(k, sel) {
     r.classList.toggle('sel', i === selected);
   });
   cells.forEach((c, i) => c.classList.toggle('future', i > k));
+  acts.forEach(a => {
+    const s = +a.dataset.seq;
+    a.classList.toggle('future', s > k);
+    a.classList.toggle('sel', s === selected);
+  });
   renderConvo(k);
   renderDetail(selected);
 }
@@ -325,6 +367,9 @@ playBtn.addEventListener('click', () => {
 
 slider.addEventListener('input', () => { stop(); apply(+slider.value); });
 rows.forEach((r, i) => r.addEventListener('click', () => { stop(); apply(i, i); }));
+acts.forEach(a => a.addEventListener('click', () => {
+  stop(); const s = +a.dataset.seq; apply(s, s);
+}));
 cells.forEach((c, i) => {
   c.addEventListener('click', () => { stop(); apply(i, i); });
   c.addEventListener('mousemove', (ev) => {
@@ -495,6 +540,70 @@ def _workspace_tile(ws: "dict | None") -> str:
     return tiles
 
 
+def _clip(text: str, n: int = 220) -> str:
+    text = str(text)
+    return text if len(text) <= n else text[: n - 1] + "…"
+
+
+def _action_rows(data: dict) -> str:
+    """The Action Debugger timeline: per action — why, input, output, state
+    diff, risk, and the firewall's decision. World-neutral: rendered from the
+    generic Action schema, so a SQL or browser pack's actions read the same."""
+    from .action import actions as _actions
+
+    verbs = {"reason": "💭 thought", "answer": "✅ final answer",
+             "ask-human": "🙋 asked the human", "meta": "⚙️"}
+    cards: list[str] = []
+    for a in _actions(data):
+        head: list[str] = []
+        if a.type == "call":
+            head.append(f'<span class="verb">🔧 {html.escape(a.tool)}</span>')
+        else:
+            label = verbs.get(a.type, a.type)
+            if a.type == "meta":
+                label += " " + a.tool
+            head.append(f'<span class="verb">{html.escape(label)}</span>')
+        if a.risk:
+            head.append(f'<span class="badge risk">⚠ {html.escape(a.risk)}</span>')
+        for c in a.capabilities:
+            if c in ("read", "idempotent"):
+                continue  # quiet capabilities; risk badges carry the signal
+            head.append(f'<span class="badge cap">{html.escape(c)}</span>')
+        if a.policy:
+            cls = "deny" if a.policy.blocked else "allow"
+            what = "🛡 blocked" if a.policy.blocked else "🛡 " + (a.policy.action or "allowed")
+            rule = f" · {a.policy.rule}" if a.policy.rule else ""
+            head.append(f'<span class="badge {cls}">{html.escape(what + rule)}</span>')
+        if a.state_diff is not None:
+            head.append(f'<span class="badge statediff">Δ {html.escape(a.state_diff.summary)}</span>')
+
+        kv: list[str] = []
+
+        def row(k: str, v: str) -> None:
+            kv.append(f"<b>{k}</b><span>{html.escape(_clip(v))}</span>")
+
+        if a.type == "call":
+            if a.intent:
+                row("why", a.intent)
+            if a.input is not None:
+                row("input", json.dumps(a.input, default=str))
+            if a.observation is not None and a.observation.text:
+                row("output", a.observation.text)
+        elif a.intent:
+            row("", a.intent)
+        elif a.observation is not None and a.observation.text:
+            row("", a.observation.text)
+
+        seq_attr = f' data-seq="{a.step}"' if a.step >= 0 else ""
+        cards.append(
+            f'<div class="action depth{min(a.depth, 3)}"{seq_attr}>'
+            f'<div class="head">{"".join(head)}</div>'
+            + (f'<div class="kv">{"".join(kv)}</div>' if kv else "")
+            + "</div>"
+        )
+    return "".join(cards)
+
+
 def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
     """Render a saved trace dict (``Run.to_dict`` / a ``.loom.json`` file) to HTML."""
     log = data.get("log", [])
@@ -590,7 +699,11 @@ def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
 </div>
 {_workspace_panel(data.get("workspace"))}
 <div class="cols">
-  <div class="panel"><h2>Timeline</h2><div class="timeline">{"".join(rows)}</div></div>
+  <div class="side">
+    <div class="panel"><h2>Actions — what it did, why, what changed</h2>
+      <div class="actionsview">{_action_rows(data)}</div></div>
+    <div class="panel"><h2>Raw effects</h2><div class="timeline">{"".join(rows)}</div></div>
+  </div>
   <div class="side">
     <div class="panel"><h2>Conversation at this point</h2><div class="convo" id="convo"></div></div>
     <div class="panel"><h2>Selected effect</h2><div class="detail">
@@ -612,7 +725,7 @@ def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
 </div>
 <div id="tip"></div>
 <footer>output: {html.escape(str(data.get("output", "")))}<br>
-generated by loom — the agent harness you can read, replay, and rewind</footer>
+generated by loom — the black-box debugger for tool-using AI agents</footer>
 <script>
 const TRACE = {trace_json};
 {_JS}
