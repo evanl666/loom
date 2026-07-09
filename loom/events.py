@@ -70,12 +70,25 @@ def events_for(path: str, data: dict) -> "list[dict]":
 
 
 def to_otel(event: dict) -> dict:
-    """Wrap a flat event as an OpenTelemetry-style log record."""
-    body = {k: v for k, v in event.items() if k not in ("run", "kind")}
+    """Wrap a flat event as an OpenTelemetry-style log record.
+
+    Attribute keys are namespaced ``loom.*`` (see docs/events-schema.md), token
+    usage in the semantic-convention shape ``loom.tokens.input``/``.output``.
+    """
+    attrs: dict = {}
+    for k, v in event.items():
+        if k in ("run", "kind"):
+            continue
+        if k == "input_tokens":
+            attrs["loom.tokens.input"] = v
+        elif k == "output_tokens":
+            attrs["loom.tokens.output"] = v
+        else:
+            attrs[f"loom.{k}"] = v
     return {
         "resource": {"service.name": "loom-agent", "loom.run": event.get("run")},
         "name": f"loom.{event.get('kind', 'effect')}",
-        "attributes": body,
+        "attributes": attrs,
     }
 
 

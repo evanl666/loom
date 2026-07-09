@@ -841,9 +841,13 @@ def _cmd_approve(args: argparse.Namespace) -> int:
     import urllib.request
 
     decision = "deny" if args.deny else "approve"
+    import getpass
+    import os as _os
+
+    who = args.by or _os.environ.get("LOOM_APPROVER") or getpass.getuser()
     req = urllib.request.Request(
         f"http://127.0.0.1:{args.port}/loom/shield/decide",
-        data=json.dumps({"id": args.id, "decision": decision}).encode(),
+        data=json.dumps({"id": args.id, "decision": decision, "by": who}).encode(),
         headers={"content-type": "application/json", **_control_headers(args.port)},
         method="POST",
     )
@@ -1596,6 +1600,8 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("id")
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
+    ap.add_argument("--as", dest="by", default="",
+                    help="record who decided (default: $LOOM_APPROVER or the OS user)")
     ap.set_defaults(func=_cmd_approve)
 
     bn = sub.add_parser("bench", help="run one task through several agents and compare")

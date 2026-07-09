@@ -594,7 +594,9 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(404, {"error": "no shield active on this proxy"})
             elif not self._control_authorized():
                 self._send_json(403, {"error": "missing or wrong x-loom-token header"})
-            elif shield.decide_pending(str(request.get("id", "")), request.get("decision") == "approve"):
+            elif shield.decide_pending(str(request.get("id", "")),
+                                       request.get("decision") == "approve",
+                                       who=str(request.get("by", ""))):
                 self._send_json(200, {"ok": True})
             else:
                 self._send_json(404, {"error": f"no pending approval {request.get('id')!r}"})

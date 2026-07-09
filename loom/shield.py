@@ -147,6 +147,7 @@ class PendingApproval:
     created: float = field(default_factory=time.time)
     event: threading.Event = field(default_factory=threading.Event)
     decision: str = ""  # "" until decided, then "approve" or "deny"
+    decided_by: str = ""  # who decided (operator identity), for the audit trail
 
     def to_dict(self) -> dict:
         return {
@@ -229,12 +230,13 @@ class Shield:
         with self.lock:
             return [p.to_dict() for p in self.pending.values() if not p.event.is_set()]
 
-    def decide_pending(self, pending_id: str, approve: bool) -> bool:
+    def decide_pending(self, pending_id: str, approve: bool, who: str = "") -> bool:
         with self.lock:
             p = self.pending.get(pending_id)
             if p is None or p.event.is_set():
                 return False
             p.decision = "approve" if approve else "deny"
+            p.decided_by = who
             p.event.set()
             return True
 
@@ -260,8 +262,11 @@ class Shield:
         except OSError:
             pass  # the inbox is best-effort; the console + control endpoint remain
 
-    def _await_approval(self, name: str, tool_input, rule: str) -> "tuple[bool, str, str]":
-        """File a pending approval and block until decided or timed out."""
+    def _await_approval(self, name: str, tool_input, rule: str) -> "tuple[bool, str, str, str]":
+        """File a pending approval and block until decided or timed out.
+
+        Returns (approved, via, id, who) -- ``who`` is the operator identity
+        that decided, for the audit trail (empty on timeout)."""
         p = PendingApproval(id=uuid.uuid4().hex[:6], tool=name, input=tool_input, rule=rule)
         with self.lock:
             self.pending[p.id] = p
@@ -276,8 +281,8 @@ class Shield:
         with self.lock:
             self.pending.pop(p.id, None)
         if not decided:
-            return False, "timeout", p.id
-        return p.decision == "approve", "operator", p.id
+            return False, "timeout", p.id, ""
+        return p.decision == "approve", "operator", p.id, p.decided_by
 
     # -- screening ---------------------------------------------------------
 
@@ -342,10 +347,11 @@ class Shield:
             return None
         # A tripped tripwire always gets a human: no trust-ratchet shortcut.
         base = {"ts": time.time(), "tool": name, "input": tool_input, "rule": confirm_rule}
-        approved, via, pid = self._await_approval(name, tool_input, confirm_rule)
+        approved, via, pid, who = self._await_approval(name, tool_input, confirm_rule)
         return approved, {
             **base, "id": pid, "action": "approve" if approved else "deny",
             "via": via if via != "operator" else "sequence-operator",
+            **({"by": who} if who else {}),
         }
 
     def _arm_after_rules(self, name: str, tool_input) -> None:
@@ -392,12 +398,14 @@ class Shield:
             return True, {
                 **base, "action": "approve", "via": "ratchet", "streak": self.trust.streak(name)
             }
-        approved, via, pid = self._await_approval(name, tool_input, rule)
+        approved, via, pid, who = self._await_approval(name, tool_input, rule)
         if self.trust is not None and via == "operator":
             # Only explicit human decisions move the ratchet; timeouts don't.
-            self.trust.record(name, approved, {"id": pid, "ts": base["ts"], "rule": rule})
+            self.trust.record(name, approved, {"id": pid, "ts": base["ts"], "rule": rule,
+                                               "by": who})
         return approved, {
-            **base, "id": pid, "action": "approve" if approved else "deny", "via": via
+            **base, "id": pid, "action": "approve" if approved else "deny", "via": via,
+            **({"by": who} if who else {}),
         }
 
     def _assess_risk(self, name: str, tool_input) -> "tuple[float, str, bool]":

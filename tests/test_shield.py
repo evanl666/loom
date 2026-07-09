@@ -607,3 +607,24 @@ def test_sequence_confirm_ignores_the_trust_ratchet(tmp_path):
     # Ratchet streak is 5 >= 2, but a tripped tripwire still demands a human.
     out, events = s.screen(_tool_use("Bash", {"command": "ls"}))
     assert events[-1]["action"] == "deny" and events[-1]["via"] == "timeout"
+
+
+def test_approval_records_operator_identity():
+    s = Shield(confirm=["Bash*"], timeout=5)
+
+    def approve_as_alice():
+        while not s.pending_list():
+            time.sleep(0.01)
+        s.decide_pending(s.pending_list()[0]["id"], approve=True, who="alice")
+
+    t = threading.Thread(target=approve_as_alice)
+    t.start()
+    out, events = s.screen(LIST_FILES)
+    t.join()
+    assert events[0]["action"] == "approve" and events[0]["via"] == "operator"
+    assert events[0]["by"] == "alice"        # who decided is in the audit trail
+
+
+def test_timeout_has_no_operator_identity():
+    out, events = Shield(confirm=["Bash*"], timeout=0.05).screen(LIST_FILES)
+    assert events[0]["via"] == "timeout" and "by" not in events[0]

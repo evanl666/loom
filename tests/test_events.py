@@ -49,10 +49,14 @@ def test_events_flatten_a_trace(tmp_path):
 
 
 def test_otel_wrapping():
-    otel = to_otel({"run": "abc", "kind": "model", "seq": 0, "input_tokens": 5})
+    otel = to_otel({"run": "abc", "kind": "model", "seq": 0, "input_tokens": 5,
+                    "output_tokens": 2})
     assert otel["resource"]["loom.run"] == "abc"
     assert otel["name"] == "loom.model"
-    assert otel["attributes"]["input_tokens"] == 5 and "run" not in otel["attributes"]
+    attrs = otel["attributes"]
+    assert attrs["loom.seq"] == 0
+    assert attrs["loom.tokens.input"] == 5 and attrs["loom.tokens.output"] == 2
+    assert "run" not in attrs and "input_tokens" not in attrs  # namespaced only
 
 
 def test_export_events_to_buffer(tmp_path):
