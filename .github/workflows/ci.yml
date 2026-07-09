@@ -35,3 +35,5 @@ jobs:
           python examples/10_policy.py
           python examples/11_structured_output.py
           python examples/12_impact.py
+      - name: Flight-recorder demo (five acts, offline)
+        run: bash examples/flight-recorder/demo.sh

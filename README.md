@@ -54,6 +54,12 @@ recorded 3 step(s), 1841 tokens -> session.loom.json
   inspect it: loom studio session.loom.json
 ```
 
+Want the whole workflow in one command? The
+[**flight-recorder demo**](examples/flight-recorder/) runs five acts offline —
+a deploy bot fails, the recording pinpoints the stale context that misled it,
+`heal` verifies the fix, `impact` catches the PR that would re-break it, and
+the firewall blocks a credentials grab — in about fifteen seconds, no API key.
+
 For anything longer-lived than one command, run the proxy yourself:
 
 ```
