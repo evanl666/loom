@@ -76,8 +76,9 @@ def test_heal_cli_fixes_and_saves_regression(tmp_path, monkeypatch, capsys):
     )
     out = capsys.readouterr().out
     assert code == 0
-    assert "healed by: redact-" in out
-    assert "saved regression:" in out
+    assert "fixed by redacting" in out and "redact-" in out
+    assert "before:" in out and "after:" in out
+    assert "saved as a regression test" in out
     assert list((tmp_path / "regressions").glob("healed-*.loom.json"))
 
 
