@@ -119,8 +119,10 @@ def packs() -> "list[Pack]":
 
 
 def pack_for(action: Action) -> "Pack | None":
-    """The first registered pack that owns ``action``."""
-    for p in _REGISTRY:
+    """The owning pack -- most recently registered wins, so an opt-in domain
+    pack (sql, browser...) takes precedence over the built-in Coding Pack for
+    actions both could claim (e.g. a DROP TABLE looks destructive to both)."""
+    for p in reversed(_REGISTRY):
         if p.owns(action):
             return p
     return None
@@ -136,7 +138,9 @@ def enrich(action_list: "list[Action]", trace: dict) -> "list[Action]":
     if not _REGISTRY:
         return action_list
     for a in action_list:
-        for p in _REGISTRY:
+        # Most recently registered first (same precedence as pack_for), so a
+        # domain pack's StateDiff wins over the built-in coding fallback.
+        for p in reversed(_REGISTRY):
             if not p.owns(a):
                 continue
             extra = p.capabilities(a.tool, a.input or {})

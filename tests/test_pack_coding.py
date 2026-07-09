@@ -65,7 +65,9 @@ def test_plain_shell_read_has_nothing_to_undo():
 
 
 def test_coding_pack_ignores_business_actions():
-    # A refund is not the coding pack's concern -- a future Commerce pack's.
+    # A refund is not the coding pack's concern -- that's the Support pack's.
+    from loom.packs.coding import CodingPack
+
     refund = {"log": [
         {"seq": 0, "kind": "model", "key": "k",
          "result": {"text": "x", "tool_calls": [{"id": "t", "name": "issue_refund",
@@ -73,5 +75,4 @@ def test_coding_pack_ignores_business_actions():
         {"seq": 1, "kind": "tool:issue_refund", "key": "k2", "result": "ok"},
     ]}
     call = [a for a in actions(refund) if a.type == "call"][0]
-    assert pack_for(call) is None  # coding doesn't own it
-    assert call.state_diff is None
+    assert CodingPack().owns(call) is False
