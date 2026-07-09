@@ -198,16 +198,21 @@ agents it didn't build.
 ### The debugger's verbs
 
 ```
+loom movie trace --open         # the 30-second incident animation (shareable HTML)
 loom why trace --step 17        # why did it do THAT? intent + evidence + honest confidence
 loom map trace                  # side-effect map: everything the run changed or reached
 loom taint trace                # exfiltration paths by VALUE lineage (secret read → sent)
+loom fix from trace --open-pr   # bad run → diagnosis + fix + regression guard, as a PR
 loom diagnose trace --plan      # classify the failure, propose a fix + verify commands
-loom score trace                # behavior scorecard: security/reversibility/policy/evidence/cost
+loom score trace --badge s.svg  # behavior scorecard + a README badge (Agent Safety 92/100)
 loom undo trace --plan          # per-action undo/compensation plans, every domain
 loom fork trace --from-step 17  # replay the prefix free, continue live (+ world-restore plan)
-loom diff v1 v2 --actions       # behavior score 100 → 82 ⬇ (security: exercised money-movement)
+loom diff v1 v2 --html r.html   # side-by-side diff replay: what the new agent does differently
 loom regression from trace      # turn a bad run into fixture + policy + test + CI
 loom policy simulate runs/ --html report.html   # rollout blast radius before you ship a rule
+loom policy diff old new --traces runs/          # what changes when you ship the new policy
+loom alert runs/ --max failure_rate=10           # fleet thresholds → exit 1 + Slack webhook
+loom dsar runs/ --value jane@x.com --scrub       # data-subject request: find & redact
 loom search runs/ "path:pii_access->user_communication"   # ordered leak-path search
 loom provenance trace --gate    # answer claims → evidence; fail CI on unsupported claims
 loom flake --agent m:a -n 10 "task"   # record N runs, find the flakiest step
