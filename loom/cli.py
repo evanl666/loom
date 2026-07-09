@@ -1069,6 +1069,26 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_kpi(args: argparse.Namespace) -> int:
+    """Platform KPIs over a corpus: failure rate, PII/money exposure, cost p95."""
+    from .kpi import compute_kpis, kpi_html, kpi_text
+
+    _import_builtin_packs()
+    paths = _expand_trace_paths(args.paths)
+    if not paths:
+        raise CLIError("no traces found (pass files or a directory of *.loom.json)")
+    k = compute_kpis(paths)
+    if args.json:
+        print(json.dumps(k, indent=2))
+    elif args.html:
+        with open(args.html, "w") as f:
+            f.write(kpi_html(k))
+        print(f"KPI dashboard -> {args.html}")
+    else:
+        print(kpi_text(k))
+    return 0
+
+
 def _cmd_regression(args: argparse.Namespace) -> int:
     """Turn a bad run into a regression guard (fixture + policy + test + CI)."""
     from .regression import build_regression, open_pr
@@ -2310,6 +2330,12 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    kp = sub.add_parser("kpi", help="platform KPIs over a corpus (failure/PII/money/cost trends)")
+    kp.add_argument("paths", nargs="+", help="trace files and/or directories")
+    kp.add_argument("--html", default="", metavar="FILE", help="write a dashboard")
+    kp.add_argument("--json", action="store_true", help="machine-readable")
+    kp.set_defaults(func=_cmd_kpi)
 
     rg = sub.add_parser("regression", help="turn a bad run into a regression guard")
     rgsub = rg.add_subparsers(dest="regression_cmd", required=True)
