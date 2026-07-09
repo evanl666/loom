@@ -97,6 +97,9 @@ def test_safe_mode_sets_profile_scrub_report(tmp_path, capsys):
 
     err = capsys.readouterr().err
     assert "safe mode:" in err and "claude-code-safe" in err and "scrub on" in err
-    # --safe implies --report: the html + incident.md exist
+    # --safe implies --report: html + incident.md + a shareable scrubbed copy
     base = save[: -len(".loom.json")]
     assert os.path.exists(base + ".html") and os.path.exists(base + ".incident.md")
+    shared = base + ".shared.loom.json"
+    assert os.path.exists(shared)
+    assert json.load(open(shared))["scrubbed"] is True

@@ -498,6 +498,21 @@ def _cmd_record(args: argparse.Namespace) -> int:
             with open(md_path, "w") as f:
                 f.write(build_report(data, args.save) + "\n")
             print(f"  report:     {html_path}  +  {md_path}", file=sys.stderr)
+            # A safe-to-share copy: scrub the trace, stamp it, so it can go
+            # straight into an issue alongside the incident report.
+            from .scrub import scrub_trace
+            from .trace import trace_checksum
+
+            shared, found = scrub_trace(data)
+            if "checksum" in shared:
+                shared["checksum"] = trace_checksum(shared)
+            shared["scrubbed"] = True
+            shared_path = base + ".shared.loom.json"
+            with open(shared_path, "w") as f:
+                json.dump(shared, f, indent=2)
+            print(f"  shareable:  {shared_path}"
+                  + (f" ({sum(found.values())} secret(s) redacted)" if found else ""),
+                  file=sys.stderr)
     except (OSError, json.JSONDecodeError):
         print("\nno traffic recorded (did the agent talk to the API?)", file=sys.stderr)
         if "openai" not in args.target:

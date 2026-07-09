@@ -242,15 +242,13 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
         if ch.get("stat"):
             lines.append(f"**Workspace changes:** {ch['stat']}"
                          + (f" · dirty-hash `{ch['dirty_hash']}`" if ch.get("dirty_hash") else ""))
+    # --- fixed five-section skeleton, paste-ready for Slack / a GitHub issue.
+
+    # 1. Executive summary
     lines += ["", "## Executive summary", _executive_summary(facts, data)]
-    lines += [
-        "",
-        f"**Blast radius:** {facts['input_tokens'] + facts['output_tokens']:,} tokens "
-        f"across {facts['model_calls']} model call(s); tools touched: "
-        + (", ".join(f"{n}×{c}" for n, c in sorted(facts["tool_counts"].items())) or "none"),
-        "",
-        "## Timeline of suspects",
-    ]
+
+    # 2. Timeline of suspects
+    lines += ["", "## Timeline of suspects"]
     for seq, s in facts["suspects"]:
         lines.append(f"- [seq {seq}] {s}")
     if facts["final_words"]:
@@ -259,85 +257,65 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
     if not facts["suspects"] and not facts["final_words"]:
         lines.append("- (nothing obviously wrong in the effect log)")
 
+    # 3. What Loom prevented
+    lines += ["", "## What Loom prevented"]
     blocked = [ev for ev in facts["shield_events"] if ev.get("action") == "deny"]
     if blocked:
-        lines += ["", "## What Loom prevented"]
         for ev in blocked:
             sig = f"{ev.get('tool', '?')}({json.dumps(ev.get('input', {}), sort_keys=True, default=str)})"
-            rule = ev.get("rule", "")
-            via = ev.get("via", "")
+            rule, via = ev.get("rule", ""), ev.get("via", "")
             how = (f"sequence rule `{rule}`" if via == "sequence"
                    else f"deny rule `{rule}`" if rule else "the shield default")
             lines.append(f"- 🛡️ blocked `{_clip(sig, 90)}` — {how}")
         egress = any(classify_all_for_event(ev) for ev in blocked)
         lines.append(
-            f"\n**Blast radius:** {len(blocked)} call(s) stopped before reaching the agent; "
+            f"\n{len(blocked)} call(s) stopped before reaching the agent; "
             + ("a network/exfiltration attempt was cut off." if egress
                else "none of them executed."))
+    else:
+        lines.append("- nothing was blocked (no firewall rule fired)"
+                     + ("" if facts["shield_events"] else " — no firewall was active"))
 
-    other = [ev for ev in facts["shield_events"] if ev.get("action") != "deny"]
-    if other:
-        lines += ["", "## Other firewall decisions"]
-        for ev in other:
-            sig = f"{ev.get('tool', '?')}({json.dumps(ev.get('input', {}), sort_keys=True, default=str)})"
-            lines.append(
-                f"- {ev.get('action', '?')} {_clip(sig, 90)}"
-                + (f" — rule `{ev.get('rule', '')}`" if ev.get("rule") else "")
-            )
-
-    if facts["health"]:
-        lines += ["", "## Context health"]
-        lines += [f"- {f}" for f in facts["health"]]
-
-    if facts["secrets"]:
-        lines += ["", "## Secrets sighted"]
-        lines += [f"- {count}× {kind} in tool results" for kind, count in sorted(facts["secrets"].items())]
-
+    # 4. Blast radius
+    lines += ["", "## Blast radius",
+              f"- {facts['input_tokens'] + facts['output_tokens']:,} tokens across "
+              f"{facts['model_calls']} model call(s); tools: "
+              + (", ".join(f"{n}×{c}" for n, c in sorted(facts["tool_counts"].items())) or "none")]
     changes = (data.get("workspace") or {}).get("changes") or {}
     if changes.get("files"):
-        lines += ["", "## Files the agent changed"]
-        for f in changes["files"][:40]:
-            tag = {"M": "modified", "A": "added", "D": "deleted"}.get(
-                f["status"][:1], f["status"])
-            note = "  _(already modified before the run)_" if f.get("pre_existing") else ""
-            lines.append(f"- `{f['path']}` — {tag}{note}")
+        shown = ", ".join(
+            f"`{f['path']}`" + ("*" if f.get("pre_existing") else "")
+            for f in changes["files"][:12])
+        lines.append(f"- files changed: {shown}" + (" … " if len(changes["files"]) > 12 else "")
+                     + "  _(* = already dirty before the run)_")
         if changes.get("agent_exit_code") is not None:
-            lines.append(f"\nThe agent process exited **{changes['agent_exit_code']}**.")
-
+            lines.append(f"- agent process exited {changes['agent_exit_code']}")
     if facts["risk"]:
-        from .risk import recommended_rule
+        lines.append("- risky capabilities exercised: " + ", ".join(sorted(facts["risk"])))
+    if facts["secrets"]:
+        lines.append("- credentials seen in tool results: "
+                     + ", ".join(f"{c}× {k}" for k, c in sorted(facts["secrets"].items())))
+    if facts["health"]:
+        lines += [f"- {f}" for f in facts["health"]]
 
-        lines += ["", "## Risky capabilities exercised"]
-        for cat, example in facts["risk"].items():
-            lines.append(f"- **{cat}**: `{example}`")
-        rules = [recommended_rule(c) for c in facts["risk"] if recommended_rule(c)]
-        if rules:
-            lines += ["", "## Recommended firewall rules"]
-            lines.append("Add to `loom record` (or a `--profile`):")
-            lines += [f"- `--{r}`" for r in rules]
-
-    lines += ["", "## Root cause"]
+    # 5. How to prevent this again
+    lines += ["", "## How to prevent this again"]
     if why_output:
-        lines.append(why_output)
-    else:
-        lines.append(
-            "_(heuristics above; for an investigated narrative that cites seqs, rerun "
-            "with `--why` -- a debugger agent reads the trace through tools)_"
-        )
+        lines += [why_output, ""]
+    from .risk import recommended_rule
 
-    tips = _prevention(facts)
-    if tips:
-        lines += ["", "## Prevention"]
-        lines += [f"- {t}" for t in tips]
-
+    rules = [recommended_rule(c) for c in facts["risk"] if recommended_rule(c)]
+    for r in rules:
+        lines.append(f"- add firewall rule: `--{r}`")
+    for t in _prevention(facts):
+        lines.append(f"- {t}")
     lines += [
-        "",
-        "## Turn this incident into a regression test",
-        "```",
-        f"loom heal {path} --agent <module:attr> --forbid ERROR --save-regression tests/traces",
-        "loom test tests/traces          # now it's CI",
-        "```",
-        f"_Or scrub and keep the recording itself: `loom scrub {path}` then commit it "
-        f"for `loom impact` / `verify_replay`._",
+        "- turn this incident into a regression test:",
+        "  ```",
+        f"  loom heal {path} --agent <module:attr> --forbid ERROR --save-regression tests/traces",
+        "  loom test tests/traces",
+        "  ```",
     ]
+    if not why_output:
+        lines.append("_For an investigated root cause that cites seqs, rerun with `--why`._")
     return "\n".join(lines)

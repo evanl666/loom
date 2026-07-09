@@ -50,14 +50,26 @@ def test_report_names_the_suspects_and_the_blast_radius(tmp_path):
     assert "final words" in report and "Giving up" in report
 
 
+def test_report_has_the_five_canonical_sections_in_order(tmp_path):
+    path, data = _failed_trace(tmp_path)
+    report = build_report(data, path)
+    sections = [ln for ln in report.splitlines() if ln.startswith("## ")]
+    assert sections == [
+        "## Executive summary",
+        "## Timeline of suspects",
+        "## What Loom prevented",
+        "## Blast radius",
+        "## How to prevent this again",
+    ]
+
+
 def test_report_covers_shield_secrets_and_prevention(tmp_path):
     path, data = _failed_trace(tmp_path)
     report = build_report(data, path)
 
-    assert "## What Loom prevented" in report
     assert "🛡️ blocked" in report and "Bash(*curl*)" in report
-    assert "Blast radius:" in report and "stopped before reaching the agent" in report
-    assert "## Secrets sighted" in report and "anthropic-key" in report
+    assert "stopped before reaching the agent" in report
+    assert "credentials seen in tool results: 1× anthropic-key" in report  # blast radius
     assert "--scrub" in report                      # prevention: secrets seen
     assert "tool_timeout" in report                 # prevention: a tool timed out
     assert "loom heal" in report                    # the regression recipe
@@ -70,7 +82,8 @@ def test_clean_run_gets_a_clean_verdict(tmp_path):
     run.save(path)
     report = build_report(json.load(open(path)), path)
     assert "✅ completed" in report
-    assert "## Secrets sighted" not in report
+    assert "nothing was blocked" in report
+    assert "credentials seen" not in report
 
 
 def test_cli_writes_markdown(tmp_path, capsys):
@@ -83,8 +96,9 @@ def test_cli_writes_markdown(tmp_path, capsys):
     assert "Timeline of suspects" in capsys.readouterr().out
 
 
-def test_why_narrative_slots_into_root_cause(tmp_path):
+def test_why_narrative_slots_into_prevention(tmp_path):
     path, data = _failed_trace(tmp_path)
     report = build_report(data, path, why_output="At seq 3 the deploy tool timed out.")
-    assert "## Root cause\nAt seq 3 the deploy tool timed out." in report
-    assert "--why" not in report.split("## Root cause")[1].split("##")[0]
+    prevent = report.split("## How to prevent this again")[1]
+    assert "At seq 3 the deploy tool timed out." in prevent
+    assert "rerun with `--why`" not in prevent  # we have a why narrative already

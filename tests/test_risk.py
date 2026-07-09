@@ -78,8 +78,8 @@ def test_exfiltration_is_critical(tmp_path):
     report = build_report(data, path)
     assert "🔴 critical" in report
     assert "possible exfiltration" in report
-    assert "## Recommended firewall rules" in report
-    assert "Read(*.env*)" in report
+    assert "## How to prevent this again" in report
+    assert "add firewall rule:" in report and "Read(*.env*)" in report
 
 
 def test_destructive_is_critical(tmp_path):

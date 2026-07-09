@@ -83,8 +83,9 @@ def test_record_captures_file_changes(tmp_path, monkeypatch):
     assert "diff" not in changes  # not captured without --capture-diff
 
     report = build_report(json.load(open(save)), save)
-    assert "## Files the agent changed" in report
-    assert "app.py" in report and "exited **0**" in report
+    assert "## Blast radius" in report
+    assert "files changed:" in report and "app.py" in report
+    assert "agent process exited 0" in report
 
 
 def test_capture_diff_embeds_the_patch(tmp_path, monkeypatch):
