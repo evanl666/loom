@@ -36,6 +36,8 @@ from .testing import verify_replay, verify_trace
 from .providers.base import ModelProvider, ModelResponse, ToolCall
 from .tools import Tool, tool
 from .trace import Run, SweepResult
+from . import packs  # noqa: F401  (imports & registers the built-in Coding Pack)
+from .packs import coding  # noqa: F401
 
 __version__ = "0.21.0"
 

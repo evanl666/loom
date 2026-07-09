@@ -71,5 +71,6 @@ def test_no_packs_is_a_noop():
 def test_pack_for_finds_the_owner(sql_pack):
     call = [a for a in actions(_sql_trace()) if a.type == "call"][0]
     assert pack_for(call).name == "sql-test"
-    other = Action(step=9, depth=0, type="call", tool="Read")
+    # a plain business read owned by no registered pack (coding owns fs/shell)
+    other = Action(step=9, depth=0, type="call", tool="get_weather")
     assert pack_for(other) is None
