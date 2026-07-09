@@ -2,8 +2,10 @@
 
 A firewall rule like ``deny 'Bash*'`` is brittle -- the next agent calls its
 shell tool ``run_command`` or ``sh`` and sails through. What you actually mean
-is "deny anything that can execute code". Capabilities make that expressible:
+is "deny anything that can execute code". Capabilities make that expressible,
+and they generalize past coding to any tool-using agent:
 
+  Infrastructure (coding / shell / fs):
     read          reads files / inspects state
     write         creates or edits files
     exec          runs arbitrary code (shell)
@@ -12,16 +14,33 @@ is "deny anything that can execute code". Capabilities make that expressible:
     destructive   deletes or overwrites irreversibly
     idempotent    safe to run more than once (no external side effect)
 
+  Business (data / browser / support / commerce agents):
+    pii_access          reads personal data (customer/patient records, SSNs)
+    database_write      inserts/updates rows in a database
+    browser_submit      submits a form / clicks through in a browser agent
+    user_communication  messages a real user (email, SMS, ticket reply)
+    money_movement      refunds, payments, transfers, charges
+    external_side_effect produces an observable, hard-to-undo effect off-box
+                         (implied by money/user-comm/browser/db writes)
+
 A tool can declare its own capabilities (``@tool(capabilities={"network"})``
 or ``Tool(..., capabilities=...)``); otherwise they're inferred from the call
 the same way ``risk`` classifies it, plus name heuristics. Shield patterns
 that start with ``cap:`` match on capability, so ``--deny 'cap:exec'`` blocks
-every shell-shaped tool regardless of its name.
+every shell-shaped tool -- and ``--confirm 'cap:money_movement'`` gates every
+refund tool -- regardless of name.
 """
 
 from __future__ import annotations
 
 from fnmatch import fnmatchcase as fnmatch
+
+# The canonical capability vocabulary (declared or inferred).
+CAPABILITIES = {
+    "read", "write", "exec", "network", "secret", "destructive", "idempotent",
+    "pii_access", "database_write", "browser_submit", "user_communication",
+    "money_movement", "external_side_effect",
+}
 
 # Risk categories map onto capability names.
 _FROM_RISK = {
@@ -30,7 +49,15 @@ _FROM_RISK = {
     "code-exec": {"exec"},
     "fs-destructive": {"write", "destructive"},
     "fs-write": {"write"},
+    "money-movement": {"money_movement"},
+    "pii-access": {"pii_access", "read"},
+    "user-comm": {"user_communication", "network"},
+    "db-write": {"database_write", "write"},
+    "browser-submit": {"browser_submit"},
 }
+
+# Business actions that are, by definition, observable side effects off-box.
+_EXTERNAL = {"money_movement", "user_communication", "browser_submit", "database_write"}
 
 # Name hints beyond what risk's (display-tuned) globs cover.
 # Name hints are token-anchored (start*, *_token, *_end) rather than bare
@@ -67,6 +94,9 @@ def capabilities(name: str, tool_input=None, declared: "set[str] | None" = None)
         caps.add("exec")
     if any(fnmatch(lname, p) for p in _NETWORK_NAMES):
         caps.add("network")
+    # Any business write/message/payment is an observable external side effect.
+    if caps & _EXTERNAL:
+        caps.add("external_side_effect")
     # A CONFIRMED read-only tool is idempotent. A tool we couldn't classify at
     # all (empty caps) is *unknown*, not safe -- don't claim it's idempotent
     # (e.g. 'prune_logs' matches nothing but is destructive).

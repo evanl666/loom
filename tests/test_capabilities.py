@@ -6,7 +6,7 @@ from loom import Agent, tool
 from loom.capabilities import capabilities, manifest, matches_cap
 from loom.cli import main
 from loom.providers import ScriptedProvider
-from loom.shield import ALLOW, DENY, Shield
+from loom.shield import ALLOW, CONFIRM, DENY, Shield
 
 
 def test_inference_from_name_and_input():
@@ -20,6 +20,31 @@ def test_inference_from_name_and_input():
 def test_shell_synonyms_all_read_as_exec():
     for name in ["sh", "bash", "run_command", "execute_code", "python_repl"]:
         assert "exec" in capabilities(name, {}), name
+
+
+def test_business_capabilities_generalize_past_coding():
+    # The pivot: capabilities describe business risk, not just shell/fs.
+    assert "money_movement" in capabilities("issue_refund", {"amount": 50})
+    assert "pii_access" in capabilities("get_customer", {"id": 7})
+    assert "user_communication" in capabilities("send_email", {"to": "x"})
+    assert "database_write" in capabilities("run_sql", {"query": "INSERT INTO t VALUES (1)"})
+    assert "browser_submit" in capabilities("click_button", {})
+    # money/user-comm/browser/db writes are all observable external side effects
+    for name in ["issue_refund", "send_email", "click_button"]:
+        assert "external_side_effect" in capabilities(name, {}), name
+
+
+def test_business_capability_rules_gate_by_capability():
+    shield = Shield(confirm=["cap:money_movement"], allow=["cap:read"])
+    assert shield.classify("issue_refund", {"amount": 9})[0] == CONFIRM
+    assert shield.classify("process_payment", {})[0] == CONFIRM
+    assert shield.classify("get_status", {})[0] == ALLOW  # a read, not money
+
+
+def test_business_capabilities_do_not_false_positive():
+    # anchored globs: 'recharge_cache' isn't money; 'update_status' display isn't db
+    assert "money_movement" not in capabilities("recharge_cache", {})
+    assert "pii_access" not in capabilities("get_config", {})
 
 
 def test_name_hints_do_not_false_positive_on_substrings():

@@ -119,10 +119,20 @@ def _classify_incident(facts: dict) -> "list[str]":
 
     tags = []
     risk = facts["risk"]
+    # Any channel that carries data off the box: network, an outbound message
+    # to a user, or a browser form submit -- a secret leaving by email is
+    # exfiltration just as much as one leaving by curl.
+    outbound = {"network-egress", "user-comm", "browser-submit"} & set(risk)
     if facts["secrets"] or "secret-read" in risk:
         tags.append("secret exposure")
-    if ("secret-read" in risk or facts["secrets"]) and "network-egress" in risk:
+    if ("secret-read" in risk or facts["secrets"]) and outbound:
         tags.append("possible exfiltration")
+    if "pii-access" in risk and outbound:
+        tags.append("PII exfiltration")
+    if "money-movement" in risk:
+        tags.append("money movement")
+    if "db-write" in risk:
+        tags.append("database mutation")
     if "fs-destructive" in risk:
         tags.append("destructive filesystem action")
     if any("curl" in s or "| sh" in s or "| bash" in s for _, s in facts["suspects"]):
@@ -136,9 +146,11 @@ def _classify_incident(facts: dict) -> "list[str]":
 def _severity(facts: dict) -> str:
     """critical / high / medium / low, from what actually happened."""
     cls = facts["classification"]
-    if "possible exfiltration" in cls or "destructive filesystem action" in cls:
+    if ("possible exfiltration" in cls or "destructive filesystem action" in cls
+            or "PII exfiltration" in cls):
         return "critical"
-    if "secret exposure" in cls or "unsafe shell" in cls or facts["denied"]:
+    if ("secret exposure" in cls or "unsafe shell" in cls or "money movement" in cls
+            or facts["denied"]):
         return "high"
     # medium needs a genuinely dangerous capability or an actual failure --
     # a clean run that merely executed pytest (code-exec) stays low.
