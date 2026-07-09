@@ -18,11 +18,9 @@ networks:
 services:
   proxy:
     image: python:3.12-slim
-    command: >
-      sh -c "pip install -q loom-harness &&
-             loom proxy --host 0.0.0.0 --port 8788
-                  --save /traces/session.loom.json
-                  --deny 'Read(*.env*)'"
+    # Keep the command on one line: a folded (>) YAML scalar preserves the
+    # newlines of more-indented lines, and sh -c runs each as its own command.
+    command: sh -c "pip install -q loom-harness && loom proxy --host 0.0.0.0 --port 8788 --save /traces/session.loom.json --deny 'Read(*.env*)'"
     networks: [jail, egress]
     volumes:
       - ./traces:/traces
