@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "model": "rule",
   "system": "You are a city inspector.",
   "prompt": "Check Berlin.",
@@ -52,5 +52,6 @@
       },
       "depth": 0
     }
-  ]
+  ],
+  "checksum": "sha256:60bd71df00f5e175b316ce1d0003e6fea3ba0198fed318ca0c53708d7ed6fe99"
 }

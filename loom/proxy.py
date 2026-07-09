@@ -200,8 +200,12 @@ class WireRecorder:
         }
 
     def save(self, path: str) -> None:
+        from .trace import trace_checksum
+
+        data = self.to_dict()
+        data["checksum"] = trace_checksum(data)
         with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2)
 
 
 def compact_wirelog(wirelog_path: str, save_path: str) -> "WireRecorder":

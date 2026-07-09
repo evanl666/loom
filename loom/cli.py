@@ -629,6 +629,10 @@ def _cmd_scrub(args: argparse.Namespace) -> int:
         out = args.path[: -len(".loom.json")] + ".scrubbed.loom.json"
     else:
         out = args.path + ".scrubbed"
+    if "checksum" in clean:  # scrubbing is a deliberate edit: re-stamp it
+        from .trace import trace_checksum
+
+        clean["checksum"] = trace_checksum(clean)
     with open(out, "w") as f:
         json.dump(clean, f, indent=2)
     print(f"scrubbed {total} secret(s) -> {out}")
@@ -674,6 +678,32 @@ def _cmd_trust(args: argparse.Namespace) -> int:
         if ids:
             line += f"  (recent approvals: {ids})"
         print(line)
+    return 0
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    """Bring traces to the current format version (and re-stamp checksums)."""
+    from .migrate import migrate
+
+    agent = None
+    if args.agent:
+        agent, err = _load_agent(args.agent)
+        if agent is None:
+            print(f"loom: {err}", file=sys.stderr)
+            return 2
+
+    paths = _expand_trace_paths(args.paths)
+    if not paths:
+        print("no traces found", file=sys.stderr)
+        return 2
+    for path in paths:
+        _load_trace_json(path)  # friendly errors for non-traces
+        try:
+            rekeyed, out = migrate(path, agent=agent, out=args.output or None)
+        except ValueError as e:
+            raise CLIError(str(e))
+        detail = f"{rekeyed} effect key(s) recomputed" if rekeyed else "re-stamped"
+        print(f"migrated {path} -> {out}  ({detail})")
     return 0
 
 
@@ -890,6 +920,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
     ap.set_defaults(func=_cmd_approve)
+
+    mg = sub.add_parser("migrate", help="bring traces to the current format version")
+    mg.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
+    mg.add_argument("--agent", default="",
+                    help="module:attr of the recording agent (harness traces only)")
+    mg.add_argument("-o", "--output", default="",
+                    help="write here instead of in place (single trace only)")
+    mg.set_defaults(func=_cmd_migrate)
 
     se = sub.add_parser("search", help="query a directory of traces (auto-indexed)")
     se.add_argument("directory")

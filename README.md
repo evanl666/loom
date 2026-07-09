@@ -723,12 +723,15 @@ diverge, with a pointer to `loom impact` for the per-run report.
 `replay(strict=False)` remains for deliberately walking an old log with a
 changed config (e.g. replaying without the original tools).
 
-**Trace format stability.** Every trace carries a `version` field. Fields are
-only ever *added* within a version — readers ignore unknown keys, so older
-looms read newer traces of the same version fine. The version bumps only when
-the meaning of existing data changes (v2: tool schemas joined the effect-key
-hash), and loading a trace from a different version warns with exactly what
-to expect instead of failing or silently lying.
+**Trace format stability.** Every trace carries a `version` field and a
+content `checksum`. Fields are only ever *added* within a version — readers
+ignore unknown keys, so older looms read newer traces of the same version
+fine. The version bumps only when the meaning of existing data changes (v2:
+tool schemas joined the effect-key hash); loading a trace from a different
+version warns with exactly what to expect, and `loom migrate` brings old
+traces forward (recomputing keys via the recording agent). A hand-edited or
+damaged trace is visible immediately — the checksum stops matching. Full
+spec: [docs/trace-format.md](docs/trace-format.md).
 
 ## Sweep: cheap counterfactuals
 

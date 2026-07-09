@@ -28,6 +28,33 @@ from .providers.base import ModelResponse
 TRACE_VERSION = 2
 
 
+def trace_checksum(data: dict) -> str:
+    """Content hash of a trace dict (excluding the checksum field itself)."""
+    body = {k: v for k, v in sorted(data.items()) if k != "checksum"}
+    digest = hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _check_integrity(data: dict, path: str) -> None:
+    """Warn (never fail) when a stored checksum doesn't match the content.
+
+    Tamper-EVIDENT, not tamper-proof: anyone can edit a trace and recompute
+    the hash, but an edit that forgets to is visible -- which catches the
+    common cases (hand-edited fixtures, truncated copies, merge damage).
+    """
+    stored = data.get("checksum")
+    if stored and stored != trace_checksum(data):
+        import warnings
+
+        warnings.warn(
+            f"{path} was modified after it was written (checksum mismatch). "
+            f"If the edit was deliberate, re-stamp it: loom migrate {path}",
+            stacklevel=3,
+        )
+
+
 def _check_trace_version(data: dict, path: str) -> None:
     """Warn (never fail) when a trace's format version isn't ours."""
     import warnings
@@ -180,9 +207,11 @@ class Run:
         }
 
     def save(self, path: str) -> None:
-        """Write the trace to a git-friendly JSON file."""
+        """Write the trace to a git-friendly JSON file (content-checksummed)."""
+        data = self.to_dict()
+        data["checksum"] = trace_checksum(data)
         with open(path, "w") as f:
-            json.dump(self.to_dict(), f, indent=2)
+            json.dump(data, f, indent=2)
 
     @classmethod
     def load(cls, path: str, agent: "Any | None" = None) -> "Run":
@@ -190,6 +219,7 @@ class Run:
         with open(path) as f:
             data = json.load(f)
         _check_trace_version(data, path)
+        _check_integrity(data, path)
         log = [EffectEntry.from_dict(e) for e in data["log"]]
         rec = Recorder.replay(log)
         run = cls(

@@ -43,6 +43,16 @@ def verify_trace(path: str) -> list[str]:
 
     if not data.get("episodes") and not data.get("prompt"):
         problems.append("missing episodes/prompt")
+
+    stored = data.get("checksum")
+    if stored:
+        from .trace import trace_checksum
+
+        if stored != trace_checksum(data):
+            problems.append(
+                "checksum mismatch: the trace was modified after it was written "
+                "(re-stamp a deliberate edit with `loom migrate`)"
+            )
     return problems
 
 
