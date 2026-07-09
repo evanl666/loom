@@ -40,6 +40,10 @@ from typing import Any
 
 from ..action import Action, StateDiff
 
+# A throwaway action for hooks (like the default restore) that need to reuse a
+# pack's advisory replay_hint but have no specific action in hand.
+_STUB_ACTION = Action(step=-1, depth=0, type="call")
+
 
 @dataclass
 class UndoPlan:
@@ -63,10 +67,44 @@ class UndoPlan:
                 "commands": self.commands, "reversible": self.reversible}
 
 
+@dataclass
+class RestorePlan:
+    """How to put a domain's WORLD back before replaying/forking a run.
+
+    Replaying a trace rewinds the model and tool log deterministically, but not
+    the outside world -- the files, database rows, or browser session the agent
+    changed. A pack describes (and, where it can, executes) the restore:
+    ``executable`` is True only when ``commands`` will actually reproduce the
+    snapshot; otherwise the plan is advisory (a human runs the steps).
+    """
+
+    kind: str            # "git" | "manual" | "noop"
+    summary: str
+    commands: list[str] = field(default_factory=list)
+    executable: bool = False
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "summary": self.summary,
+                "commands": self.commands, "executable": self.executable}
+
+
 class Pack:
     """Base class for a domain pack. Every hook is optional (safe defaults)."""
 
     name: str = "pack"
+
+    def snapshot(self, trace: dict) -> "dict | None":
+        """Capture the world-state reference this domain needs to restore later
+        (e.g. the git commit a coding run started from). None when the trace
+        didn't record enough to pin the world."""
+        return None
+
+    def restore(self, snapshot: "dict | None") -> "RestorePlan | None":
+        """How to put the world back to ``snapshot`` before replaying. Default:
+        fall back to the advisory ``replay_hint`` -- honest that the restore is
+        manual for domains Loom doesn't itself capture."""
+        hint = self.replay_hint(_STUB_ACTION)
+        return RestorePlan("manual", hint, executable=False) if hint else None
 
     def owns(self, action: Action) -> bool:
         """Does this pack handle ``action``? Default: no."""
@@ -157,6 +195,23 @@ def undo_plan(action: Action, trace: dict) -> "UndoPlan | None":
     """The undo plan from whichever pack owns ``action`` (or None)."""
     p = pack_for(action)
     return p.undo(action, trace) if p else None
+
+
+def restore_plans(action_list: "list[Action]", trace: dict) -> "list[tuple[str, RestorePlan]]":
+    """(pack_name, RestorePlan) for every domain a run touched -- how to put
+    each world back before replaying/forking. One plan per pack, in the order
+    the domains first appear. Used by ``loom fork``."""
+    seen: set = set()
+    out: list[tuple[str, RestorePlan]] = []
+    for a in action_list:
+        p = pack_for(a)
+        if p is None or p.name in seen:
+            continue
+        seen.add(p.name)
+        plan = p.restore(p.snapshot(trace))
+        if plan is not None:
+            out.append((p.name, plan))
+    return out
 
 
 def install_builtin() -> None:

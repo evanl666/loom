@@ -20,7 +20,7 @@ from __future__ import annotations
 from fnmatch import fnmatchcase as fnmatch
 
 from ..action import Action, StateDiff
-from . import Pack, UndoPlan, register
+from . import Pack, RestorePlan, UndoPlan, register
 
 # Risk categories that are unmistakably coding-infrastructure.
 _CODING_RISK = {"secret-read", "code-exec", "fs-destructive", "fs-write"}
@@ -98,6 +98,30 @@ class CodingPack(Pack):
     def _command(action: Action) -> str:
         inp = action.input
         return inp.get("command", "") if isinstance(inp, dict) else ""
+
+    def snapshot(self, trace: dict) -> "dict | None":
+        # The world a coding run started from IS pinned in the trace: the git
+        # commit it recorded against (plus whether the tree was dirty).
+        g = (trace.get("workspace") or {}).get("git") or {}
+        if not g.get("commit"):
+            return None
+        return {"commit": g["commit"], "branch": g.get("branch", ""),
+                "dirty": bool(g.get("dirty"))}
+
+    def restore(self, snapshot: "dict | None") -> "RestorePlan | None":
+        if not snapshot or not snapshot.get("commit"):
+            return RestorePlan(
+                "manual", "this trace didn't record a git commit -- check out the "
+                          "source state the run assumed before replaying", executable=False)
+        commit = snapshot["commit"][:12]
+        cmds = [f"git checkout {commit}"]
+        note = f"check out the commit the run recorded against ({commit})"
+        if snapshot.get("dirty"):
+            # A dirty record can't be reproduced from git alone -- be honest.
+            return RestorePlan("git", note + " -- WARNING: recorded on a dirty tree, "
+                               "so uncommitted changes can't be reproduced from git",
+                               cmds, executable=False)
+        return RestorePlan("git", note, cmds, executable=True)
 
     @staticmethod
     def _recorded_status(trace: dict, path: str) -> str:

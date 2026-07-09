@@ -58,8 +58,8 @@ def test_cli_fork_plan_shows_replay_hints_without_an_agent(tmp_path, capsys):
     assert main(["fork", path, "--from-step", "2"]) == 0
     out = capsys.readouterr().out
     assert "fork at turn 1 (step 2)" in out
-    assert "[sql] restore the database" in out       # the pack's replay hint
-    assert "run.fork(at=1" in out                    # the Python snippet
+    assert "[sql] (manual) restore the database" in out   # the pack's restore plan
+    assert "run.fork(at=1" in out                          # the Python snippet
 
 
 def test_cli_fork_continues_live_with_an_agent(tmp_path, capsys, monkeypatch):

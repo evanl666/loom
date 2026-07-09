@@ -1004,24 +1004,22 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     # Ask the owning packs how to restore external state before re-running:
     # replaying is free, but the WORLD (db, browser, customers) isn't rewound.
     from .action import actions as _actions
-    from .packs import pack_for
+    from .packs import restore_plans
 
     _import_builtin_packs()
-    hints: dict[str, str] = {}
-    for a in _actions(data):
-        if a.type == "call" and a.step >= fork_seq:
-            p = pack_for(a)
-            if p is not None:
-                hint = p.replay_hint(a)
-                if hint:
-                    hints.setdefault(p.name, hint)
+    # Only the domains touched from the fork point onward need restoring.
+    touched = [a for a in _actions(data) if a.type == "call" and a.step >= fork_seq]
+    plans = restore_plans(touched, data)
 
     print(f"fork at turn {turn} (step {fork_seq}): "
           f"steps 0..{max(fork_seq - 1, 0)} replay free, the rest runs live")
-    if hints:
+    if plans:
         print("restore external state before continuing live:")
-        for name, hint in sorted(hints.items()):
-            print(f"  [{name}] {hint}")
+        for name, plan in plans:
+            mark = "▶ runnable" if plan.executable else "manual"
+            print(f"  [{name}] ({mark}) {plan.summary}")
+            for c in plan.commands:
+                print(f"      $ {c}")
 
     if not args.agent:
         print("\nno --agent given (module:attr), so nothing was run. To continue live:")

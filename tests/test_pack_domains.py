@@ -128,3 +128,57 @@ def test_domain_packs_are_opt_in():
         from loom.packs import install_builtin
 
         install_builtin()  # restore the default registry for later tests
+
+
+# -- snapshot / restore contract ---------------------------------------------
+
+def test_coding_snapshot_restore_is_runnable_on_a_clean_tree(domain_packs):
+    from loom.packs.coding import CodingPack
+
+    trace = {"workspace": {"git": {"commit": "abc1234567890", "branch": "main",
+                                   "dirty": False}}}
+    snap = CodingPack().snapshot(trace)
+    assert snap["commit"] == "abc1234567890"
+    plan = CodingPack().restore(snap)
+    assert plan.kind == "git" and plan.executable is True
+    assert plan.commands == ["git checkout abc123456789"]
+
+
+def test_coding_restore_on_a_dirty_tree_is_not_executable(domain_packs):
+    from loom.packs.coding import CodingPack
+
+    plan = CodingPack().restore(
+        CodingPack().snapshot({"workspace": {"git": {"commit": "deadbeef1234", "dirty": True}}}))
+    assert plan.executable is False and "dirty" in plan.summary
+
+
+def test_domain_packs_give_honest_manual_restore(domain_packs):
+    # sql/browser/support can't be reproduced from the trace: manual, advisory.
+    from loom.packs.sql import SqlPack
+
+    plan = SqlPack().restore(SqlPack().snapshot({}))
+    assert plan.kind == "manual" and plan.executable is False
+    assert "database" in plan.summary
+
+
+def test_restore_plans_one_per_touched_domain(domain_packs):
+    from loom.action import actions
+    from loom.packs import restore_plans
+
+    trace = {
+        "workspace": {"git": {"commit": "abc1234567890", "dirty": False}},
+        "log": [
+            {"seq": 0, "kind": "model", "key": "k",
+             "result": {"tool_calls": [{"id": "t", "name": "Edit",
+                        "input": {"file_path": "a.py"}}], "stop_reason": "tool_use", "usage": {}}},
+            {"seq": 1, "kind": "tool:Edit", "key": "k2", "result": "edited"},
+            {"seq": 2, "kind": "model", "key": "k3",
+             "result": {"tool_calls": [{"id": "t2", "name": "run_query",
+                        "input": {"query": "INSERT INTO t VALUES (1)"}}],
+                        "stop_reason": "tool_use", "usage": {}}},
+            {"seq": 3, "kind": "tool:run_query", "key": "k4", "result": "1 row"},
+        ],
+    }
+    plans = dict(restore_plans([a for a in actions(trace) if a.type == "call"], trace))
+    assert plans["coding"].executable is True       # git checkout
+    assert plans["sql"].executable is False         # manual DB snapshot
