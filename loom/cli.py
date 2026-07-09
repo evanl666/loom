@@ -1069,6 +1069,31 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_regression(args: argparse.Namespace) -> int:
+    """Turn a bad run into a regression guard (fixture + policy + test + CI)."""
+    from .regression import build_regression, open_pr
+
+    _load_trace_json(args.path)  # friendly error for non-traces
+    result = build_regression(args.path, args.output or "loom-regression")
+    print(f"regression guard -> {result['outdir']}/")
+    for f in result["files"]:
+        print(f"  {f}")
+    print(f"\n{result['risky']} risky action(s) captured. Run it:")
+    print(f"  loom test {result['outdir']}/{result['fixture']}")
+    print(f"  pytest {result['outdir']}/{result['test']}")
+    if args.open_pr:
+        ok, msg = open_pr(result["outdir"], _slug_from(args.path))
+        print(("\nopened PR: " if ok else "\ncould not open PR: ") + msg)
+        return 0 if ok else 1
+    return 0
+
+
+def _slug_from(path: str) -> str:
+    from .regression import _slug
+
+    return _slug(path)
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     """The behavior scorecard: security / side-effect / reversibility / ..."""
     from .diff import describe_score, score_breakdown
@@ -2264,6 +2289,15 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    rg = sub.add_parser("regression", help="turn a bad run into a regression guard")
+    rgsub = rg.add_subparsers(dest="regression_cmd", required=True)
+    rg_from = rgsub.add_parser("from", help="generate fixture + policy + test + CI from a trace")
+    rg_from.add_argument("path")
+    rg_from.add_argument("-o", "--output", default="", help="output dir (default loom-regression/)")
+    rg_from.add_argument("--open-pr", action="store_true", dest="open_pr",
+                         help="create a branch + PR with the guard (needs git + gh)")
+    rg_from.set_defaults(func=_cmd_regression)
 
     sc = sub.add_parser("score", help="behavior scorecard: security/side-effect/reversibility/...")
     sc.add_argument("path")
