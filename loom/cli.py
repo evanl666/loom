@@ -1816,6 +1816,24 @@ def _cmd_policy(args: argparse.Namespace) -> int:
             print(simulate_text(result))
         return 1 if args.fail_on_deny and result["denied"] else 0
 
+    if args.policy_cmd == "diff":
+        # The rollout diff: what changes if the NEW policy replaces the OLD?
+        from .policy_file import simulate_diff, simulate_diff_text
+
+        def build(spec: str):
+            import os
+
+            if os.path.isfile(spec):
+                return Shield(**to_shield_kwargs(resolve(policy_path=spec)))
+            return Shield(**to_shield_kwargs(resolve(profile=spec)))
+
+        paths = _expand_trace_paths(args.traces)
+        if not paths:
+            raise CLIError("no traces found (pass --traces files/dirs)")
+        d = simulate_diff(build(args.old), build(args.new), paths)
+        print(simulate_diff_text(d))
+        return 1 if (args.fail_on_new_deny and d["newly_denied"]) else 0
+
     if args.policy_cmd == "explain":
         # Explain how the policy would classify each tool call in one trace.
         shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
@@ -2376,6 +2394,15 @@ def build_parser() -> argparse.ArgumentParser:
     po_exp.add_argument("--profile", default="")
     po_exp.add_argument("--policy", default="")
     po_exp.set_defaults(func=_cmd_policy)
+    po_diff = posub.add_parser("diff", help="rollout diff: what changes when NEW replaces OLD?")
+    po_diff.add_argument("old", help="a policy file or built-in profile name")
+    po_diff.add_argument("new", help="a policy file or built-in profile name")
+    po_diff.add_argument("--traces", nargs="+", required=True,
+                         help="trace files and/or directories to simulate over")
+    po_diff.add_argument("--fail-on-new-deny", action="store_true", dest="fail_on_new_deny",
+                         help="exit 1 if any run becomes newly denied (CI gate)")
+    po_diff.set_defaults(func=_cmd_policy)
+
     po_lint = posub.add_parser("lint", help="catch rules that don't do what they look like")
     po_lint.add_argument("--policy", default="", help="policy file to lint")
     po_lint.add_argument("--profile", default="", help="or a built-in profile to lint")

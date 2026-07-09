@@ -503,3 +503,71 @@ def simulate_html(r: dict, title: str = "Loom policy simulation") -> str:
 <h2>Per-rule hits</h2><table><tr><th>rule</th><th>action</th><th>hits</th><th>example</th></tr>{rule_rows or '<tr><td colspan=4>none</td></tr>'}</table>
 <h2>By capability</h2><table><tr><th>capability</th><th>deny</th><th>confirm</th></tr>{cap_rows or '<tr><td colspan=3>none</td></tr>'}</table>
 </body></html>"""
+
+
+def simulate_diff(shield_old, shield_new, paths: "list[str]") -> dict:
+    """The rollout diff between two policy versions over one corpus.
+
+    Answers "what changes if I ship the new policy?": which runs become
+    newly denied / newly confirmed, which are released (previously denied,
+    now clean), and which rules drive the change.
+    """
+    old = simulate(shield_old, paths)
+    new = simulate(shield_new, paths)
+
+    def verdicts(r):
+        v = {}
+        for d in r["denied"]:
+            v[d["path"]] = "deny"
+        for p in r["confirm_only"]:
+            v[p] = "confirm"
+        return v
+
+    vo, vn = verdicts(old), verdicts(new)
+    every = sorted(set(vo) | set(vn))
+    newly_denied = [p for p in every if vn.get(p) == "deny" and vo.get(p) != "deny"]
+    newly_confirmed = [p for p in every
+                       if vn.get(p) == "confirm" and vo.get(p) not in ("deny", "confirm")]
+    released = [p for p in every if vo.get(p) == "deny" and vn.get(p) != "deny"]
+
+    old_rules = {(h["action"], h["rule"]): h["count"] for h in old["rule_hits"]}
+    rule_changes = []
+    for h in new["rule_hits"]:
+        delta = h["count"] - old_rules.pop((h["action"], h["rule"]), 0)
+        if delta:
+            rule_changes.append({**h, "delta": delta})
+    for (action, rule), count in old_rules.items():  # rules that stopped firing
+        rule_changes.append({"action": action, "rule": rule, "count": 0,
+                             "example": "", "delta": -count})
+
+    return {
+        "runs": new["runs"],
+        "newly_denied": newly_denied,
+        "newly_confirmed": newly_confirmed,
+        "released": released,
+        "rule_changes": sorted(rule_changes, key=lambda r: -abs(r["delta"])),
+        "old": {"denied": len(old["denied"]), "confirm": len(old["confirm_only"])},
+        "new": {"denied": len(new["denied"]), "confirm": len(new["confirm_only"])},
+    }
+
+
+def simulate_diff_text(d: dict) -> str:
+    import os
+
+    lines = [f"policy diff over {d['runs']} run(s): "
+             f"denied {d['old']['denied']} → {d['new']['denied']}, "
+             f"confirmed {d['old']['confirm']} → {d['new']['confirm']}"]
+    for label, paths, mark in (("newly DENIED", d["newly_denied"], "🚫"),
+                               ("newly confirmed", d["newly_confirmed"], "⏸️"),
+                               ("released (no longer denied)", d["released"], "✅")):
+        if paths:
+            lines.append(f"\n  {mark} {label}: {len(paths)} run(s)")
+            lines += [f"      {os.path.basename(p)}" for p in paths[:5]]
+    if d["rule_changes"]:
+        lines.append("\n  rule-hit changes:")
+        for r in d["rule_changes"][:10]:
+            sign = "+" if r["delta"] > 0 else ""
+            lines.append(f"    {sign}{r['delta']:>3}  {r['action']:8} {r['rule']}")
+    if not (d["newly_denied"] or d["newly_confirmed"] or d["released"]):
+        lines.append("  no run changes verdict under the new policy")
+    return "\n".join(lines)

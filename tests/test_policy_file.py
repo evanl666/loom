@@ -310,3 +310,26 @@ def test_cli_simulate_writes_html_and_md(tmp_path, capsys):
     assert "🛡️ Loom policy simulation" in md.read_text()
     out = capsys.readouterr().out
     assert "dashboard ->" in out and "(markdown) ->" in out
+
+
+def test_policy_diff_reports_rollout_changes(tmp_path, capsys):
+    _save_run(tmp_path, "envread.loom.json", "Read", {"file_path": "/app/.env"})
+    _save_run(tmp_path, "clean.loom.json", "Read", {"file_path": "src/x.py"})
+    old = tmp_path / "old.yml"
+    new = tmp_path / "new.yml"
+    old.write_text("default: allow\n")
+    new.write_text("default: allow\ndeny:\n  - Read(*.env*)\n")
+
+    assert main(["policy", "diff", str(old), str(new), "--traces", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "denied 0 → 1" in out
+    assert "newly DENIED: 1 run(s)" in out and "envread.loom.json" in out
+    assert "+  1  deny     Read(*.env*)" in out
+
+    # gate: newly denied runs fail CI
+    assert main(["policy", "diff", str(old), str(new), "--traces", str(tmp_path),
+                 "--fail-on-new-deny"]) == 1
+    capsys.readouterr()
+    # reversed direction: the run is RELEASED
+    assert main(["policy", "diff", str(new), str(old), "--traces", str(tmp_path)]) == 0
+    assert "released (no longer denied): 1 run(s)" in capsys.readouterr().out
