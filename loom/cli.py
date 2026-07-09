@@ -480,7 +480,8 @@ def _cmd_record(args: argparse.Namespace) -> int:
 
         after_snap = diff_snapshot(os.getcwd())
         server.recorder.workspace["changes"] = changes_since(
-            before_snap, after_snap, agent_exit_code=code, capture_diff=args.capture_diff
+            before_snap, after_snap, agent_exit_code=code, capture_diff=args.capture_diff,
+            cwd=os.getcwd(),
         )
     server.shutdown()
     server.finalize()
@@ -862,6 +863,33 @@ def _cmd_scrub(args: argparse.Namespace) -> int:
     with open(out, "w") as f:
         json.dump(clean, f, indent=2)
     print(f"scrubbed {total} secret(s) -> {out}")
+    return 0
+
+
+def _cmd_undo(args: argparse.Namespace) -> int:
+    """Revert the file changes an agent made, from the trace's workspace record."""
+    import os
+
+    from .undo import undo
+
+    data = _load_trace_json(args.path)
+    ok, log = undo(data, os.getcwd(), only=args.only, dry_run=args.dry_run, force=args.force)
+    for line in log:
+        print(line)
+    if not ok:
+        return 1
+    return 0
+
+
+def _cmd_pack(args: argparse.Namespace) -> int:
+    """Bundle a trace + incident + studio + patch into a shareable .loompack."""
+    from .pack import build_pack
+
+    _load_trace_json(args.path)  # friendly error for non-traces
+    out, redacted = build_pack(args.path, out=args.output or None)
+    note = f" ({redacted} secret(s) scrubbed)" if redacted else " (secrets scrubbed)"
+    print(f"packed -> {out}{note}")
+    print("  a self-contained incident bundle: replay, studio, incident, patch, manifest")
     return 0
 
 
@@ -1585,6 +1613,20 @@ def build_parser() -> argparse.ArgumentParser:
     lk.add_argument("--open", action="store_true", help="open the dashboard in a browser")
     lk.set_defaults(func=_cmd_lake)
 
+    ud = sub.add_parser("undo", help="revert the file changes an agent made (from its trace)")
+    ud.add_argument("path")
+    ud.add_argument("--only", default="", help="only revert paths under this prefix")
+    ud.add_argument("--dry-run", action="store_true", dest="dry_run",
+                    help="show what would be reverted, change nothing")
+    ud.add_argument("--force", action="store_true",
+                    help="undo even if the tree changed since the recording")
+    ud.set_defaults(func=_cmd_undo)
+
+    pk = sub.add_parser("pack", help="bundle trace + incident + studio + patch into a .loompack")
+    pk.add_argument("path")
+    pk.add_argument("-o", "--output", default="", help="output path (default *.loompack)")
+    pk.set_defaults(func=_cmd_pack)
+
     sh = sub.add_parser("share", help="make a shareable copy: scrub, then refuse if secrets remain")
     sh.add_argument("path")
     sh.add_argument("-o", "--output", default="", help="output path (default *.shared.loom.json)")
@@ -1623,6 +1665,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: "list[str] | None" = None) -> int:
+    import sys as _sys
+
+    argv = list(argv) if argv is not None else _sys.argv[1:]
+    # `loom claude "fix the tests"` is the tightest entrypoint: sugar for
+    # `loom record --safe claude "..."` (firewall + scrub + report).
+    if argv and argv[0] in AGENTS:
+        argv = ["record", "--safe", argv[0]] + argv[1:]
+
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)

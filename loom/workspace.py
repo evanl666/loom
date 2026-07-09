@@ -76,17 +76,31 @@ def diff_snapshot(cwd: str) -> dict:
     }
 
 
+def _file_sha(cwd: str, path: str) -> str:
+    """Content hash of a file, so undo can tell if it still holds what the
+    agent left. '' if it doesn't exist (a deletion)."""
+    try:
+        with open(os.path.join(cwd, path), "rb") as f:
+            return hashlib.sha256(f.read()).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
 def changes_since(before: dict, after: dict, agent_exit_code=None,
-                  capture_diff: bool = False) -> dict:
+                  capture_diff: bool = False, cwd: "str | None" = None) -> dict:
     """What the agent did to the workspace, from before/after snapshots.
 
     Files present in the after-diff but not the before-diff are the agent's;
     files dirty in both are flagged ``pre_existing`` so the reader can tell
-    the agent's work from what was already uncommitted.
+    the agent's work from what was already uncommitted. Each file also gets a
+    content ``sha`` (at record time) so ``loom undo`` can revert only files
+    that still hold exactly what the agent left.
     """
+    cwd = cwd or os.getcwd()
     before_paths = {p for _, p in before.get("files", [])}
     changed = [
-        {"status": s, "path": p, "pre_existing": p in before_paths}
+        {"status": s, "path": p, "pre_existing": p in before_paths,
+         "sha": _file_sha(cwd, p)}
         for s, p in after.get("files", [])
     ]
     stat_summary = ""

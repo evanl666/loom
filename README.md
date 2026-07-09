@@ -37,9 +37,15 @@ loom proxy --replay session.loom.json      # serve it back — zero API calls, f
 loom test  session.loom.json               # it's now a regression test
 ```
 
-`loom record claude "..."` is the shortcut; `loom record -- <any command>`
-records anything unmodified. Run `loom doctor` first to check your agent will
-route through the proxy.
+`loom claude "fix the failing test"` is the tightest form (sugar for `loom
+record --safe claude "..."`); `loom record -- <any command>` records anything
+unmodified. Run `loom doctor` first to check your agent will route through the
+proxy.
+
+**Made a mess?** `loom undo session.loom.json` reverts exactly the files the
+agent changed (leaving your own uncommitted work alone), and `loom pack
+session.loom.json` bundles the scrubbed trace + incident report + Studio + the
+patch into one `.loompack` you can drop into an issue.
 
 ![Loom demo: record, read, replay, rewind](docs/demo.gif)
 

@@ -103,3 +103,19 @@ def test_safe_mode_sets_profile_scrub_report(tmp_path, capsys):
     shared = base + ".shared.loom.json"
     assert os.path.exists(shared)
     assert json.load(open(shared))["scrubbed"] is True
+
+
+def test_loom_claude_alias_rewrites_to_record_safe(monkeypatch):
+    import loom.cli as c
+
+    captured = {}
+    monkeypatch.setattr(c, "_cmd_record",
+                        lambda a: captured.update(safe=a.safe, command=list(a.command)) or 0)
+    assert c.main(["claude", "fix the failing test"]) == 0
+    assert captured["safe"] is True
+    assert captured["command"] == ["claude", "fix the failing test"]
+
+    # a real subcommand is NOT shadowed by the alias
+    captured.clear()
+    monkeypatch.setattr(c, "_cmd_replay", lambda a: 0)
+    assert c.main(["replay", "x"]) == 0 and not captured
