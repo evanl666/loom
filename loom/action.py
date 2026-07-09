@@ -280,4 +280,11 @@ def actions(source: Any) -> list[Action]:
             policy=PolicyDecision("deny", ev.get("rule", ""), ev.get("via", "rule"),
                                   ev.get("by", "")),
         ))
+
+    # Let any registered domain packs enrich the Actions (StateDiff, domain
+    # capabilities). A no-op when no packs are registered, so the core never
+    # depends on a pack existing.
+    from . import packs as _packs
+
+    _packs.enrich(out, data)
     return out

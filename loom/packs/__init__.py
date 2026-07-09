@@ -1,0 +1,155 @@
+"""Packs: teach Loom about a *domain* of agent without changing the core.
+
+Loom's core is domain-neutral: the Effect boundary captures actions, the
+Action schema describes them, Shield gates them. What the core can't know is
+how a *specific world* works -- how to diff a database, screenshot a browser,
+or undo a CRM write. That knowledge lives in a **Pack**.
+
+A Pack is a small plug-in with optional hooks; implement only what your domain
+needs:
+
+    class SqlPack(Pack):
+        name = "sql"
+        def owns(self, action):        # which actions are mine?
+            return "database_write" in action.capabilities
+        def capabilities(self, name, tool_input):   # domain risk hints
+            return {"database_write"} if "insert" in name.lower() else set()
+        def state_diff(self, action, trace):         # how the world changed
+            return StateDiff("database", f"+{action.observation.raw['rows']} rows")
+        def undo(self, action, trace):               # how to reverse it
+            return UndoPlan("compensate", "DELETE the inserted rows", [...])
+
+Register it (``register(SqlPack())``) and every Action the debugger builds is
+enriched: domain capabilities merged in, a StateDiff attached, an undo plan
+available. The Coding Pack ships built-in; Browser / SQL / Support packs plug
+in the same way -- which is what makes Loom a debugger for agents it didn't
+build.
+
+The four hooks map to the four things a debugger must do per domain:
+
+    capture       turn a raw domain event into an Action (custom runtimes)
+    state_diff    compute how the outside world changed
+    undo          reverse an action, or describe a compensating one
+    replay_hint   how to restore this domain's state before re-running
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from ..action import Action, StateDiff
+
+
+@dataclass
+class UndoPlan:
+    """How to reverse an action (or compensate for it if it's irreversible).
+
+    ``kind`` is "revert" (restore prior state), "compensate" (a new action
+    that offsets it, e.g. a refund reversing a charge), or "noop" (nothing to
+    undo). ``commands`` are the concrete steps; ``apply`` optionally executes
+    them. ``reversible`` is False when the effect genuinely cannot be taken
+    back (an email already sent) and only a compensating action is possible.
+    """
+
+    kind: str
+    summary: str
+    commands: list[str] = field(default_factory=list)
+    reversible: bool = True
+    apply: Any = None  # optional callable() -> str
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "summary": self.summary,
+                "commands": self.commands, "reversible": self.reversible}
+
+
+class Pack:
+    """Base class for a domain pack. Every hook is optional (safe defaults)."""
+
+    name: str = "pack"
+
+    def owns(self, action: Action) -> bool:
+        """Does this pack handle ``action``? Default: no."""
+        return False
+
+    def capture(self, raw: Any) -> "Action | None":
+        """Turn a raw domain event into an Action (for non-wire runtimes).
+
+        Wire agents (Anthropic/OpenAI) are captured by the proxy/effect
+        boundary already; override this only for a custom runtime (a browser
+        driver, an RPA tool) that doesn't speak a recorded model API."""
+        return None
+
+    def capabilities(self, name: str, tool_input: Any) -> "set[str]":
+        """Extra capability hints this domain knows (merged with the core)."""
+        return set()
+
+    def state_diff(self, action: Action, trace: dict) -> "StateDiff | None":
+        """How the outside world changed because of ``action`` (or None)."""
+        return None
+
+    def undo(self, action: Action, trace: dict) -> "UndoPlan | None":
+        """How to reverse ``action`` (or compensate for it), or None."""
+        return None
+
+    def replay_hint(self, action: Action) -> str:
+        """How to restore this domain's state before replaying (advisory)."""
+        return ""
+
+
+# -- registry --------------------------------------------------------------
+
+_REGISTRY: "list[Pack]" = []
+
+
+def register(pack: Pack) -> None:
+    """Register a pack (idempotent by name -- re-registering replaces)."""
+    global _REGISTRY
+    _REGISTRY = [p for p in _REGISTRY if p.name != pack.name] + [pack]
+
+
+def unregister(name: str) -> None:
+    global _REGISTRY
+    _REGISTRY = [p for p in _REGISTRY if p.name != name]
+
+
+def packs() -> "list[Pack]":
+    """All registered packs (Coding Pack first, since it's built in)."""
+    return list(_REGISTRY)
+
+
+def pack_for(action: Action) -> "Pack | None":
+    """The first registered pack that owns ``action``."""
+    for p in _REGISTRY:
+        if p.owns(action):
+            return p
+    return None
+
+
+def enrich(action_list: "list[Action]", trace: dict) -> "list[Action]":
+    """Run every registered pack over the Actions, in place.
+
+    Merges each owning pack's domain capabilities and attaches its StateDiff.
+    Returns the same list for chaining. Safe to call with no packs registered
+    (it's a no-op), so the core never depends on any pack existing.
+    """
+    if not _REGISTRY:
+        return action_list
+    for a in action_list:
+        for p in _REGISTRY:
+            if not p.owns(a):
+                continue
+            extra = p.capabilities(a.tool, a.input or {})
+            if extra:
+                a.capabilities = sorted(set(a.capabilities) | extra)
+            if a.state_diff is None:
+                sd = p.state_diff(a, trace)
+                if sd is not None:
+                    a.state_diff = sd
+    return action_list
+
+
+def undo_plan(action: Action, trace: dict) -> "UndoPlan | None":
+    """The undo plan from whichever pack owns ``action`` (or None)."""
+    p = pack_for(action)
+    return p.undo(action, trace) if p else None
