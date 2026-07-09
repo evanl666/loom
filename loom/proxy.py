@@ -271,17 +271,18 @@ def reconstruct_sse(raw: str) -> dict:
             message = event.get("message", {}) or {}
             envelope = {k: v for k, v in message.items() if k not in ("content", "usage")}
             usage.update(message.get("usage", {}) or {})
-        elif etype == "content_block_start":
+        elif etype == "content_block_start" and "index" in event:
             blocks[event["index"]] = dict(event.get("content_block", {}))
             partial[event["index"]] = ""
         elif etype == "content_block_delta":
+            idx = event.get("index")
+            if idx not in blocks:
+                continue  # a delta for a block we never saw start: skip, don't crash
             delta = event.get("delta", {})
             if delta.get("type") == "text_delta":
-                blocks[event["index"]]["text"] = (
-                    blocks[event["index"]].get("text", "") + delta.get("text", "")
-                )
+                blocks[idx]["text"] = blocks[idx].get("text", "") + delta.get("text", "")
             elif delta.get("type") == "input_json_delta":
-                partial[event["index"]] += delta.get("partial_json", "")
+                partial[idx] += delta.get("partial_json", "")
         elif etype == "message_delta":
             stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)
             usage.update(event.get("usage", {}) or {})

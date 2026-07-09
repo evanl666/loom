@@ -439,19 +439,48 @@ class Run:
 
         Same tools, same episodes, fresh trace -- then ``run.diff(other)`` shows
         exactly where and why the two models diverged. A/B testing for agents.
+
+        The rerun carries the original agent's behavior-defining config
+        (output_type, critic/deliberate, retries, tool timeout, ...) so the
+        comparison is apples-to-apples; only the model (and optionally system)
+        changes. Infra-only settings (journal, cache, memory) are intentionally
+        left off -- a rerun is a fresh trace.
         """
         from .agent import Agent
 
+        a = self.agent
+        # output_type appends a format instruction to system at construction, so
+        # pass the *base* system (without that suffix) to avoid double-appending.
+        base_system = a.system if system is None else system
+        if a.output_type is not None:
+            from .structured import format_instruction
+
+            suffix = format_instruction(a.output_type)
+            if base_system.endswith(suffix):
+                base_system = base_system[: -len(suffix)].rstrip("\n")
+
         agent = Agent(
-            model=model if model is not None else self.agent.provider,
-            tools=list(self.agent.tools.values()),
-            system=self.agent.system if system is None else system,
-            max_steps=self.agent.max_steps,
-            budget=self.agent.budget,
-            name=self.agent.name,
-            on_human=self.agent.on_human,
-            parallel_tools=self.agent.parallel_tools,
-            policy=self.agent.policy,
+            model=model if model is not None else a.provider,
+            tools=list(a.tools.values()),
+            system=base_system,
+            max_steps=a.max_steps,
+            budget=a.budget,
+            name=a.name,
+            on_human=a.on_human,
+            parallel_tools=a.parallel_tools,
+            policy=a.policy,
+            output_type=a.output_type,
+            output_retries=a.output_retries,
+            tool_timeout=a.tool_timeout,
+            model_retries=a.model_retries,
+            retry_backoff=a.retry_backoff,
+            critic=a.critic_provider,
+            critic_threshold=a.critic_threshold,
+            critic_retries=a.critic_retries,
+            deliberate=a.deliberate,
+            clock=a.clock,
+            compact_after=a.compact_after,
+            compact_keep=a.compact_keep,
         )
         return agent.run(self.episodes)
 

@@ -84,6 +84,30 @@ def test_rerun_same_conversation_on_other_model():
     assert d.steps[0].status == "results-differ"  # same inputs, different model
 
 
+def test_rerun_preserves_output_type_config():
+    # A/B rerun of a structured-output agent must stay apples-to-apples: the
+    # new agent keeps output_type (and doesn't double-append its instruction).
+    from dataclasses import dataclass
+
+    @dataclass
+    class Ans:
+        value: int
+
+    agent_a = Agent(
+        model=ScriptedProvider([ModelResponse(text='{"value": 1}')]),
+        output_type=Ans,
+        system="Be terse.",
+    )
+    run_a = agent_a.run("q")
+    run_b = run_a.rerun(model=ScriptedProvider([ModelResponse(text='{"value": 2}')]))
+
+    assert run_b.agent.output_type is Ans
+    assert run_b.parsed == Ans(value=2)
+    # the format instruction appears exactly once, not doubled
+    assert run_b.agent.system.count("respond with ONLY a JSON object") == 1
+    assert run_b.agent.system.startswith("Be terse.")
+
+
 # -- edit-as-effect ----------------------------------------------------------
 
 

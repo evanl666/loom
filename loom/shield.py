@@ -463,7 +463,21 @@ class Shield:
         choices = response.get("choices") or []
         if not choices:
             return response, events
-        message = choices[0].get("message", {}) or {}
+        # Screen EVERY choice, not just choices[0]: with n>1 a blocked tool call
+        # in a later choice must not slip through the firewall unscreened.
+        new_choices, any_changed = [], False
+        for choice in choices:
+            new_choice, changed, choice_events = self._screen_openai_choice(choice)
+            events.extend(choice_events)
+            new_choices.append(new_choice)
+            any_changed = any_changed or changed
+        if not any_changed:
+            return response, events
+        return {**response, "choices": new_choices}, events
+
+    def _screen_openai_choice(self, choice: dict) -> "tuple[dict, bool, list[dict]]":
+        events: list[dict] = []
+        message = choice.get("message", {}) or {}
         kept, notices, changed = [], [], False
         for tc in message.get("tool_calls") or []:
             fn = tc.get("function", {}) or {}
@@ -481,16 +495,16 @@ class Shield:
                 notices.append(_blocked_text(name, tool_input, _reason(event)))
                 changed = True
         if not changed:
-            return response, events
+            return choice, False, events
         new_message = {**message, "content": "\n".join(filter(None, [message.get("content") or ""] + notices))}
         if kept:
             new_message["tool_calls"] = kept
         else:
             new_message.pop("tool_calls", None)
-        new_choice = {**choices[0], "message": new_message}
+        new_choice = {**choice, "message": new_message}
         if not kept:
             new_choice["finish_reason"] = "stop"
-        return {**response, "choices": [new_choice] + choices[1:]}, events
+        return new_choice, True, events
 
 
 def _tool_result_texts(request: dict) -> "list[str]":

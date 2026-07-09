@@ -105,6 +105,30 @@ def test_deny_rewrites_openai_response():
     assert events[0]["action"] == "deny"
 
 
+def test_deny_screens_every_choice_not_just_the_first():
+    # With n>1, a blocked call in a later choice must not slip through.
+    def choice(index, path):
+        return {
+            "index": index,
+            "message": {
+                "role": "assistant", "content": None,
+                "tool_calls": [
+                    {"id": f"c{index}", "type": "function",
+                     "function": {"name": "read_file", "arguments": f'{{"path": "{path}"}}'}}
+                ],
+            },
+            "finish_reason": "tool_calls",
+        }
+
+    response = {"choices": [choice(0, "/app/ok.txt"), choice(1, "/app/.env")]}
+    out, events = Shield(deny=["read_file(*.env*)"]).screen(response)
+    # choice 0 is fine and keeps its tool call; choice 1's .env read is blocked
+    assert "tool_calls" in out["choices"][0]["message"]
+    assert "tool_calls" not in out["choices"][1]["message"]
+    assert "Blocked tool call read_file" in out["choices"][1]["message"]["content"]
+    assert [e["action"] for e in events] == ["deny"]
+
+
 def test_clean_response_passes_through_unchanged():
     s = Shield(deny=["Read(*.env*)"])
     out, events = s.screen(DONE)

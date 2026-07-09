@@ -240,6 +240,21 @@ def test_replay_synthesizes_sse_for_streaming_clients(recorded_trace):
     proxy.shutdown()
 
 
+def test_reconstruct_sse_tolerates_a_delta_without_its_block_start():
+    # A malformed/truncated upstream stream (a delta for an index that never
+    # had a content_block_start) must not crash the reconstruction thread.
+    raw = "\n".join([
+        'data: {"type":"message_start","message":{"id":"m","role":"assistant","usage":{"input_tokens":1}}}',
+        'data: {"type":"content_block_delta","index":5,"delta":{"type":"text_delta","text":"orphan"}}',
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}',
+        'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}',
+    ])
+    msg = reconstruct_sse(raw)
+    assert msg["content"] == [{"type": "text", "text": "hi"}]  # orphan delta dropped
+    assert msg["stop_reason"] == "end_turn"
+
+
 OPENAI_TOOL_RESPONSE = {
     "object": "chat.completion",
     "model": "gpt-4o",
