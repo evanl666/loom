@@ -204,7 +204,7 @@ def test_studio_data_flow_panel_from_taint():
     ]), tools=[Read, Bash]).run("go")
     page = trace_to_html(run.to_dict())
     assert "Data flow — sensitive values that left the box" in page
-    assert "anthropic-key" in page
+    assert "secret · critical" in page             # sensitivity class + severity
     # The PANEL itself must not add a leak: previews only inside the SVG.
     # (An unscrubbed trace legitimately shows raw results in the action cards --
     # Studio's "Not scrubbed" banner covers that; `loom share` removes them.)

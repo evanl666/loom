@@ -36,6 +36,28 @@ _PII = [
 
 _MIN_FRAGMENT = 12  # a shared substring shorter than this is too weak to claim
 
+# Sensitivity classes (for DLP): map each value KIND to a class + severity, so
+# a leak is described in the terms a security team reviews -- "PII exfiltration
+# (high)", not just "a value moved".
+_CLASS = {
+    # credentials -> "secret"
+    "anthropic-key": ("secret", "critical"), "openai-key": ("secret", "critical"),
+    "github-token": ("secret", "critical"), "aws-key-id": ("secret", "critical"),
+    "slack-token": ("secret", "critical"), "google-key": ("secret", "critical"),
+    "jwt": ("secret", "high"), "bearer": ("secret", "high"),
+    "private-key": ("secret", "critical"), "credential-assignment": ("secret", "high"),
+    # PII
+    "email": ("pii", "medium"), "ssn": ("pii", "critical"),
+    "phone": ("pii", "medium"),
+    # payment
+    "credit-card": ("payment", "critical"),
+}
+
+
+def sensitivity_class(kind: str) -> "tuple[str, str]":
+    """(class, severity) for a value kind. Unknown -> ('data', 'low')."""
+    return _CLASS.get(kind, ("data", "low"))
+
 
 def _sensitive_values(text: str) -> "list[tuple[str, str]]":
     """(kind, value) for every credential/PII value in a piece of text."""
@@ -109,15 +131,61 @@ def taint_paths(source: Any) -> "list[dict]":
             if key in seen:
                 continue
             seen.add(key)
+            cls, sev = sensitivity_class(src["kind"])
             paths.append({
                 "kind": src["kind"],
+                "sensitivity": cls,
+                "severity": sev,
                 "source": {"step": src["step"], "tool": src["tool"]},
                 "sink": {"step": a.step, "tool": a.tool,
                          "via": sorted(caps & egress_caps) or ["exec"]},
                 "value_preview": _preview(val),
             })
-    paths.sort(key=lambda p: (p["source"]["step"], p["sink"]["step"]))
+    _SEV = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    paths.sort(key=lambda p: (_SEV.get(p["severity"], 9),
+                              p["source"]["step"], p["sink"]["step"]))
     return paths
+
+
+def dlp_report(source: Any, sink_allowlist: "list[str] | None" = None) -> dict:
+    """A DLP view of the run's data flows: paths grouped by sensitivity class,
+    the worst severity, and a suggested firewall rule per class.
+
+    ``sink_allowlist`` names sink tools that are sanctioned destinations (an
+    internal logger, say) -- flows to them are reported but not counted as
+    violations."""
+    from fnmatch import fnmatchcase
+
+    allow = sink_allowlist or []
+    paths = taint_paths(source)
+    violations, allowed = [], []
+    for p in paths:
+        if any(fnmatchcase(p["sink"]["tool"], g) for g in allow):
+            allowed.append(p)
+        else:
+            violations.append(p)
+
+    by_class: dict[str, list] = {}
+    for p in violations:
+        by_class.setdefault(p["sensitivity"], []).append(p)
+
+    suggest = {
+        "secret": "--rule 'taint sk-*: confirm *' and --deny cap:network after a secret read",
+        "pii": "--confirm cap:user_communication and --deny cap:network",
+        "payment": "--confirm cap:money_movement and gate exports",
+        "data": "--confirm cap:network",
+    }
+    _SEV = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    worst = min((p["severity"] for p in violations), key=lambda s: _SEV.get(s, 9),
+                default="none")
+    return {
+        "violations": violations,
+        "allowed": allowed,
+        "by_class": {c: {"count": len(ps),
+                         "suggestion": suggest.get(c, suggest["data"])}
+                     for c, ps in by_class.items()},
+        "worst_severity": worst,
+    }
 
 
 def _preview(value: str) -> str:

@@ -1379,6 +1379,31 @@ def _cmd_taint(args: argparse.Namespace) -> int:
     return 1 if (paths and args.fail_on_leak) else 0
 
 
+def _cmd_dlp(args: argparse.Namespace) -> int:
+    """DLP view: data flows by sensitivity class + a suggested policy."""
+    from .taint import dlp_report
+
+    _import_builtin_packs()
+    report = dlp_report(_load_trace_json(args.path), sink_allowlist=args.allow_sink)
+    if args.json:
+        print(json.dumps(report, indent=2))
+        return 1 if (args.gate and report["violations"]) else 0
+    if not report["violations"] and not report["allowed"]:
+        print("no sensitive data flows detected")
+        return 0
+    print(f"DLP: worst severity {report['worst_severity']}, "
+          f"{len(report['violations'])} violation(s)"
+          + (f", {len(report['allowed'])} to allowlisted sink(s)" if report["allowed"] else ""))
+    for cls, info in sorted(report["by_class"].items()):
+        print(f"\n  [{cls}] {info['count']} flow(s)")
+        for p in [v for v in report["violations"] if v["sensitivity"] == cls][:5]:
+            print(f"    ⛓ {p['severity']:<8} {p['kind']} ({p['value_preview']}): "
+                  f"[{p['source']['step']}] {p['source']['tool']} → "
+                  f"[{p['sink']['step']}] {p['sink']['tool']} via {', '.join(p['sink']['via'])}")
+        print(f"    suggest: {info['suggestion']}")
+    return 1 if (args.gate and report["violations"]) else 0
+
+
 def _cmd_map(args: argparse.Namespace) -> int:
     """The side-effect map: everything the run changed or reached, one view."""
     from .insight import describe_map, side_effect_map
@@ -2829,6 +2854,14 @@ def build_parser() -> argparse.ArgumentParser:
     tt.add_argument("--fail-on-leak", action="store_true", dest="fail_on_leak",
                     help="exit 1 if any exfiltration path is found (CI gate)")
     tt.set_defaults(func=_cmd_taint)
+
+    dl = sub.add_parser("dlp", help="DLP: data flows by sensitivity class + policy suggestion")
+    dl.add_argument("path")
+    dl.add_argument("--allow-sink", action="append", default=[], metavar="TOOL",
+                    help="sanctioned sink tool (glob); flows to it aren't violations")
+    dl.add_argument("--gate", action="store_true", help="exit 1 on any violation (CI gate)")
+    dl.add_argument("--json", action="store_true", help="machine-readable")
+    dl.set_defaults(func=_cmd_dlp)
 
     mp = sub.add_parser("map", help="side-effect map: everything the run changed or reached")
     mp.add_argument("path")

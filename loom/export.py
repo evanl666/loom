@@ -774,9 +774,12 @@ def _data_flow(data: dict) -> str:
         parts.append(
             f'<path d="M{lx + 190},{y1} C{cx},{y1} {cx},{y2} {wx},{y2}" fill="none" '
             f'stroke="#e5484d" stroke-width="2" opacity="0.85"/>')
+        sev = f" · {p['severity']}" if p.get("severity") else ""
+        cls = p.get("sensitivity", p["kind"])
         parts.append(
             f'<text x="{cx}" y="{(y1 + y2) / 2 - 4}" text-anchor="middle" font-size="10" '
-            f'fill="#e5484d">⛓ {html.escape(p["kind"])} {html.escape(p["value_preview"])}</text>')
+            f'fill="#e5484d">⛓ {html.escape(cls)}{html.escape(sev)} '
+            f'{html.escape(p["value_preview"])}</text>')
     for label, y in sy.items():
         parts.append(
             f'<rect x="{lx}" y="{y}" width="190" height="24" rx="7" '
