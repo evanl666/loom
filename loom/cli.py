@@ -1441,66 +1441,32 @@ def _cmd_policy(args: argparse.Namespace) -> int:
         # The rollout-impact report: what would this policy have done to the
         # runs you already recorded? Production teams don't hard-cut a deny
         # rule -- they look at the blast radius first.
+        from .policy_file import (simulate, simulate_html, simulate_markdown,
+                                  simulate_text)
+
         shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
         paths = _expand_trace_paths(args.paths)
         if not paths:
             raise CLIError("no traces found (pass files or a directory of *.loom.json)")
-
-        total_runs = 0
-        total_calls = 0
-        denied_runs: list[tuple[str, bool]] = []   # (path, run had completed fine)
-        confirm_only_runs: list[str] = []
-        rule_hits: dict[tuple, dict] = {}          # (action, rule) -> count + example
-        for p in paths:
-            try:
-                with open(p) as f:
-                    data = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                continue
-            total_runs += 1
-            denies = confirms = 0
-            for e in data.get("log", []):
-                if e.get("kind") != "model" or not isinstance(e.get("result"), dict):
-                    continue
-                for tc in e["result"].get("tool_calls") or []:
-                    total_calls += 1
-                    action, rule = shield.classify(tc.get("name", ""), tc.get("input", {}))
-                    if action not in ("deny", "confirm"):
-                        continue
-                    sig = f"{tc.get('name')}({json.dumps(tc.get('input', {}), sort_keys=True, default=str)})"
-                    hit = rule_hits.setdefault((action, rule or "(policy default)"),
-                                               {"count": 0, "example": sig[:90]})
-                    hit["count"] += 1
-                    if action == "deny":
-                        denies += 1
-                    else:
-                        confirms += 1
-            completed = bool(data.get("output")) and not data.get("truncated") and not data.get("paused")
-            if denies:
-                denied_runs.append((p, completed))
-            elif confirms:
-                confirm_only_runs.append(p)
-
-        if not total_runs:
+        result = simulate(shield, paths)
+        if not result["runs"]:
             raise CLIError("no readable traces found")
-        pct = lambda n: f"{100 * n // total_runs}%"  # noqa: E731
-        print(f"simulated policy over {total_runs} run(s), {total_calls} tool call(s):\n")
-        print(f"  would DENY in    {len(denied_runs):>4} run(s)  ({pct(len(denied_runs))})")
-        print(f"  would CONFIRM in {len(confirm_only_runs):>4} run(s)  ({pct(len(confirm_only_runs))})")
-        untouched = total_runs - len(denied_runs) - len(confirm_only_runs)
-        print(f"  untouched        {untouched:>4} run(s)  ({pct(untouched)})")
-        false_pos = [p for p, completed in denied_runs if completed]
-        if false_pos:
-            print(f"\n  ⚠️  {len(false_pos)} of the denied runs had completed successfully -- "
-                  "candidate false positives; review before rollout:")
-            for p in false_pos[:5]:
-                print(f"      {p}")
-        if rule_hits:
-            print("\n  per-rule hits:")
-            for (action, rule), hit in sorted(rule_hits.items(), key=lambda kv: -kv[1]["count"]):
-                mark = "🚫" if action == "deny" else "⏸️ "
-                print(f"    {mark} {action:8} {rule:<42} x{hit['count']}  e.g. {hit['example']}")
-        return 1 if args.fail_on_deny and denied_runs else 0
+
+        if args.html:
+            with open(args.html, "w") as f:
+                f.write(simulate_html(result))
+            print(f"policy simulation dashboard -> {args.html}")
+        if args.md:
+            out = simulate_markdown(result)
+            if args.md == "-":
+                print(out)
+            else:
+                with open(args.md, "w") as f:
+                    f.write(out + "\n")
+                print(f"policy simulation (markdown) -> {args.md}")
+        if not args.html and not args.md:
+            print(simulate_text(result))
+        return 1 if args.fail_on_deny and result["denied"] else 0
 
     if args.policy_cmd == "explain":
         # Explain how the policy would classify each tool call in one trace.
@@ -2041,6 +2007,10 @@ def build_parser() -> argparse.ArgumentParser:
     po_sim.add_argument("--policy", default="")
     po_sim.add_argument("--fail-on-deny", action="store_true", dest="fail_on_deny",
                         help="exit 1 if any run would be denied (CI gate)")
+    po_sim.add_argument("--html", default="", metavar="FILE",
+                        help="write a self-contained dashboard for security review")
+    po_sim.add_argument("--md", default="", metavar="FILE",
+                        help="write a Markdown summary for a PR comment ('-' = stdout)")
     po_sim.set_defaults(func=_cmd_policy)
 
     tr_p = sub.add_parser("trace", help="validate / verify / sign / explain a trace's format")

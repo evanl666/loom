@@ -41,6 +41,19 @@ inputs:
       it from the PR comment, so reviewers can scrub through exactly the runs
       this change touches.
     default: 'true'
+  policy:
+    description: >-
+      A firewall profile name (claude-code-safe, prod-db-safe, ...) or a policy
+      file path. When set, the recorded runs are simulated against it and the
+      rollout blast radius (how many would be denied/confirmed, candidate false
+      positives, per-rule hits) is added to the PR comment.
+    default: ''
+  fail-on-new-risk:
+    description: >-
+      Fail the check when the policy would DENY any recorded run (pairs with
+      "policy"). Use it to block a PR that introduces newly-risky agent
+      behavior the current policy would stop.
+    default: 'false'
 
 outputs:
   affected:
@@ -133,6 +146,25 @@ runs:
         if [ -s loom-risk-line.txt ]; then echo "risk: $(cat loom-risk-line.txt)"; fi
         exit 0
 
+    - name: Simulate the firewall policy over the recorded runs
+      id: policy
+      if: inputs.policy != ''
+      shell: bash
+      env:
+        TRACES: ${{ inputs.traces }}
+        POLICY: ${{ inputs.policy }}
+      run: |
+        set +e
+        args=(policy simulate)
+        for t in $TRACES; do args+=("$t"); done
+        # A path is a file; anything else is treated as a built-in profile.
+        if [ -f "$POLICY" ]; then args+=(--policy "$POLICY"); else args+=(--profile "$POLICY"); fi
+        loom "${args[@]}" --md loom-policy.md > /dev/null 2>&1
+        # A second run just to learn whether anything would be denied (gate).
+        loom "${args[@]}" --fail-on-deny > /dev/null 2>&1
+        if [ $? -eq 1 ]; then echo "denies=true" >> "$GITHUB_OUTPUT"; else echo "denies=false" >> "$GITHUB_OUTPUT"; fi
+        exit 0
+
     - name: Export affected traces for Studio
       id: studio
       if: inputs.studio == 'true' && steps.impact.outputs.affected == 'true'
@@ -212,6 +244,10 @@ runs:
             echo
             echo "🔍 [Scrub through the affected runs in Studio](https://github.com/$REPO/actions/runs/$RUN_ID#artifacts) (\`loom-studio\` artifact)"
           fi
+          if [ -s loom-policy.md ]; then
+            echo
+            cat loom-policy.md
+          fi
         } > loom-comment.md
         existing=$(gh api "repos/$REPO/issues/$PR/comments" \
           --jq "[.[] | select(.body | startswith(\"$marker\"))][0].id" 2>/dev/null || true)
@@ -226,4 +262,11 @@ runs:
       shell: bash
       run: |
         echo "Recorded agent runs are affected by this change (see report above)."
+        exit 1
+
+    - name: Fail when the policy would deny recorded runs
+      if: inputs.fail-on-new-risk == 'true' && steps.policy.outputs.denies == 'true'
+      shell: bash
+      run: |
+        echo "The firewall policy would DENY recorded agent runs (see the policy simulation above)."
         exit 1

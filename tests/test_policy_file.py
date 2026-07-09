@@ -276,3 +276,37 @@ def test_sequence_consequence_supports_cap_patterns():
     # ...after which anything network-capable is denied, whatever its name
     allowed, event = shield._decide("send_email", {"to": "x"})
     assert allowed is False and event["via"] == "sequence"
+
+
+def test_simulate_structured_result_and_renderers(tmp_path):
+    from loom.policy_file import (PROFILES, resolve, simulate, simulate_html,
+                                  simulate_markdown, simulate_text, to_shield_kwargs)
+    from loom.shield import Shield
+
+    _save_run(tmp_path, "bad.loom.json", "Read", {"file_path": "/app/.env"})
+    _save_run(tmp_path, "ok.loom.json", "Read", {"file_path": "src/x.py"})
+    shield = Shield(**to_shield_kwargs(resolve(profile="claude-code-safe")))
+    r = simulate(shield, [str(tmp_path / "bad.loom.json"), str(tmp_path / "ok.loom.json")])
+
+    assert r["runs"] == 2 and len(r["denied"]) == 1 and r["untouched"] == 1
+    assert len(r["false_positives"]) == 1
+    assert r["rule_hits"][0]["rule"] == "Read(*.env*)" and r["rule_hits"][0]["count"] == 1
+    assert any(c["capability"] == "secret" for c in r["capabilities"])
+
+    assert "would DENY in       1" in simulate_text(r)
+    md = simulate_markdown(r)
+    assert "would **deny** | 1 | 50%" in md and "candidate false positive" in md
+    html = simulate_html(r)
+    assert "simbar deny" in html and "Read(*.env*)" in html
+
+
+def test_cli_simulate_writes_html_and_md(tmp_path, capsys):
+    _save_run(tmp_path, "bad.loom.json", "Read", {"file_path": "/app/.env"})
+    html = tmp_path / "sim.html"
+    md = tmp_path / "sim.md"
+    assert main(["policy", "simulate", str(tmp_path), "--profile", "claude-code-safe",
+                 "--html", str(html), "--md", str(md)]) == 0
+    assert "simbar deny" in html.read_text()
+    assert "🛡️ Loom policy simulation" in md.read_text()
+    out = capsys.readouterr().out
+    assert "dashboard ->" in out and "(markdown) ->" in out

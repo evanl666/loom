@@ -333,3 +333,168 @@ def _finalize(node):
     if isinstance(node, list):
         return [_finalize(v) for v in node]
     return node
+
+
+# ---------------------------------------------------------------- simulation
+
+def simulate(shield, paths: "list[str]") -> dict:
+    """Replay a corpus of traces through ``shield`` and report the blast radius.
+
+    Returns a structured result (rendered as text/HTML/Markdown by the CLI):
+    per-run deny/confirm verdicts, per-rule hit counts with an example, and a
+    per-capability breakdown -- the rollout review a security team needs
+    before a deny rule goes live.
+    """
+    import json
+    import os
+
+    total_runs = total_calls = 0
+    denied_runs: list[dict] = []
+    confirm_runs: list[str] = []
+    rule_hits: dict = {}          # (action, rule) -> {count, example}
+    cap_hits: dict = {}           # capability -> {deny, confirm}
+    from .capabilities import capabilities as _caps
+
+    for p in paths:
+        try:
+            with open(p) as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        total_runs += 1
+        denies = confirms = 0
+        for e in data.get("log", []):
+            if e.get("kind") != "model" or not isinstance(e.get("result"), dict):
+                continue
+            for tc in e["result"].get("tool_calls") or []:
+                total_calls += 1
+                name, tinput = tc.get("name", ""), tc.get("input", {})
+                action, rule = shield.classify(name, tinput)
+                if action not in ("deny", "confirm"):
+                    continue
+                sig = f"{name}({json.dumps(tinput, sort_keys=True, default=str)})"
+                hit = rule_hits.setdefault((action, rule or "(policy default)"),
+                                           {"count": 0, "example": sig[:90]})
+                hit["count"] += 1
+                for c in _caps(name, tinput):
+                    cap_hits.setdefault(c, {"deny": 0, "confirm": 0})[action] += 1
+                if action == "deny":
+                    denies += 1
+                else:
+                    confirms += 1
+        completed = (bool(data.get("output")) and not data.get("truncated")
+                     and not data.get("paused"))
+        if denies:
+            denied_runs.append({"path": p, "name": os.path.basename(p),
+                                "completed": completed})
+        elif confirms:
+            confirm_runs.append(p)
+
+    return {
+        "runs": total_runs,
+        "calls": total_calls,
+        "denied": denied_runs,
+        "confirm_only": confirm_runs,
+        "untouched": total_runs - len(denied_runs) - len(confirm_runs),
+        "false_positives": [d for d in denied_runs if d["completed"]],
+        "rule_hits": [
+            {"action": a, "rule": r, "count": h["count"], "example": h["example"]}
+            for (a, r), h in sorted(rule_hits.items(), key=lambda kv: -kv[1]["count"])
+        ],
+        "capabilities": [
+            {"capability": c, "deny": v["deny"], "confirm": v["confirm"]}
+            for c, v in sorted(cap_hits.items(), key=lambda kv: -(kv[1]["deny"] + kv[1]["confirm"]))
+        ],
+    }
+
+
+def _pct(n: int, total: int) -> str:
+    return f"{100 * n // total}%" if total else "0%"
+
+
+def simulate_text(r: dict) -> str:
+    runs = r["runs"]
+    lines = [f"simulated policy over {runs} run(s), {r['calls']} tool call(s):", ""]
+    lines.append(f"  would DENY in    {len(r['denied']):>4} run(s)  ({_pct(len(r['denied']), runs)})")
+    lines.append(f"  would CONFIRM in {len(r['confirm_only']):>4} run(s)  ({_pct(len(r['confirm_only']), runs)})")
+    lines.append(f"  untouched        {r['untouched']:>4} run(s)  ({_pct(r['untouched'], runs)})")
+    if r["false_positives"]:
+        lines.append(f"\n  ⚠️  {len(r['false_positives'])} of the denied runs had completed "
+                     "successfully -- candidate false positives:")
+        for d in r["false_positives"][:5]:
+            lines.append(f"      {d['path']}")
+    if r["rule_hits"]:
+        lines.append("\n  per-rule hits:")
+        for h in r["rule_hits"]:
+            mark = "🚫" if h["action"] == "deny" else "⏸️ "
+            lines.append(f"    {mark} {h['action']:8} {h['rule']:<42} x{h['count']}  e.g. {h['example']}")
+    return "\n".join(lines)
+
+
+def simulate_markdown(r: dict, title: str = "Loom policy simulation") -> str:
+    runs = r["runs"]
+    md = [f"### 🛡️ {title}", "",
+          f"Simulated over **{runs} run(s)**, {r['calls']} tool call(s).", "",
+          "| verdict | runs | share |", "|---|---:|---:|",
+          f"| 🚫 would **deny** | {len(r['denied'])} | {_pct(len(r['denied']), runs)} |",
+          f"| ⏸️ would **confirm** | {len(r['confirm_only'])} | {_pct(len(r['confirm_only']), runs)} |",
+          f"| ✅ untouched | {r['untouched']} | {_pct(r['untouched'], runs)} |"]
+    if r["false_positives"]:
+        md += ["", f"⚠️ **{len(r['false_positives'])} candidate false positive(s)** — "
+               "runs that completed successfully but would now be denied:"]
+        md += [f"- `{d['name']}`" for d in r["false_positives"][:5]]
+    if r["rule_hits"]:
+        md += ["", "<details><summary>Per-rule hits</summary>", "",
+               "| rule | action | hits | example |", "|---|---|---:|---|"]
+        for h in r["rule_hits"]:
+            md.append(f"| `{h['rule']}` | {h['action']} | {h['count']} | `{h['example']}` |")
+        md += ["", "</details>"]
+    return "\n".join(md)
+
+
+def simulate_html(r: dict, title: str = "Loom policy simulation") -> str:
+    from .lake import _esc
+    runs = r["runs"] or 1
+
+    def bar(n, cls):
+        return (f'<div class="simrow"><span class="siglabel">{cls}</span>'
+                f'<span class="simbar {cls}" style="width:{max(100*n//runs,1)}%"></span>'
+                f'<span class="simval">{n} ({_pct(n, r["runs"])})</span></div>')
+
+    fp = ""
+    if r["false_positives"]:
+        items = "".join(f"<li>{_esc(d['name'])}</li>" for d in r["false_positives"][:10])
+        fp = (f'<div class="warn"><b>{len(r["false_positives"])} candidate false '
+              f'positive(s)</b> — completed successfully but would be denied:<ul>{items}</ul></div>')
+    rule_rows = "".join(
+        f'<tr><td><code>{_esc(h["rule"])}</code></td><td>{h["action"]}</td>'
+        f'<td class="num">{h["count"]}</td><td><code>{_esc(h["example"])}</code></td></tr>'
+        for h in r["rule_hits"])
+    cap_rows = "".join(
+        f'<tr><td><code>{_esc(c["capability"])}</code></td>'
+        f'<td class="num">{c["deny"]}</td><td class="num">{c["confirm"]}</td></tr>'
+        for c in r["capabilities"])
+    css = """body{font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    max-width:820px;margin:0 auto;padding:32px;color:#0b0b0b;background:#f9f9f7}
+    @media(prefers-color-scheme:dark){body{color:#fff;background:#0d0d0d}
+    table,.warn{background:#1a1a19!important;border-color:#2c2c2a!important}}
+    h1{font-size:20px}.sub{color:#898781;margin-bottom:20px}
+    .simrow{display:grid;grid-template-columns:90px 1fr 130px;gap:10px;align-items:center;margin:6px 0}
+    .siglabel{color:#52514e;font-size:13px}.simbar{height:16px;border-radius:0 4px 4px 0;min-width:2px}
+    .simbar.deny{background:#e5484d}.simbar.confirm{background:#fab219}.simbar.untouched{background:#1baf7a}
+    .simval{text-align:right;font-variant-numeric:tabular-nums}
+    .warn{border:1px solid #fab219;border-radius:10px;padding:12px 16px;margin:16px 0;background:#fff}
+    table{width:100%;border-collapse:collapse;margin:14px 0;background:#fff;border:1px solid #e1e0d9;border-radius:10px}
+    th{text-align:left;font-size:11px;color:#898781;text-transform:uppercase;padding:8px 12px;border-bottom:1px solid #e1e0d9}
+    td{padding:7px 12px;border-bottom:1px solid #e1e0d9}td.num{text-align:right;font-variant-numeric:tabular-nums}
+    h2{font-size:13px;color:#52514e;margin:22px 0 6px}code{font-size:12px}"""
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{_esc(title)}</title><style>{css}</style></head><body>
+<h1>🛡️ {_esc(title)}</h1>
+<p class="sub">Rollout blast radius over {r['runs']} run(s), {r['calls']} tool call(s).</p>
+{bar(len(r['denied']), 'deny')}{bar(len(r['confirm_only']), 'confirm')}{bar(r['untouched'], 'untouched')}
+{fp}
+<h2>Per-rule hits</h2><table><tr><th>rule</th><th>action</th><th>hits</th><th>example</th></tr>{rule_rows or '<tr><td colspan=4>none</td></tr>'}</table>
+<h2>By capability</h2><table><tr><th>capability</th><th>deny</th><th>confirm</th></tr>{cap_rows or '<tr><td colspan=3>none</td></tr>'}</table>
+</body></html>"""
