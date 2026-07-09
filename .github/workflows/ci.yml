@@ -37,3 +37,10 @@ jobs:
           python examples/12_impact.py
       - name: Flight-recorder demo (five acts, offline)
         run: bash examples/flight-recorder/demo.sh
+
+  docker-sandbox:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The jail jails (egress blocked, proxy records)
+        run: bash examples/docker-sandbox/ci/check.sh

@@ -431,7 +431,7 @@ class ProxyServer(ThreadingHTTPServer):
                  shield=None, scrub: bool = False,
                  save_interval: float = 5.0, eager_saves: int = 20,
                  max_body: int = 64 * 1024 * 1024, upstream_timeout: float = 600.0,
-                 auth: str = ""):
+                 auth: str = "", host: str = "127.0.0.1"):
         self.target = target.rstrip("/")
         self.save_path = save_path
         self.shield = shield  # loom.shield.Shield, screens tool calls in responses
@@ -465,7 +465,10 @@ class ProxyServer(ThreadingHTTPServer):
             if "wire" not in data:
                 raise ValueError(f"{replay_path} has no wire responses (not a proxy trace)")
             self.replay_wire = data["wire"]
-        super().__init__(("127.0.0.1", port), _Handler)
+        # Loopback by default. Binding wider (0.0.0.0 for the docker-sandbox
+        # topology) exposes the data plane to the network -- pair it with
+        # --auth unless the network itself is closed (an internal bridge).
+        super().__init__((host, port), _Handler)
         self.control_token: "str | None" = None
         if shield is not None and replay_path is None:
             # Without a token, any local process -- including a webpage's JS

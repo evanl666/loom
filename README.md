@@ -208,14 +208,13 @@ not the part that happened to go through the door with the camera. Built in
 on macOS (`sandbox-exec`, the same mechanism Claude Code's sandboxing uses);
 `--sandbox-allow host:port` opens explicit extra holes when the agent
 legitimately needs one. Network only — the filesystem is still yours, so
-pair it with a container when you need that too. On Linux, the same shape by
-hand:
+pair it with a container when you need that too.
 
-```
-docker network create --internal jail
-docker run --network jail -e ANTHROPIC_BASE_URL=http://proxy:8788 my-agent
-docker run --network jail --network bridge --name proxy -p 8788 loom-proxy
-```
+On Linux, the same shape as a ready-made compose file —
+[examples/docker-sandbox/](examples/docker-sandbox/): the agent on an
+`internal` network, a dual-homed proxy (`loom proxy --host 0.0.0.0`) as the
+only path out. CI stands the topology up on every push and asserts the jail
+actually jails.
 
 ## Share traces, not secrets
 

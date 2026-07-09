@@ -523,6 +523,7 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
             max_body=args.max_body_mb * 1024 * 1024,
             upstream_timeout=args.upstream_timeout,
             auth=args.auth,
+            host=args.host,
         )
     except ValueError:
         raise CLIError(
@@ -904,6 +905,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     px = sub.add_parser("proxy", help="record any Anthropic-API agent through a local proxy")
     px.add_argument("--port", type=int, default=8788)
+    px.add_argument("--host", default="127.0.0.1",
+                    help="bind address (default loopback; 0.0.0.0 for the docker-sandbox "
+                         "topology -- pair a wide bind with --auth on open networks)")
     px.add_argument("--target", default="https://api.anthropic.com")
     px.add_argument("--save", default="session.loom.json", help="trace written after every exchange")
     px.add_argument("--replay", default="", help="serve recorded responses from this trace instead")

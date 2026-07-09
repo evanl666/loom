@@ -202,3 +202,14 @@ def test_shield_control_plane_is_not_gated_by_data_auth(tmp_path):
     proxy.shutdown()
     upstream.shutdown()
     proxy.finalize()
+
+
+def test_proxy_can_bind_beyond_loopback(tmp_path):
+    # The docker-sandbox topology needs --host 0.0.0.0 (agent connects across
+    # a bridge network); default stays loopback.
+    upstream = _serve(_FakeUpstream([FINAL_ANSWER]))
+    proxy, _ = _proxy(tmp_path, upstream, host="0.0.0.0")
+    assert proxy.server_address[0] == "0.0.0.0"
+    assert _post(proxy.port) == FINAL_ANSWER  # reachable via loopback too
+    proxy.shutdown()
+    upstream.shutdown()
