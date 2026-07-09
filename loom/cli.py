@@ -372,8 +372,11 @@ def _expand_agent_shortcut(command: "list[str]", args) -> "tuple[list[str], str]
         if shutil.which(binary) is None:
             return command, (f"{binary!r} is not on your PATH -- install the agent first, "
                              f"or use the passthrough form: loom record -- <command>")
-        if is_openai and "openai" not in args.target:
-            args.target = "https://api.openai.com"  # route codex to the right dialect
+        if is_openai and args.target == "https://api.anthropic.com":
+            # Route codex to the right dialect -- but only when the target is
+            # still the default; an explicit --target (a local mock, a vLLM
+            # endpoint) must never be silently replaced with a real API.
+            args.target = "https://api.openai.com"
         return build(prompt), ""
     return command, ""
 
@@ -780,6 +783,8 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
         shield.notify = _shield_notifier(server.port)
         _print_shield_rules(shield)
     live_url = f"http://127.0.0.1:{server.port}/loom/live"
+    if server.control_token:  # the page is token-gated when a shield is active
+        live_url += f"?token={server.control_token}"
     print(f"  live studio: {live_url}")
     if args.live:
         import webbrowser

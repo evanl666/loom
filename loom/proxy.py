@@ -700,10 +700,24 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, {"pending": shield.pending_list()})
             return
-        if self.path == "/loom/live":
+        if self.path.split("?", 1)[0] == "/loom/live":
+            # The page embeds the control token (its JS needs it to poll state
+            # and decide approvals), so serving it unauthenticated would hand
+            # the token to any local process -- including the shielded agent
+            # itself. Browsers can't send headers on navigation, so the gate
+            # is a query token; the CLI prints/opens the tokenized URL.
+            token = self.server.control_token
+            if token:
+                from urllib.parse import parse_qs, urlparse
+
+                supplied = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+                if supplied != token:
+                    self._send_json(403, {"error": "missing or wrong ?token= (use the "
+                                                   "live URL loom printed at startup)"})
+                    return
             from .live import live_html
 
-            page = live_html(self.server.port, self.server.control_token or "").encode()
+            page = live_html(self.server.port, token or "").encode()
             self.send_response(200)
             self.send_header("content-type", "text/html; charset=utf-8")
             self.send_header("content-length", str(len(page)))

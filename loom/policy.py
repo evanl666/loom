@@ -23,7 +23,7 @@ the trace, so approved runs replay deterministically.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase as fnmatch
 
 ALLOW = "allow"
 CONFIRM = "confirm"

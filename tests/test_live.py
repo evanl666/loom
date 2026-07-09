@@ -112,3 +112,46 @@ def test_live_shows_pending_approvals(tmp_path):
     finally:
         proxy.shutdown()
         upstream.shutdown()
+
+
+def test_live_page_does_not_leak_the_control_token(tmp_path):
+    """Regression: /loom/live embeds the control token for its JS, so serving
+    it unauthenticated would let ANY local process (including the shielded
+    agent itself) steal the token and approve its own calls."""
+    upstream = _serve(_FakeUpstream([WEATHER_TOOL_USE]))
+    proxy = _serve(ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}",
+                               save_path=str(tmp_path / "s.loom.json"),
+                               shield=Shield(deny=["Never*"])))
+    try:
+        token = proxy.control_token
+        # without ?token= -> 403, and the body must NOT contain the token
+        try:
+            _get(proxy.port, "/loom/live")
+            assert False, "expected 403"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+            assert token.encode() not in e.read()
+        # wrong token -> 403
+        try:
+            _get(proxy.port, "/loom/live?token=wrong")
+            assert False, "expected 403"
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+        # the printed URL (with the right token) serves the page
+        page, _ = _get(proxy.port, f"/loom/live?token={token}")
+        assert b"Loom Live" in page
+    finally:
+        proxy.shutdown()
+        upstream.shutdown()
+
+
+def test_live_page_ungated_without_a_shield(tmp_path):
+    upstream = _serve(_FakeUpstream([WEATHER_TOOL_USE]))
+    proxy = _serve(ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}",
+                               save_path=str(tmp_path / "s.loom.json")))
+    try:
+        page, _ = _get(proxy.port, "/loom/live")  # no token exists -> open
+        assert b"Loom Live" in page
+    finally:
+        proxy.shutdown()
+        upstream.shutdown()

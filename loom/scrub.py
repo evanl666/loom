@@ -71,7 +71,7 @@ class ScrubConfig:
         self.allow = list(allow or [])
 
     def allowed(self, value: str) -> bool:
-        from fnmatch import fnmatch
+        from fnmatch import fnmatchcase as fnmatch
 
         return any(value == a or fnmatch(value, a) for a in self.allow)
 

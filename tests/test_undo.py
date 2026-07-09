@@ -77,3 +77,12 @@ def test_undo_refuses_when_tree_moved(tmp_path, monkeypatch, capsys):
     assert (repo / "app.py").read_text() == "even newer work\n"  # nothing clobbered
     # --force overrides
     assert main(["undo", path, "--force"]) == 0
+
+
+def test_only_is_segment_aware():
+    from loom.undo import _in_scope
+
+    assert _in_scope("src/a.py", "src")
+    assert _in_scope("src", "src")
+    assert not _in_scope("src2/a.py", "src")    # the old startswith footgun
+    assert _in_scope("src/a.py", "src/")

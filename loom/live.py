@@ -23,8 +23,9 @@ def live_state(server) -> dict:
     rec = server.recorder
     effects = []
     inp = out = 0
-    with server.lock:
+    with server.lock:  # persist() mutates log and shield_events under this lock
         log = list(rec.log)
+        denied = sum(1 for ev in rec.shield_events if ev.get("action") == "deny")
     for e in log:
         row = {"seq": e.seq, "kind": e.kind, "depth": getattr(e, "depth", 0)}
         if e.kind == "model" and isinstance(e.result, dict):
@@ -42,7 +43,6 @@ def live_state(server) -> dict:
         effects.append(row)
 
     pending = server.shield.pending_list() if server.shield is not None else []
-    denied = sum(1 for ev in rec.shield_events if ev.get("action") == "deny")
     return {
         "effects": effects,
         "input_tokens": inp, "output_tokens": out,

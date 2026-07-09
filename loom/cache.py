@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 import os
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase as fnmatch
 from typing import Any
 
 

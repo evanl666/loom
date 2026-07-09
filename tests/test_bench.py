@@ -98,8 +98,12 @@ def test_bench_cli_rejects_bad_agent_spec(tmp_path, capsys):
 def test_target_inference():
     from loom.bench import target_for
 
+    # dialect is inferred only when the run-wide target is still a default API
     assert target_for("codex exec {prompt}", "https://api.anthropic.com") == "https://api.openai.com"
-    assert target_for("claude -p {prompt}", "https://x") == "https://api.anthropic.com"
+    assert target_for("claude -p {prompt}", "https://api.openai.com") == "https://api.anthropic.com"
+    # an explicit custom target (a local mock, a vLLM endpoint) ALWAYS wins --
+    # 'claude' in the command must not reroute traffic to the real API
+    assert target_for("claude -p {prompt}", "http://127.0.0.1:9999") == "http://127.0.0.1:9999"
     assert target_for("my-agent run", "https://default") == "https://default"
 
 

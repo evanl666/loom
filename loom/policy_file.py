@@ -215,7 +215,7 @@ def lint(doc: dict) -> "list[str]":
                 )
 
     # An allow shadowed by a broader deny never takes effect (deny > allow).
-    from fnmatch import fnmatch
+    from fnmatch import fnmatchcase as fnmatch
 
     for a in kw.get("allow", []):
         for d in kw.get("deny", []):

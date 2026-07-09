@@ -52,7 +52,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase as fnmatch
 
 ALLOW = "allow"
 CONFIRM = "confirm"

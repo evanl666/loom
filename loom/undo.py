@@ -30,13 +30,21 @@ def _git(args: "list[str]", cwd: str) -> "tuple[int, str]":
         return 1, str(e)
 
 
+def _in_scope(path: str, only: str) -> bool:
+    """Path-segment-aware prefix match: --only src must not match src2/x."""
+    if not only:
+        return True
+    only = only.rstrip("/")
+    return path == only or path.startswith(only + "/")
+
+
 def plan_undo(data: dict, only: str = "") -> "list[dict]":
     """The files loom undo would touch (the agent's own, in scope)."""
     changes = (data.get("workspace") or {}).get("changes") or {}
     return [
         f for f in changes.get("files", [])
         if not f.get("pre_existing")  # leave what was already dirty alone
-        and (not only or f.get("path", "").startswith(only))
+        and _in_scope(f.get("path", ""), only)
     ]
 
 

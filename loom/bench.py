@@ -83,9 +83,12 @@ def target_for(command: str, default: str) -> str:
     """Infer the API a benchmarked agent speaks from its command.
 
     Claude and Codex want different dialects; a single --target can't serve a
-    mixed comparison, so guess per agent (codex/openai -> OpenAI) and fall back
-    to the run-wide default.
+    mixed comparison, so guess per agent (codex/openai -> OpenAI). An EXPLICIT
+    non-default --target always wins -- a user pointing agents at a local mock
+    or a vLLM endpoint must not be silently rerouted to a real API.
     """
+    if default not in _DIALECTS.values():
+        return default  # user-supplied target: never second-guess it
     low = command.lower()
     if "codex" in low or "openai" in low:
         return _DIALECTS["openai"]

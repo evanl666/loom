@@ -20,7 +20,7 @@ names are known (the impact tool-inventory diff).
 
 from __future__ import annotations
 
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase as fnmatch
 
 # (category, [name-globs], [signature-globs]). Order = severity, high first.
 _RULES: "list[tuple[str, list[str], list[str]]]" = [

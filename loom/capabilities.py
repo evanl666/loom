@@ -21,7 +21,7 @@ every shell-shaped tool regardless of its name.
 
 from __future__ import annotations
 
-from fnmatch import fnmatch
+from fnmatch import fnmatchcase as fnmatch
 
 # Risk categories map onto capability names.
 _FROM_RISK = {
