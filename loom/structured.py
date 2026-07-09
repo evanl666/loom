@@ -87,19 +87,25 @@ def extract_json(text: str) -> Any:
     if stripped.startswith("```"):
         stripped = stripped.split("\n", 1)[-1]
         stripped = stripped.rsplit("```", 1)[0].strip()
-    starts = [i for i in (stripped.find("{"), stripped.find("[")) if i != -1]
     decoder = json.JSONDecoder()
+    # Every position where a JSON value could START, in order. Prose can contain
+    # a stray '{' ("the object { should...") BEFORE the real JSON, so try each
+    # candidate until one actually decodes rather than only the first.
+    starts = sorted(i for i, c in enumerate(stripped) if c in "{[")
+    last_error = None
+    for i in starts:
+        try:
+            value, _ = decoder.raw_decode(stripped[i:])
+            return value
+        except json.JSONDecodeError as e:
+            last_error = e
     if not starts:
         try:  # a bare JSON scalar ("null", a number, a quoted string)
             value, _ = decoder.raw_decode(stripped)
             return value
         except json.JSONDecodeError:
             raise OutputInvalid("no JSON object found in the answer") from None
-    try:
-        value, _ = decoder.raw_decode(stripped[min(starts) :])
-    except json.JSONDecodeError as e:
-        raise OutputInvalid(f"invalid JSON: {e}") from None
-    return value
+    raise OutputInvalid(f"invalid JSON: {last_error}") from None
 
 
 def _coerce(value: Any, tp: Any, path: str) -> Any:

@@ -71,3 +71,12 @@ def test_unknown_tool_is_handled_gracefully():
     run = Agent(model=provider, tools=[add]).run("go")
     tool_entry = [e for e in run.log if e.kind.startswith("tool:")][0]
     assert "unknown tool" in tool_entry.result
+
+
+def test_run_with_empty_prompt_list_is_a_clear_error():
+    import pytest
+    from loom import Agent
+    from loom.providers import ModelResponse, ScriptedProvider
+
+    with pytest.raises(ValueError, match="at least one prompt"):
+        Agent(model=ScriptedProvider([ModelResponse(text="hi")])).run([])

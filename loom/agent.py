@@ -253,6 +253,8 @@ class Agent:
         episodes = (
             [str(p) for p in prompt] if isinstance(prompt, (list, tuple)) else [str(prompt)]
         )
+        if not episodes:
+            raise ValueError("run() needs at least one prompt (got an empty list)")
         rec = recorder or Recorder.record()
         if self.journal and rec.allow_live:
             # Write-ahead journal: header + any replayed prefix now, then every

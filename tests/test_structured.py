@@ -146,3 +146,12 @@ def test_validated_run_replays_deterministically(tmp_path):
     assert replayed.output == run.output
     assert replayed.parsed == run.parsed
     assert replayed.num_model_calls == 2  # retry path walked again, zero API calls
+
+
+def test_extract_json_skips_prose_braces_before_the_object():
+    from loom.structured import extract_json
+
+    # a stray '{' in prose before the real JSON must not defeat extraction
+    assert extract_json('the object { should contain {"x": 5}') == {"x": 5}
+    assert extract_json("note: use {curly} braces, here: {\"a\": 1}") == {"a": 1}
+    assert extract_json("I think the answer is {\"result\": 42} done") == {"result": 42}
