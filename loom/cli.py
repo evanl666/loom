@@ -1202,6 +1202,26 @@ def _cmd_kpi(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_fix(args: argparse.Namespace) -> int:
+    """A bad run becomes a fix PR: diagnosis + fix + regression guard."""
+    from .fix import build_fix, open_fix_pr
+
+    _load_trace_json(args.path)
+    result = build_fix(args.path, args.output or "loom-fix")
+    d = result["diagnosis"]
+    print(f"fix bundle -> {result['outdir']}/   ({d['failure']} · {d['fix_category']})")
+    for f in result["files"]:
+        print(f"  {f}")
+    print(f"\nroot cause: {d['diagnosis']}")
+    print(f"fix: {d['suggestion']}")
+    if args.open_pr:
+        ok, msg = open_fix_pr(result["outdir"], _slug_from(args.path))
+        print(("\nopened PR: " if ok else "\ncould not open PR: ") + msg)
+        return 0 if ok else 1
+    print(f"\nreview FIX.md, then: loom fix from {args.path} --open-pr")
+    return 0
+
+
 def _cmd_regression(args: argparse.Namespace) -> int:
     """Turn a bad run into a regression guard (fixture + policy + test + CI)."""
     from .regression import build_regression, open_pr
@@ -2518,6 +2538,15 @@ def build_parser() -> argparse.ArgumentParser:
     kp.add_argument("--html", default="", metavar="FILE", help="write a dashboard")
     kp.add_argument("--json", action="store_true", help="machine-readable")
     kp.set_defaults(func=_cmd_kpi)
+
+    fx = sub.add_parser("fix", help="turn a bad run into a fix PR (diagnosis + guard)")
+    fxsub = fx.add_subparsers(dest="fix_cmd", required=True)
+    fx_from = fxsub.add_parser("from", help="generate FIX.md + pr-body + regression guard")
+    fx_from.add_argument("path")
+    fx_from.add_argument("-o", "--output", default="", help="output dir (default loom-fix/)")
+    fx_from.add_argument("--open-pr", action="store_true", dest="open_pr",
+                         help="branch + commit + PR via git/gh, body from pr-body.md")
+    fx_from.set_defaults(func=_cmd_fix)
 
     rg = sub.add_parser("regression", help="turn a bad run into a regression guard")
     rgsub = rg.add_subparsers(dest="regression_cmd", required=True)
