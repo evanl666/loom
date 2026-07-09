@@ -1053,6 +1053,97 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_map(args: argparse.Namespace) -> int:
+    """The side-effect map: everything the run changed or reached, one view."""
+    from .insight import describe_map, side_effect_map
+
+    _import_builtin_packs()
+    print(describe_map(side_effect_map(_load_trace_json(args.path))))
+    return 0
+
+
+def _cmd_graph(args: argparse.Namespace) -> int:
+    """The delegation/causality tree across subagent depths."""
+    from .insight import causality_tree
+
+    _import_builtin_packs()
+    out = causality_tree(_load_trace_json(args.path))
+    print(out or "no actions recorded")
+    return 0
+
+
+def _cmd_provenance(args: argparse.Namespace) -> int:
+    """Link each claim in the final answer to the tool results behind it."""
+    from .insight import provenance
+
+    _import_builtin_packs()
+    rows = provenance(_load_trace_json(args.path))
+    if not rows:
+        print("no final answer to attribute")
+        return 1
+    unsupported = 0
+    for row in rows:
+        print(f"• {row['claim']}")
+        if row["evidence"]:
+            for e in row["evidence"]:
+                print(f"    ⤷ [{e['step']}] {e['tool']}: {e['snippet']}")
+        else:
+            unsupported += 1
+            print("    ⤷ (no supporting tool result found)")
+    if unsupported:
+        print(f"\n⚠️  {unsupported} claim(s) without supporting evidence")
+    return 0
+
+
+def _cmd_flake(args: argparse.Namespace) -> int:
+    """Divergence heatmap across repeated recordings of the same task."""
+    from .insight import describe_flakiness, flakiness
+
+    paths = _expand_trace_paths(args.paths)
+    traces = []
+    for p in paths:
+        try:
+            with open(p) as f:
+                traces.append(json.load(f))
+        except (OSError, json.JSONDecodeError):
+            continue
+    if len(traces) < 2:
+        raise CLIError("flake needs at least two traces of the same task")
+    print(describe_flakiness(flakiness(traces)))
+    return 0
+
+
+def _cmd_note(args: argparse.Namespace) -> int:
+    """Annotate a trace step (sidecar file; the seed of the replay room)."""
+    import os
+    import time
+
+    _load_trace_json(args.path)  # friendly error for non-traces
+    notes_path = args.path + ".notes.json"
+    try:
+        with open(notes_path) as f:
+            notes = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        notes = []
+
+    if args.message:
+        who = args.by or os.environ.get("USER", "")
+        notes.append({"step": args.step, "by": who, "text": args.message,
+                      "ts": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        with open(notes_path, "w") as f:
+            json.dump(notes, f, indent=2)
+        print(f"noted step {args.step} -> {notes_path}")
+        return 0
+
+    if not notes:
+        print("no notes yet (add one: loom note <trace> --step N -m 'text')")
+        return 0
+    for n in sorted(notes, key=lambda x: (x.get("step") or 0)):
+        who = f" — {n['by']}" if n.get("by") else ""
+        print(f"  [{n.get('step', '?'):>3}] {n['text']}{who}  ({n.get('ts', '')})")
+    return 0
+
+
 def _cmd_packs(args: argparse.Namespace) -> int:
     """List domain packs: built-ins plus pip-installed plugins."""
     from importlib import metadata
@@ -1180,6 +1271,20 @@ def _cmd_share(args: argparse.Namespace) -> int:
 
 def _cmd_why(args: argparse.Namespace) -> int:
     """Ask a debugger agent a question about a saved trace."""
+    if args.step is not None:
+        # Offline "why did it do THAT?": stated intent + the observations the
+        # action most plausibly drew on. Instant, deterministic, no API calls.
+        from .insight import describe_why, why_action
+
+        _import_builtin_packs()
+        try:
+            print(describe_why(why_action(_load_trace_json(args.path), args.step)))
+        except ValueError as e:
+            raise CLIError(str(e))
+        return 0
+    if not args.question:
+        raise CLIError("why needs a question, or --step N for the offline explanation")
+
     from .why import why
 
     try:
@@ -2053,12 +2158,40 @@ def build_parser() -> argparse.ArgumentParser:
                     help="write a redaction audit report (what/where, no values; '-' for stdout)")
     sc.set_defaults(func=_cmd_scrub)
 
-    wy = sub.add_parser("why", help="ask a debugger agent about a saved trace")
+    wy = sub.add_parser("why", help="ask a debugger agent about a saved trace "
+                                    "(or --step N for the offline action explanation)")
     wy.add_argument("path")
-    wy.add_argument("question")
+    wy.add_argument("question", nargs="?", default="")
+    wy.add_argument("--step", type=int, default=None,
+                    help="explain the action at this step offline: intent, risk, "
+                         "policy, and the observations it drew on (no API calls)")
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    mp = sub.add_parser("map", help="side-effect map: everything the run changed or reached")
+    mp.add_argument("path")
+    mp.set_defaults(func=_cmd_map)
+
+    gr = sub.add_parser("graph", help="delegation/causality tree across subagent depths")
+    gr.add_argument("path")
+    gr.set_defaults(func=_cmd_graph)
+
+    pv = sub.add_parser("provenance",
+                        help="link each claim in the final answer to its tool-result evidence")
+    pv.add_argument("path")
+    pv.set_defaults(func=_cmd_provenance)
+
+    fl = sub.add_parser("flake", help="divergence heatmap across repeated runs of one task")
+    fl.add_argument("paths", nargs="+", help="trace files and/or directories (first = baseline)")
+    fl.set_defaults(func=_cmd_flake)
+
+    nt = sub.add_parser("note", help="annotate a trace step (shared sidecar notes)")
+    nt.add_argument("path")
+    nt.add_argument("--step", type=int, default=None, help="the step the note is about")
+    nt.add_argument("-m", "--message", default="", help="the note text (omit to list notes)")
+    nt.add_argument("--by", default="", help="author (default: $USER)")
+    nt.set_defaults(func=_cmd_note)
 
     tr = sub.add_parser("trust", help="show the shield's trust ledger (approval streaks)")
     tr.add_argument("--ledger", default="", help="ledger file (default ~/.loom/trust.json)")

@@ -190,8 +190,27 @@ register(SqlPack())
 ```
 
 The **Coding Pack** ships built-in (file diffs, `git` undo, shell/secret
-risk) — it's simply the first pack. Browser / Data / Support packs plug in the
-same way, which is what makes Loom a debugger for agents it didn't build.
+risk) — it's simply the first pack. **SQL**, **Browser**, and **Support**
+packs ship too (`loom packs` lists them; any pip package with a `loom.packs`
+entry point joins automatically), which is what makes Loom a debugger for
+agents it didn't build.
+
+### The debugger's verbs
+
+```
+loom why trace --step 17        # why did it do THAT? intent + the observations it drew on
+loom map trace                  # side-effect map: everything the run changed or reached
+loom undo trace --plan          # per-action undo/compensation plans, every domain
+loom fork trace --from-step 17  # replay the prefix free, continue live (change anything)
+loom diff v1 v2 --actions       # behavior diff: run risk score 100 → 90 ⬇ (+user communication)
+loom policy simulate runs/ --policy p.yml   # rollout blast radius before you ship a rule
+loom search runs/ "path:pii_access->user_communication"   # ordered leak-path search
+loom provenance trace           # each claim in the answer → its tool-result evidence
+loom graph trace                # the delegation tree across subagents
+loom flake runs/                # same task N times: where do runs diverge first?
+loom note trace --step 17 -m "root cause"   # shared annotations on a step
+loom serve runs/                # the team trace server: search, Studio, incidents
+```
 
 ## Loom Shield: don't dangerously skip permissions
 

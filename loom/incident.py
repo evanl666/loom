@@ -329,6 +329,23 @@ def build_report(data: dict, path: str, why_output: str = "") -> str:
                      + "  _(* = already dirty before the run)_")
         if changes.get("agent_exit_code") is not None:
             lines.append(f"- agent process exited {changes['agent_exit_code']}")
+    # Exfiltration PATH: ordered evidence beats co-occurrence -- "read the
+    # secret, THEN reached the network" names the actual leak chain.
+    try:
+        from .action import sequence_hits
+
+        for first, then in (("secret", "network"), ("secret", "user_communication"),
+                            ("pii_access", "network"), ("pii_access", "user_communication"),
+                            ("pii_access", "browser_submit")):
+            hits = sequence_hits(data, first, then)
+            if hits:
+                a, b = hits[0]
+                lines.append(f"- ⛓ exfiltration path: [{a.step}] {a.tool} → "
+                             f"[{b.step}] {b.tool}")
+                break
+    except Exception:
+        pass
+
     # Affected systems, from each owning pack's StateDiff -- the generic view:
     # a support agent's blast radius is customers and money, not files.
     affected = _affected_systems(data)
