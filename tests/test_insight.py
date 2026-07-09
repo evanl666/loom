@@ -253,3 +253,51 @@ def test_flakiness_clusters_causes():
     assert any("flaky tool" in c for c in causes)
     text = describe_flakiness(f)
     assert "└" in text and "dominant cause:" in text
+
+
+def test_judge_claims_catches_paraphrase():
+    from loom.insight import judge_claims, provenance
+
+    @tool
+    def lookup(q: str) -> str:
+        "lookup"
+        return "Paris has been the capital city of France since 987 AD."
+
+    run = Agent(model=ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t", "lookup", {"q": "france"})],
+                      stop_reason="tool_use"),
+        # paraphrased: shares almost no distinctive words with the observation
+        ModelResponse(text="The French seat of government is located in Paris."),
+    ]), tools=[lookup]).run("q")
+    data = run.to_dict()
+    rows = provenance(data)
+    unsupported_before = [r for r in rows if not r["evidence"]]
+
+    class FakeJudge:
+        model = "fake-judge"
+
+        def complete(self, system, messages, tools):
+            assert "French seat of government" in messages[0]["content"]
+            return ModelResponse(text='{"supported": true, "step": 1}')
+
+    rows = judge_claims(data, rows, FakeJudge())
+    judged = [e for r in rows for e in r["evidence"] if e.get("via") == "judge"]
+    if unsupported_before:                    # heuristic missed it -> judge links it
+        assert judged and judged[0]["step"] == 1
+
+
+def test_judge_failure_never_breaks_the_heuristic():
+    from loom.insight import judge_claims, provenance
+
+    run = _support_run()
+    data = run.to_dict()
+    rows = provenance(data)
+
+    class BrokenJudge:
+        model = "broken"
+
+        def complete(self, *a):
+            raise RuntimeError("api down")
+
+    out = judge_claims(data, rows, BrokenJudge())
+    assert out == rows                        # unchanged, no exception

@@ -54,6 +54,12 @@ inputs:
       "policy"). Use it to block a PR that introduces newly-risky agent
       behavior the current policy would stop.
     default: 'false'
+  diagnose:
+    description: >-
+      When recorded runs are affected, run `loom diagnose --plan` on each
+      affected trace and add the root cause + fix suggestion + verify commands
+      to the PR comment (the doctor bot). Offline, no API calls.
+    default: 'true'
 
 outputs:
   affected:
@@ -144,6 +150,27 @@ runs:
         if [ -s loom-cost-line.txt ]; then echo "cost: $(cat loom-cost-line.txt)"; fi
         if [ -s loom-tools-line.txt ]; then echo "tools: $(cat loom-tools-line.txt)"; fi
         if [ -s loom-risk-line.txt ]; then echo "risk: $(cat loom-risk-line.txt)"; fi
+        exit 0
+
+    - name: Diagnose the affected runs
+      if: inputs.diagnose == 'true' && steps.impact.outputs.affected == 'true'
+      shell: bash
+      run: |
+        set +e
+        [ -f "$RUNNER_TEMP/loom-impact-head.json" ] || exit 0
+        python3 -c "
+        import json, os
+        head = json.load(open(os.environ['RUNNER_TEMP'] + '/loom-impact-head.json'))
+        for i in head['impacts']:
+            if i.get('verdict') not in (None, 'unchanged'):
+                print(i['path'])
+        " | while read -r trace; do
+          if [ -f "$trace" ]; then
+            echo "### $(basename "$trace")"
+            loom diagnose "$trace" --plan 2>/dev/null
+            echo
+          fi
+        done > loom-diagnose.txt
         exit 0
 
     - name: Simulate the firewall policy over the recorded runs
@@ -243,6 +270,15 @@ runs:
           if [ "$EXPORTED" = "true" ]; then
             echo
             echo "🔍 [Scrub through the affected runs in Studio](https://github.com/$REPO/actions/runs/$RUN_ID#artifacts) (\`loom-studio\` artifact)"
+          fi
+          if [ -s loom-diagnose.txt ]; then
+            echo
+            echo '<details><summary>🩺 Diagnosis (root cause + fix + verify)</summary>'
+            echo
+            echo '```'
+            cat loom-diagnose.txt
+            echo '```'
+            echo '</details>'
           fi
           if [ -s loom-policy.md ]; then
             echo

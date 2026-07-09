@@ -1400,7 +1400,7 @@ def _cmd_graph(args: argparse.Namespace) -> int:
 
 def _cmd_provenance(args: argparse.Namespace) -> int:
     """Link each claim in the final answer to the tool results behind it."""
-    from .insight import evidence_coverage, provenance
+    from .insight import provenance
 
     _import_builtin_packs()
     data = _load_trace_json(args.path)
@@ -1408,24 +1408,33 @@ def _cmd_provenance(args: argparse.Namespace) -> int:
     if not rows:
         print("no final answer to attribute")
         return 1
+    if args.judge:
+        from .insight import judge_claims
+
+        try:
+            rows = judge_claims(data, rows, args.judge)
+        except Exception as e:  # judge trouble degrades to the heuristic
+            print(f"loom: judge unavailable ({type(e).__name__}); heuristic only",
+                  file=sys.stderr)
     unsupported = 0
     for row in rows:
         print(f"• {row['claim']}")
         if row["evidence"]:
             for e in row["evidence"]:
-                print(f"    ⤷ [{e['step']}] {e['tool']}: {e['snippet']}")
+                via = "  (judge)" if e.get("via") == "judge" else ""
+                print(f"    ⤷ [{e['step']}] {e['tool']}: {e['snippet']}{via}")
         else:
             unsupported += 1
             print("    ⤷ (no supporting tool result found)")
-    cov = evidence_coverage(data)
-    print(f"\nevidence coverage: {cov['supported']}/{cov['claims']} "
-          f"claim(s) supported ({int(cov['coverage'] * 100)}%)")
-    if args.gate:
-        if cov["coverage"] < args.min_coverage:
-            print(f"loom: coverage {int(cov['coverage'] * 100)}% is below the "
-                  f"{int(args.min_coverage * 100)}% gate", file=sys.stderr)
-            return 1
-        return 0
+    # Coverage from the (possibly judge-enhanced) rows, so judged links count.
+    supported = len(rows) - unsupported
+    coverage = supported / len(rows)
+    print(f"\nevidence coverage: {supported}/{len(rows)} "
+          f"claim(s) supported ({int(coverage * 100)}%)")
+    if args.gate and coverage < args.min_coverage:
+        print(f"loom: coverage {int(coverage * 100)}% is below the "
+              f"{int(args.min_coverage * 100)}% gate", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -2740,6 +2749,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="exit 1 if evidence coverage is below --min-coverage (CI gate)")
     pv.add_argument("--min-coverage", dest="min_coverage", type=float, default=0.8,
                     help="minimum supported-claim ratio for --gate (default 0.8)")
+    pv.add_argument("--judge", default="", metavar="MODEL",
+                    help="re-check unsupported claims with an LLM judge (catches "
+                         "paraphrase; costs API calls; links marked '(judge)')")
     pv.set_defaults(func=_cmd_provenance)
 
     fl = sub.add_parser("flake", help="divergence heatmap across repeated runs of one task")

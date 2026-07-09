@@ -147,6 +147,53 @@ def provenance(source: Any) -> "list[dict]":
     return out
 
 
+def judge_claims(source: Any, rows: "list[dict]", judge) -> "list[dict]":
+    """Re-check UNSUPPORTED claims with an LLM judge (catches paraphrase).
+
+    The word-overlap heuristic misses evidence stated in different words; an
+    optional judge model closes that gap. ``judge`` is a model id string or a
+    provider. Only claims with no heuristic evidence are sent (costed work is
+    minimized); judged links carry ``via: "judge"`` so the provenance is
+    honest about HOW each link was made.
+    """
+    if isinstance(judge, str):
+        from .providers import AnthropicProvider
+
+        judge = AnthropicProvider(judge)
+    acts = actions(source)
+    observations = [(a.step, a.tool, a.observation.text) for a in acts
+                    if a.type == "call" and a.observation is not None and a.observation.text]
+    if not observations:
+        return rows
+    numbered = "\n".join(f"[{s}] {t}: {txt[:300]}" for s, t, txt in observations)
+    system = ("You verify whether a claim is supported by tool observations. Reply "
+              'with ONLY JSON: {"supported": true/false, "step": <observation step '
+              'number or null>}. Supported means the observation states or directly '
+              "implies the claim, even in different words.")
+    import json as _json
+    import re as _re
+
+    for row in rows:
+        if row["evidence"]:
+            continue
+        try:
+            resp = judge.complete(
+                system,
+                [{"role": "user",
+                  "content": f"Claim: {row['claim']}\n\nObservations:\n{numbered}"}], [])
+            m = _re.search(r"\{.*\}", getattr(resp, "text", "") or "", _re.S)
+            verdict = _json.loads(m.group(0))
+        except Exception:
+            continue  # judge trouble never breaks the heuristic result
+        if verdict.get("supported") and verdict.get("step") is not None:
+            step = int(verdict["step"])
+            match = next(((s, t, txt) for s, t, txt in observations if s == step), None)
+            if match:
+                row["evidence"].append({"step": match[0], "tool": match[1],
+                                        "snippet": _snippet(match[2]), "via": "judge"})
+    return rows
+
+
 def evidence_coverage(source: Any) -> dict:
     """How well the final answer is backed by tool results.
 
