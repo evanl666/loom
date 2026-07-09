@@ -855,10 +855,29 @@ def _cmd_approve(args: argparse.Namespace) -> int:
 
 def _cmd_scrub(args: argparse.Namespace) -> int:
     """Redact secrets from a saved trace (or just report them with --check)."""
-    from .scrub import scrub_trace
+    from .scrub import load_scrub_config, scrub_trace
+
+    config = None
+    if args.config:
+        config = load_scrub_config(args.config)
 
     data = _load_trace_json(args.path)
-    clean, found = scrub_trace(data, aggressive=args.aggressive)
+
+    if args.audit:
+        from .scrub import audit_report
+
+        report = audit_report(data, aggressive=args.aggressive, config=config)
+        out = args.audit if args.audit != "-" else None
+        text = json.dumps(report, indent=2)
+        if out:
+            with open(out, "w") as f:
+                f.write(text + "\n")
+            print(f"audit -> {out}  ({report['total']} redaction(s))")
+        else:
+            print(text)
+        return 0
+
+    clean, found = scrub_trace(data, aggressive=args.aggressive, config=config)
     total = sum(found.values())
     for kind in sorted(found):
         print(f"  {found[kind]:>3}x {kind}")
@@ -936,10 +955,11 @@ def _cmd_pack(args: argparse.Namespace) -> int:
 
 def _cmd_share(args: argparse.Namespace) -> int:
     """Produce a shareable copy: scrub secrets, then REFUSE to emit if any remain."""
-    from .scrub import scrub_text, scrub_trace
+    from .scrub import load_scrub_config, scrub_text, scrub_trace
 
+    config = load_scrub_config(args.config) if args.config else None
     data = _load_trace_json(args.path)
-    clean, found = scrub_trace(data, aggressive=args.aggressive)
+    clean, found = scrub_trace(data, aggressive=args.aggressive, config=config)
     total = sum(found.values())
     for kind in sorted(found):
         print(f"  redacted {found[kind]:>3}x {kind}")
@@ -1685,6 +1705,8 @@ def build_parser() -> argparse.ArgumentParser:
     sh.add_argument("path")
     sh.add_argument("-o", "--output", default="", help="output path (default *.shared.loom.json)")
     sh.add_argument("--aggressive", action="store_true", help="also redact high-entropy tokens")
+    sh.add_argument("--config", default="", metavar="FILE",
+                    help="loom-scrub.yml: custom detectors + an allowlist")
     sh.set_defaults(func=_cmd_share)
 
     sc = sub.add_parser("scrub", help="redact secrets from a trace before sharing it")
@@ -1695,6 +1717,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="report only; exit 1 if secrets are found (CI gate)")
     sc.add_argument("--aggressive", action="store_true",
                     help="also redact long high-entropy tokens (may false-positive)")
+    sc.add_argument("--config", default="", metavar="FILE",
+                    help="loom-scrub.yml: custom detectors + an allowlist")
+    sc.add_argument("--audit", default="", metavar="FILE",
+                    help="write a redaction audit report (what/where, no values; '-' for stdout)")
     sc.set_defaults(func=_cmd_scrub)
 
     wy = sub.add_parser("why", help="ask a debugger agent about a saved trace")

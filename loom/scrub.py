@@ -56,20 +56,63 @@ _ENTROPY_TOKEN = re.compile(r"[A-Za-z0-9+/=_\-]{32,}")
 _HEX_ONLY = re.compile(r"^[0-9a-fA-F]+$")
 
 
+class ScrubConfig:
+    """Enterprise scrub policy: custom detectors + an allowlist.
+
+    ``detectors`` are extra ``(name, regex)`` pairs (a company's own secret
+    shapes); ``allow`` is a list of literal strings or globs that must never be
+    redacted (documented example keys, known-safe values) -- the false-positive
+    escape hatch. Loaded from ``loom-scrub.yml``/``.json``.
+    """
+
+    def __init__(self, detectors: "list[tuple[str, str]] | None" = None,
+                 allow: "list[str] | None" = None):
+        self.detectors = [(n, re.compile(p)) for n, p in (detectors or [])]
+        self.allow = list(allow or [])
+
+    def allowed(self, value: str) -> bool:
+        from fnmatch import fnmatch
+
+        return any(value == a or fnmatch(value, a) for a in self.allow)
+
+
+def load_scrub_config(path: str) -> ScrubConfig:
+    """Load a scrub config (YAML or JSON) via the bounded policy parser."""
+    from .policy_file import _parse
+
+    with open(path) as f:
+        doc = _parse(f.read(), path) or {}
+    detectors = list((doc.get("detectors") or {}).items())
+    return ScrubConfig(detectors=detectors, allow=doc.get("allow") or [])
+
+
 def _shannon(s: str) -> float:
     counts = Counter(s)
     return -sum(c / len(s) * math.log2(c / len(s)) for c in counts.values())
 
 
-def scrub_text(text: str, aggressive: bool = False) -> "tuple[str, Counter]":
-    """Redact secrets in one string. Returns (clean text, counts by kind)."""
-    found: Counter = Counter()
+def scrub_text(text: str, aggressive: bool = False,
+               config: "ScrubConfig | None" = None) -> "tuple[str, Counter]":
+    """Redact secrets in one string. Returns (clean text, counts by kind).
 
-    for kind, pattern in PATTERNS:
+    Custom detectors from ``config`` run first (most specific), and any match
+    in the config's allowlist is left intact.
+    """
+    found: Counter = Counter()
+    allow = config.allowed if config is not None else (lambda v: False)
+    patterns = ((config.detectors if config is not None else []) + PATTERNS)
+
+    for kind, pattern in patterns:
         def _hit(m: "re.Match", kind=kind) -> str:
-            found[kind] += 1
+            matched = m.group(0)
             if kind == "credential-assignment":
+                if allow(m.group(3)):        # the value is allowlisted -> keep
+                    return matched
+                found[kind] += 1
                 return f"{m.group(1)}{m.group(2)}[scrubbed:{kind}]"
+            if allow(matched):               # the whole match is allowlisted -> keep
+                return matched
+            found[kind] += 1
             return f"[scrubbed:{kind}]"
 
         text = pattern.sub(_hit, text)
@@ -96,28 +139,51 @@ def scrub_text(text: str, aggressive: bool = False) -> "tuple[str, Counter]":
     return text, found
 
 
-def scrub_obj(obj, aggressive: bool = False):
+def scrub_obj(obj, aggressive: bool = False, config: "ScrubConfig | None" = None,
+              audit: "list | None" = None):
     """Recursively scrub every string value in a JSON-shaped object.
 
     Returns (new object, counts). The input is never mutated -- callers may
-    still need the real values (e.g. the proxy answering its client).
+    still need the real values (e.g. the proxy answering its client). Pass an
+    ``audit`` list to collect ``{path, kind}`` records (paths, never values) of
+    where redactions happened.
     """
     found: Counter = Counter()
 
-    def walk(x):
+    def walk(x, path):
         if isinstance(x, str):
-            clean, hits = scrub_text(x, aggressive=aggressive)
+            clean, hits = scrub_text(x, aggressive=aggressive, config=config)
             found.update(hits)
+            if audit is not None:
+                for kind, n in hits.items():
+                    audit.append({"path": path or "(root)", "kind": kind, "count": n})
             return clean
         if isinstance(x, dict):
-            return {k: walk(v) for k, v in x.items()}
+            return {k: walk(v, f"{path}.{k}" if path else k) for k, v in x.items()}
         if isinstance(x, list):
-            return [walk(v) for v in x]
+            return [walk(v, f"{path}[{i}]") for i, v in enumerate(x)]
         return x
 
-    return walk(obj), found
+    return walk(obj, ""), found
 
 
-def scrub_trace(data: dict, aggressive: bool = False) -> "tuple[dict, Counter]":
+def scrub_trace(data: dict, aggressive: bool = False,
+                config: "ScrubConfig | None" = None) -> "tuple[dict, Counter]":
     """Scrub a whole trace dict (episodes, effects, wire, shield events...)."""
-    return scrub_obj(data, aggressive=aggressive)
+    return scrub_obj(data, aggressive=aggressive, config=config)
+
+
+def audit_report(data: dict, aggressive: bool = False,
+                 config: "ScrubConfig | None" = None) -> dict:
+    """What would be redacted, and where -- for a compliance record. No values."""
+    entries: list = []
+    scrub_obj(data, aggressive=aggressive, config=config, audit=entries)
+    by_kind: Counter = Counter()
+    for e in entries:
+        by_kind[e["kind"]] += e["count"]
+    # Collapse to unique (path, kind) with summed counts, sorted by kind.
+    return {
+        "total": sum(by_kind.values()),
+        "by_kind": dict(sorted(by_kind.items())),
+        "locations": sorted(entries, key=lambda e: (e["kind"], e["path"])),
+    }

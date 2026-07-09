@@ -355,6 +355,25 @@ JWTs, PEM blocks, `DB_PASSWORD=...` assignments); `--aggressive` adds an
 entropy detector. With `--scrub` the agent still sees real values — only the
 stored trace is redacted.
 
+**Enterprise scrub.** A `loom-scrub.yml` adds your company's own secret shapes
+and an allowlist for known-safe values (documented example keys, placeholders)
+so they're never touched:
+
+```yaml
+detectors:
+  acme-token: "ACME-[A-Z0-9]{12}"
+allow:
+  - "sk-ant-api03-EXAMPLE..."     # a documented sample key — leave it
+```
+```
+loom scrub trace.loom.json --config loom-scrub.yml
+loom scrub trace.loom.json --config loom-scrub.yml --audit report.json
+```
+
+`--audit` writes a redaction report — **what** was redacted and **where** (the
+field path), never the value itself — the compliance evidence that a trace is
+safe to keep or share.
+
 ## Ask the trace what happened
 
 ```
