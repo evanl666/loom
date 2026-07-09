@@ -46,7 +46,7 @@ def test_index_lists_runs_and_search_filters(server):
 
 
 def test_per_run_studio_and_incident_views(server):
-    studio = _get(server.url + "/run?p=env.loom.json")
+    studio = _get(server.url + "/run/studio?p=env.loom.json")
     assert "Actions — what it did, why, what changed" in studio  # the Action Debugger
     incident = _get(server.url + "/run?p=env.loom.json&view=incident")
     assert "Incident report" in incident
@@ -62,3 +62,52 @@ def test_path_traversal_is_blocked(server):
     with pytest.raises(urllib.error.HTTPError) as e:
         _get(server.url + "/run?p=../../etc/passwd")
     assert e.value.code == 404
+
+
+def _post(url, body):
+    req = urllib.request.Request(url, data=json.dumps(body).encode(),
+                                 headers={"content-type": "application/json"},
+                                 method="POST")
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def test_replay_room_comments_and_triage(server):
+    base = server.url
+    # the run page is a room: embedded studio + comment form
+    room = _get(base + "/run?p=env.loom.json")
+    assert "/run/studio?p=env.loom.json" in room
+    assert "Step comments (0)" in room and "copy permalink" in room
+
+    assert _post(base + "/api/notes?p=env.loom.json",
+                 {"step": 1, "text": "the leak starts here", "by": "evan"})["ok"]
+    assert _post(base + "/api/room?p=env.loom.json",
+                 {"owner": "evan", "root_cause": "stale config", "resolved": True})["ok"]
+
+    room2 = _get(base + "/run?p=env.loom.json")
+    assert "the leak starts here" in room2 and "Step comments (1)" in room2
+    assert "✓ resolved" in room2 and "stale config" in room2
+    # the run list surfaces triage state
+    idx = _get(base + "/")
+    assert "✓ resolved" in idx and "👤 evan" in idx
+    # the raw studio remains available for embedding
+    assert "Actions — what it did, why, what changed" in _get(base + "/run/studio?p=env.loom.json")
+
+
+def test_room_notes_interoperate_with_the_cli(server, tmp_path):
+    from loom.cli import main
+
+    base = server.url
+    _post(base + "/api/notes?p=ok.loom.json", {"step": 0, "text": "from the room", "by": "web"})
+    # `loom note` reads the same sidecar
+    trace = str(tmp_path / "ok.loom.json")
+    assert main(["note", trace]) == 0
+
+
+def test_post_traversal_and_bad_body_rejected(server):
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _post(server.url + "/api/notes?p=../../etc/passwd", {"text": "x"})
+    assert e.value.code == 404
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _post(server.url + "/api/notes?p=env.loom.json", {"text": ""})
+    assert e.value.code == 400

@@ -69,6 +69,11 @@ def _row_html(r: dict, root: str) -> str:
     rel = os.path.relpath(r["path"], root)
     tokens = (r["input_tokens"] or 0) + (r["output_tokens"] or 0)
     chips = []
+    room = _read_json(r["path"] + ".room.json", {})
+    if room.get("resolved"):
+        chips.append('<span class="chip" style="color:var(--model)">✓ resolved</span>')
+    if room.get("owner"):
+        chips.append(f'<span class="chip ok">👤 {_esc(room["owner"])}</span>')
     if r["shield_denies"]:
         chips.append(f'<span class="chip deny">🛡 {r["shield_denies"]} denied</span>')
     if r["risk"]:
@@ -114,6 +119,136 @@ def index_html(lake: Lake, root: str, query: str = "") -> str:
 {body}</table>
 <footer>loom {__version__} — search syntax: free text, tool:NAME, model:GLOB,
 risk:CATEGORY, risky, failed, shield:deny, healed, cost&gt;N</footer>
+</body></html>"""
+
+
+def _read_json(path: str, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _write_json(path: str, data) -> None:
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+
+
+_ROOM_CSS = """
+body { padding: 0; max-width: none; }
+.roombar { display:flex; gap:14px; align-items:center; flex-wrap:wrap;
+  padding:14px 22px; border-bottom:1px solid var(--grid); background:var(--surface); }
+.roombar h1 { font-size:16px; margin:0; }
+.roombar .chip { font-size:11px; }
+.roombar .chip.resolved { color:var(--model); }
+.roombar input[type=text] { font:inherit; font-size:13px; padding:4px 10px;
+  border-radius:8px; border:1px solid var(--grid); background:var(--page);
+  color:var(--ink); width:150px; }
+.roombar label { font-size:12px; color:var(--muted); display:flex; gap:6px;
+  align-items:center; }
+.roombar button, .roombar a.btn { font:inherit; font-size:12px; padding:5px 12px;
+  border-radius:99px; border:1px solid var(--grid); background:var(--page);
+  color:var(--ink); cursor:pointer; text-decoration:none; }
+.roombar button:hover, .roombar a.btn:hover { border-color:var(--model);
+  color:var(--model); }
+.roomcols { display:grid; grid-template-columns: minmax(0,1fr) 340px; height: calc(100vh - 61px); }
+@media (max-width: 900px) { .roomcols { grid-template-columns:1fr; height:auto; } }
+.roomcols iframe { width:100%; height:100%; border:none; min-height:70vh; }
+.comments { border-left:1px solid var(--grid); background:var(--surface);
+  overflow-y:auto; padding:16px; }
+.comments h2 { font-size:12px; color:var(--muted); text-transform:uppercase;
+  letter-spacing:.06em; margin-bottom:10px; }
+.note { border:1px solid var(--grid); border-radius:10px; padding:8px 12px;
+  margin-bottom:8px; font-size:13px; }
+.note .who { color:var(--muted); font-size:11px; margin-top:4px; }
+.note .step { color:var(--model); font-variant-numeric:tabular-nums;
+  font-size:11px; }
+.comments form { margin-top:12px; display:flex; flex-direction:column; gap:6px; }
+.comments input, .comments textarea { font:inherit; font-size:13px; padding:6px 10px;
+  border-radius:8px; border:1px solid var(--grid); background:var(--page);
+  color:var(--ink); }
+.comments textarea { min-height:60px; resize:vertical; }
+"""
+
+
+def room_html(rel: str, full: str, data: dict, base_url: str) -> str:
+    """The replay room: triage state + step comments around the embedded Studio."""
+    room = _read_json(full + ".room.json", {})
+    notes = _read_json(full + ".notes.json", [])
+    name = os.path.basename(full)
+    permalink = f"{base_url}/run?p={rel}"
+    prompt = (data.get("episodes") or [data.get("prompt", "")])[0]
+
+    note_html = "".join(
+        f'<div class="note"><span class="step">[{_esc(n.get("step", "?"))}]</span> '
+        f'{_esc(n.get("text", ""))}'
+        f'<div class="who">{_esc(n.get("by") or "anonymous")} · {_esc(n.get("ts", ""))}</div></div>'
+        for n in sorted(notes, key=lambda x: (x.get("step") or 0))
+    ) or '<div class="empty">no comments yet — be the first to mark a step</div>'
+
+    resolved = bool(room.get("resolved"))
+    status_chip = ('<span class="chip resolved">✓ resolved</span>' if resolved
+                   else '<span class="chip risk">● open</span>')
+    issue_body = (f"Loom replay room: {permalink}%0A%0ARun: {name}%0APrompt: "
+                  f"{_esc(prompt[:120])}")
+    issue_url = f"https://github.com/issues/new?title=Agent%20run%20incident:%20{name}&body={issue_body}"
+
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Room — {_esc(name)}</title>
+<style>{_CSS}{_ROOM_CSS}</style></head><body>
+<div class="roombar">
+  <a href="/" class="btn">← runs</a>
+  <h1>{_esc(name)}</h1>
+  {status_chip}
+  <label>owner <input type="text" id="owner" value="{_esc(room.get("owner", ""))}"
+    placeholder="who's on it?"></label>
+  <label>root cause <input type="text" id="root_cause"
+    value="{_esc(room.get("root_cause", ""))}" placeholder="label it"></label>
+  <label><input type="checkbox" id="resolved" {"checked" if resolved else ""}> resolved</label>
+  <button onclick="saveRoom()">save</button>
+  <button onclick="navigator.clipboard.writeText('{_esc(permalink)}');this.textContent='copied!'">
+    copy permalink</button>
+  <a class="btn" href="{issue_url}" target="_blank">open GitHub issue</a>
+  <a class="btn" href="/run?p={_esc(rel)}&view=incident" target="_blank">incident report</a>
+</div>
+<div class="roomcols">
+  <iframe src="/run/studio?p={_esc(rel)}" title="Action Debugger"></iframe>
+  <div class="comments">
+    <h2>Step comments ({len(notes)})</h2>
+    {note_html}
+    <form onsubmit="addNote(event)">
+      <input type="number" id="n-step" placeholder="step #" min="0">
+      <textarea id="n-text" placeholder="what happened at this step?" required></textarea>
+      <input type="text" id="n-by" placeholder="your name">
+      <button type="submit">comment</button>
+    </form>
+  </div>
+</div>
+<script>
+const P = {json.dumps(rel)};
+async function post(path, body) {{
+  const r = await fetch(path + '?p=' + encodeURIComponent(P), {{
+    method: 'POST', headers: {{'content-type': 'application/json'}},
+    body: JSON.stringify(body)}});
+  if (r.ok) location.reload(); else alert('failed: ' + (await r.text()));
+}}
+function saveRoom() {{
+  post('/api/room', {{
+    owner: document.getElementById('owner').value,
+    root_cause: document.getElementById('root_cause').value,
+    resolved: document.getElementById('resolved').checked }});
+}}
+function addNote(ev) {{
+  ev.preventDefault();
+  const step = document.getElementById('n-step').value;
+  post('/api/notes', {{
+    step: step === '' ? null : +step,
+    text: document.getElementById('n-text').value,
+    by: document.getElementById('n-by').value }});
+}}
+</script>
 </body></html>"""
 
 
@@ -167,8 +302,9 @@ class _Handler(BaseHTTPRequestHandler):
             finally:
                 lake.close()
             return
-        if url.path == "/run":
-            full = self._trace_path((qs.get("p") or [""])[0])
+        if url.path in ("/run", "/run/studio"):
+            rel = (qs.get("p") or [""])[0]
+            full = self._trace_path(rel)
             if full is None:
                 self._send(404, "<h1>404</h1><p>no such trace</p>")
                 return
@@ -186,9 +322,57 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             from .export import trace_to_html
 
-            self._send(200, trace_to_html(data, path=os.path.basename(full)))
+            if url.path == "/run/studio":  # the raw debugger, embedded by the room
+                self._send(200, trace_to_html(data, path=os.path.basename(full)))
+                return
+            self._send(200, room_html(rel, full, data, self._server_url()))
             return
         self._send(404, "<h1>404</h1>")
+
+    def _server_url(self) -> str:
+        host, port = self.server.server_address[0], self.server.server_address[1]  # type: ignore[attr-defined]
+        return f"http://{host}:{port}"
+
+    def do_POST(self):  # noqa: N802 (stdlib naming)
+        url = urlparse(self.path)
+        qs = parse_qs(url.query)
+        full = self._trace_path((qs.get("p") or [""])[0])
+        if full is None or url.path not in ("/api/notes", "/api/room"):
+            self._send(404, json.dumps({"error": "not found"}), "application/json")
+            return
+        try:
+            length = int(self.headers.get("content-length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            assert isinstance(body, dict)
+        except (ValueError, AssertionError):
+            self._send(400, json.dumps({"error": "bad json body"}), "application/json")
+            return
+
+        if url.path == "/api/notes":
+            # Same sidecar format as `loom note`, so CLI and room interoperate.
+            text = str(body.get("text") or "").strip()
+            if not text:
+                self._send(400, json.dumps({"error": "text required"}), "application/json")
+                return
+            import time
+
+            note = {"step": body.get("step"), "by": str(body.get("by") or ""),
+                    "text": text[:2000], "ts": time.strftime("%Y-%m-%dT%H:%M:%S")}
+            notes = _read_json(full + ".notes.json", [])
+            notes.append(note)
+            _write_json(full + ".notes.json", notes)
+            self._send(200, json.dumps({"ok": True, "notes": len(notes)}), "application/json")
+            return
+
+        # /api/room: root-cause label, owner, resolved -- the triage state.
+        room = _read_json(full + ".room.json", {})
+        for key in ("root_cause", "owner"):
+            if key in body:
+                room[key] = str(body[key])[:200]
+        if "resolved" in body:
+            room["resolved"] = bool(body["resolved"])
+        _write_json(full + ".room.json", room)
+        self._send(200, json.dumps({"ok": True, **room}), "application/json")
 
 
 class TraceServer:
