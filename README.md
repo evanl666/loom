@@ -246,6 +246,21 @@ decisions — and answers with seq numbers you can jump to in `loom studio`,
 fork, or bisect. The diagnosis is itself a loom run: save it, replay it, ask
 why about the why.
 
+## Incident reports: the postmortem writes itself
+
+```
+loom incident failed.loom.json -o postmortem.md
+```
+
+An agent incident becomes a structured RCA, computed **from the flight
+recording, offline**: verdict, blast radius (tokens, tools touched), a
+suspect timeline (failing tool calls, the model's final words), firewall
+decisions, context-health findings, whether the run ever *saw* credentials —
+then concrete prevention flags and the exact commands that turn the incident
+into a regression test. Add `--why` for an investigated root-cause narrative
+(the `loom why` debugger agent reads the trace and cites seqs; its diagnosis
+is itself a recorded run).
+
 ## Search every run you've ever recorded
 
 Traces are files — commit them, rsync them, drop them in a shared folder.

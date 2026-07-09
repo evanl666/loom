@@ -682,6 +682,30 @@ def _cmd_trust(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_incident(args: argparse.Namespace) -> int:
+    """Write an agent postmortem from a saved trace."""
+    from .incident import build_report
+
+    data = _load_trace_json(args.path)
+    why_output = ""
+    if args.why:
+        from .why import why
+
+        try:
+            run = why(args.path, args.question, model=args.model)
+            why_output = run.output
+        except Exception as e:  # the offline report still stands
+            why_output = f"_(why agent unavailable: {type(e).__name__}: {e})_"
+    report = build_report(data, args.path, why_output=why_output)
+    if args.output:
+        with open(args.output, "w") as f:
+            f.write(report + "\n")
+        print(f"wrote {args.output}")
+    else:
+        print(report)
+    return 0
+
+
 def _cmd_migrate(args: argparse.Namespace) -> int:
     """Bring traces to the current format version (and re-stamp checksums)."""
     from .migrate import migrate
@@ -924,6 +948,16 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--deny", action="store_true", help="deny instead of approving")
     ap.add_argument("--port", type=int, default=8788)
     ap.set_defaults(func=_cmd_approve)
+
+    ic = sub.add_parser("incident", help="write an agent postmortem from a saved trace")
+    ic.add_argument("path")
+    ic.add_argument("-o", "--output", default="", help="write markdown here instead of stdout")
+    ic.add_argument("--why", action="store_true",
+                    help="add an AI root-cause narrative (runs the loom why debugger; costs API calls)")
+    ic.add_argument("--question", default="What was the root cause of the failure? Cite seqs.",
+                    help="the question the why agent investigates (with --why)")
+    ic.add_argument("--model", default="claude-opus-4-8", help="model for --why")
+    ic.set_defaults(func=_cmd_incident)
 
     mg = sub.add_parser("migrate", help="bring traces to the current format version")
     mg.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
