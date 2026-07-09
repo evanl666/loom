@@ -1260,6 +1260,29 @@ def _cmd_alert(args: argparse.Namespace) -> int:
     return 1 if breached else 0
 
 
+def _cmd_leaderboard(args: argparse.Namespace) -> int:
+    """Rank agents by safety/cost/risk over a corpus (<dir>/<agent>/*.loom.json)."""
+    import os
+
+    from .leaderboard import compute_leaderboard, leaderboard_html, leaderboard_text
+
+    if not os.path.isdir(args.directory):
+        raise CLIError(f"{args.directory} is not a directory")
+    _import_builtin_packs()
+    rows = compute_leaderboard(args.directory)
+    if not rows:
+        raise CLIError("no agents found (expected <dir>/<agent-name>/*.loom.json)")
+    if args.json:
+        print(json.dumps(rows, indent=2))
+    elif args.html:
+        with open(args.html, "w") as f:
+            f.write(leaderboard_html(rows))
+        print(f"leaderboard -> {args.html}")
+    else:
+        print(leaderboard_text(rows))
+    return 0
+
+
 def _cmd_kpi(args: argparse.Namespace) -> int:
     """Platform KPIs over a corpus: failure rate, PII/money exposure, cost p95."""
     from .kpi import compute_kpis, kpi_html, kpi_text
@@ -2893,6 +2916,12 @@ def build_parser() -> argparse.ArgumentParser:
     dg.add_argument("--plan", action="store_true", help="also emit the replay/fork verify commands")
     dg.add_argument("--json", action="store_true", help="machine-readable")
     dg.set_defaults(func=_cmd_diagnose)
+
+    lb = sub.add_parser("leaderboard", help="rank agents by safety/cost/risk (<dir>/<agent>/*.loom.json)")
+    lb.add_argument("directory")
+    lb.add_argument("--html", default="", metavar="FILE", help="write an HTML leaderboard")
+    lb.add_argument("--json", action="store_true", help="machine-readable")
+    lb.set_defaults(func=_cmd_leaderboard)
 
     al = sub.add_parser("alert", help="thresholds over the fleet: exit 1 + webhook on breach")
     al.add_argument("paths", nargs="+", help="trace files and/or directories")
