@@ -1069,6 +1069,22 @@ def _cmd_fork(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    """Classify a run's failure and propose a categorized fix + verify plan."""
+    import os
+
+    from .diagnose import describe_diagnosis, diagnose
+
+    _import_builtin_packs()
+    data = _load_trace_json(args.path)
+    d = diagnose(data, os.path.basename(args.path))
+    if args.json:
+        print(json.dumps(d, indent=2))
+    else:
+        print(describe_diagnosis(d, plan=args.plan))
+    return 0
+
+
 def _cmd_kpi(args: argparse.Namespace) -> int:
     """Platform KPIs over a corpus: failure rate, PII/money exposure, cost p95."""
     from .kpi import compute_kpis, kpi_html, kpi_text
@@ -2338,6 +2354,12 @@ def build_parser() -> argparse.ArgumentParser:
     wy.add_argument("--model", default="claude-opus-4-8")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
+
+    dg = sub.add_parser("diagnose", help="classify a failure and propose a fix + verify plan")
+    dg.add_argument("path")
+    dg.add_argument("--plan", action="store_true", help="also emit the replay/fork verify commands")
+    dg.add_argument("--json", action="store_true", help="machine-readable")
+    dg.set_defaults(func=_cmd_diagnose)
 
     kp = sub.add_parser("kpi", help="platform KPIs over a corpus (failure/PII/money/cost trends)")
     kp.add_argument("paths", nargs="+", help="trace files and/or directories")
