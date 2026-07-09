@@ -300,13 +300,21 @@ def _build_shield(args: argparse.Namespace):
         if not val:
             raise CLIError(f"env var {args.sign_approvals_key_env} is not set")
         sign_key = val.encode()
-    # Approver policy from --require-approver 'pattern=a,b' plus any in the file.
+    # Approver policy from --require-approver 'pattern=a,b' (or 'pattern=2:a,b'
+    # for an approval CHAIN needing 2 distinct identities) plus any in the file.
     approvers = dict(policy.get("approvers", {}) or {})
     for spec in getattr(args, "require_approver", []) or []:
         pattern, _, names = spec.partition("=")
         if not names.strip():
             raise CLIError(f"--require-approver needs 'PATTERN=NAMES', got {spec!r}")
-        approvers[pattern.strip()] = [n.strip() for n in names.split(",") if n.strip()]
+        min_approvals = 1
+        head, sep, rest = names.partition(":")
+        if sep and head.strip().isdigit():
+            min_approvals, names = int(head), rest
+        approvers[pattern.strip()] = {
+            "names": [n.strip() for n in names.split(",") if n.strip()],
+            "min": min_approvals,
+        }
 
     return Shield(
         deny=list(policy.get("deny", [])) + (args.deny or []),
@@ -322,6 +330,7 @@ def _build_shield(args: argparse.Namespace):
         sequence=list(policy.get("sequence", [])) + (args.rule or []),
         sign_key=sign_key,
         approvers=approvers,
+        break_glass=list(policy.get("break_glass", [])) + (getattr(args, "break_glass", []) or []),
     )
 
 
@@ -2211,7 +2220,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--require-approver", dest="require_approver", action="append",
                         default=[], metavar="PATTERN=NAMES",
                         help="only these identities may APPROVE a capability, e.g. "
-                             "'cap:money_movement=alice,bob' (repeatable; anyone may still deny)")
+                             "'cap:money_movement=alice,bob'; prefix 'N:' for an approval "
+                             "chain needing N distinct identities ('cap:x=2:alice,bob'); "
+                             "repeatable; anyone may still deny")
+        sp.add_argument("--break-glass", dest="break_glass", action="append", default=[],
+                        metavar="NAME",
+                        help="an emergency identity that may single-handedly approve "
+                             "anything -- the decision is loudly flagged via=break-glass")
 
     def scrub_flag(sp) -> None:
         sp.add_argument("--scrub", action="store_true",

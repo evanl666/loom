@@ -132,6 +132,8 @@ def to_shield_kwargs(doc: dict) -> dict:
     # A policy file names it `require_approver`; the Shield kwarg is `approvers`.
     if doc.get("require_approver"):
         kwargs["approvers"] = doc["require_approver"]
+    if doc.get("break_glass"):
+        kwargs["break_glass"] = doc["break_glass"]
     return kwargs
 
 

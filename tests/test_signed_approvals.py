@@ -107,6 +107,102 @@ def test_build_shield_parses_require_approver_flag():
         profile="", policy="", deny=[], confirm=["cap:money_movement"], allow=[], rule=[],
         shield_default="allow", confirm_timeout=300.0, webhook="", judge="",
         judge_threshold=0.7, trust_after=0, trust_ledger="",
-        sign_approvals_key_env="", require_approver=["cap:money_movement=alice,bob"])
+        sign_approvals_key_env="", require_approver=["cap:money_movement=alice,bob"],
+        break_glass=[])
     shield = _build_shield(args)
-    assert shield.approvers == {"cap:money_movement": ["alice", "bob"]}
+    assert shield.approvers == {"cap:money_movement": {"names": ["alice", "bob"], "min": 1}}
+
+
+def test_approval_chain_requires_two_distinct_identities():
+    shield = Shield(confirm=["cap:money_movement"],
+                    approvers={"cap:money_movement": {"names": ["alice", "bob", "carol"],
+                                                      "min": 2}},
+                    sign_key=b"k", timeout=4)
+
+    def chain():
+        for _ in range(80):
+            pend = shield.pending_list()
+            if pend:
+                pid = pend[0]["id"]
+                assert pend[0]["required"] == 2
+                assert shield.decide_pending(pid, True, who="alice") is True
+                # one approval is NOT enough; still pending with alice recorded
+                still = shield.pending_list()
+                assert still and still[0]["approvals"] == ["alice"]
+                # alice approving twice doesn't satisfy the chain
+                shield.decide_pending(pid, True, who="alice")
+                assert shield.pending_list()
+                # bob completes the chain
+                assert shield.decide_pending(pid, True, who="bob") is True
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=chain)
+    t.start()
+    allowed, event = shield._judge("issue_refund", {"amount": 900})
+    t.join()
+    assert allowed is True
+    assert event["by"] == "alice+bob"
+    assert event["signature"].startswith("hmac-sha256:")
+
+
+def test_break_glass_approves_single_handedly_and_is_flagged():
+    shield = Shield(confirm=["cap:money_movement"],
+                    approvers={"cap:money_movement": {"names": ["alice", "bob"], "min": 2}},
+                    break_glass=["oncall"], timeout=4)
+
+    def glass():
+        for _ in range(80):
+            pend = shield.pending_list()
+            if pend:
+                assert shield.decide_pending(pend[0]["id"], True, who="oncall") is True
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=glass)
+    t.start()
+    allowed, event = shield._judge("issue_refund", {"amount": 900})
+    t.join()
+    assert allowed is True
+    assert event["via"] == "break-glass"          # loudly flagged
+    assert event["by"] == "oncall"
+
+
+def test_deny_short_circuits_a_chain():
+    shield = Shield(confirm=["cap:money_movement"],
+                    approvers={"cap:money_movement": {"names": ["alice", "bob"], "min": 2}},
+                    timeout=4)
+
+    def deny():
+        for _ in range(80):
+            pend = shield.pending_list()
+            if pend:
+                pid = pend[0]["id"]
+                shield.decide_pending(pid, True, who="alice")   # first approval
+                shield.decide_pending(pid, False, who="mallory")  # anyone may deny
+                return
+            time.sleep(0.05)
+
+    t = threading.Thread(target=deny)
+    t.start()
+    allowed, event = shield._judge("issue_refund", {"amount": 900})
+    t.join()
+    assert allowed is False and event["action"] == "deny"
+
+
+def test_build_shield_parses_chain_syntax_and_break_glass():
+    import argparse
+
+    from loom.cli import _build_shield
+
+    args = argparse.Namespace(
+        profile="", policy="", deny=[], confirm=["cap:money_movement"], allow=[], rule=[],
+        shield_default="allow", confirm_timeout=300.0, webhook="", judge="",
+        judge_threshold=0.7, trust_after=0, trust_ledger="",
+        sign_approvals_key_env="",
+        require_approver=["cap:money_movement=2:alice,bob"],
+        break_glass=["oncall"])
+    shield = _build_shield(args)
+    assert shield.approvers["cap:money_movement"] == {"names": ["alice", "bob"], "min": 2}
+    assert shield.break_glass == ["oncall"]
+    assert shield.required_approvals("issue_refund", {}) == 2

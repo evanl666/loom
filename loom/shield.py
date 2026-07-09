@@ -148,6 +148,9 @@ class PendingApproval:
     event: threading.Event = field(default_factory=threading.Event)
     decision: str = ""  # "" until decided, then "approve" or "deny"
     decided_by: str = ""  # who decided (operator identity), for the audit trail
+    approvals: list = field(default_factory=list)  # identities collected so far
+    required: int = 1  # distinct approvals needed (approval chains)
+    break_glass: bool = False  # decided via the break-glass identity
 
     def to_dict(self) -> dict:
         return {
@@ -156,6 +159,8 @@ class PendingApproval:
             "input": self.input,
             "rule": self.rule,
             "age_s": round(time.time() - self.created, 1),
+            **({"approvals": list(self.approvals), "required": self.required}
+               if self.required > 1 else {}),
         }
 
 
@@ -177,7 +182,8 @@ class Shield:
         trust_after: int = 0,
         sequence: "list[str] | tuple" = (),
         sign_key: "bytes | None" = None,
-        approvers: "dict[str, list[str]] | None" = None,
+        approvers: "dict | None" = None,
+        break_glass: "list[str] | tuple" = (),
     ):
         if default not in (ALLOW, CONFIRM, DENY):
             raise ValueError(f"default must be allow/confirm/deny, not {default!r}")
@@ -204,11 +210,23 @@ class Shield:
         # Signed decisions: an HMAC over each operator decision makes the audit
         # trail tamper-PROOF (verify with the same key). Approver policy: a
         # capability pattern -> the identities allowed to approve it, so a
-        # money-movement confirm can't be self-approved by just anyone.
+        # money-movement confirm can't be self-approved by just anyone. Values
+        # normalize to {"names": [...], "min": N} -- min > 1 is an approval
+        # CHAIN (N distinct listed identities must approve). break_glass
+        # identities may single-handedly approve anything, but the decision is
+        # loudly flagged in the event -- an audited emergency door, not a hole.
         self.sign_key = sign_key
-        self.approvers = dict(approvers or {})
+        self.approvers = {p: self._norm_approvers(v) for p, v in (approvers or {}).items()}
+        self.break_glass = list(break_glass)
         self.pending: dict[str, PendingApproval] = {}
         self.lock = threading.Lock()
+
+    @staticmethod
+    def _norm_approvers(value) -> dict:
+        if isinstance(value, dict):
+            return {"names": list(value.get("names", [])),
+                    "min": max(1, int(value.get("min", 1)))}
+        return {"names": list(value), "min": 1}
 
     # -- rules ------------------------------------------------------------
 
@@ -238,35 +256,61 @@ class Shield:
         with self.lock:
             return [p.to_dict() for p in self.pending.values() if not p.event.is_set()]
 
+    def _approval_spec(self, name: str, tool_input) -> "dict | None":
+        """The most demanding matching approver rule, or None when unrestricted."""
+        if not self.approvers:
+            return None
+        from .capabilities import matches_cap
+
+        best = None
+        for pattern, spec in self.approvers.items():
+            matches = (matches_cap(pattern, name, tool_input) if pattern.startswith("cap:")
+                       else fnmatch(name, pattern) or fnmatch(_signature(name, tool_input), pattern))
+            if matches and (best is None or spec["min"] > best["min"]):
+                best = spec
+        return best
+
     def approver_allowed(self, name: str, tool_input, who: str) -> bool:
         """Is ``who`` permitted to APPROVE this call under the approver policy?
 
         A denial never needs a permitted identity -- anyone may stop a call.
-        An approval of a capability with a required-approver list must come
-        from a listed identity."""
-        if not self.approvers:
+        Break-glass identities may approve anything (flagged in the event)."""
+        if who in self.break_glass:
             return True
-        from .capabilities import matches_cap
+        spec = self._approval_spec(name, tool_input)
+        return spec is None or who in spec["names"]
 
-        for pattern, allowed in self.approvers.items():
-            matches = (matches_cap(pattern, name, tool_input) if pattern.startswith("cap:")
-                       else fnmatch(name, pattern) or fnmatch(_signature(name, tool_input), pattern))
-            if matches and who not in allowed:
-                return False
-        return True
+    def required_approvals(self, name: str, tool_input) -> int:
+        spec = self._approval_spec(name, tool_input)
+        return spec["min"] if spec else 1
 
     def decide_pending(self, pending_id: str, approve: bool, who: str = "") -> bool:
+        """Record one operator decision. A deny decides immediately; an approve
+        decides when the chain is satisfied (``required`` distinct identities,
+        or one break-glass identity)."""
         with self.lock:
             p = self.pending.get(pending_id)
             if p is None or p.event.is_set():
                 return False
-            # Approver policy: an unauthorized approval is refused outright (the
-            # call stays pending until an authorized approver or the timeout).
-            if approve and not self.approver_allowed(p.tool, p.input, who):
+            if not approve:
+                p.decision = "deny"
+                p.decided_by = who
+                p.event.set()
+                return True
+            if not self.approver_allowed(p.tool, p.input, who):
                 return False
-            p.decision = "approve" if approve else "deny"
-            p.decided_by = who
-            p.event.set()
+            if who in self.break_glass:
+                p.decision = "approve"
+                p.decided_by = who
+                p.break_glass = True
+                p.event.set()
+                return True
+            if who not in p.approvals:
+                p.approvals.append(who)
+            if len(p.approvals) >= p.required:
+                p.decision = "approve"
+                p.decided_by = "+".join(p.approvals) if p.approvals else who
+                p.event.set()
             return True
 
     def _sign(self, event: dict) -> dict:
@@ -309,7 +353,8 @@ class Shield:
 
         Returns (approved, via, id, who) -- ``who`` is the operator identity
         that decided, for the audit trail (empty on timeout)."""
-        p = PendingApproval(id=uuid.uuid4().hex[:6], tool=name, input=tool_input, rule=rule)
+        p = PendingApproval(id=uuid.uuid4().hex[:6], tool=name, input=tool_input, rule=rule,
+                            required=self.required_approvals(name, tool_input))
         with self.lock:
             self.pending[p.id] = p
         if self.notify is not None:
@@ -324,7 +369,8 @@ class Shield:
             self.pending.pop(p.id, None)
         if not decided:
             return False, "timeout", p.id, ""
-        return p.decision == "approve", "operator", p.id, p.decided_by
+        via = "break-glass" if p.break_glass else "operator"
+        return p.decision == "approve", via, p.id, p.decided_by
 
     # -- screening ---------------------------------------------------------
 
