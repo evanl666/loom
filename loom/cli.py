@@ -19,6 +19,14 @@ from .effect import EffectEntry
 from .providers.base import ModelResponse
 
 
+class CLIError(Exception):
+    """A user-facing problem: printed as ``loom: <message>``, exit 2.
+
+    Raise it with a message that says BOTH what went wrong and what to do
+    next -- a traceback is a bug report, this is an answer.
+    """
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     from .agent import Agent
 
@@ -39,9 +47,28 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _load_log(path: str) -> "tuple[list[EffectEntry], dict]":
-    with open(path) as f:
-        data = json.load(f)
+    data = _load_trace_json(path)
+    if not isinstance(data.get("log"), list):
+        raise CLIError(
+            f"{path} is JSON but has no 'log' -- not a loom trace. Traces are "
+            f"written by run.save(), `loom record`, or the proxy."
+        )
     return [EffectEntry.from_dict(e) for e in data["log"]], data
+
+
+def _load_trace_json(path: str) -> dict:
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        raise CLIError(f"no such file: {path}")
+    except IsADirectoryError:
+        raise CLIError(
+            f"{path} is a directory -- pass a single trace file "
+            f"(or use `loom test {path}` / `loom search {path}` for a corpus)"
+        )
+    except json.JSONDecodeError as e:
+        raise CLIError(f"{path} is not valid JSON (line {e.lineno}): expected a loom trace")
 
 
 def _cmd_timeline(args: argparse.Namespace) -> int:
@@ -148,8 +175,7 @@ def _cmd_export(args: argparse.Namespace) -> int:
     """Render a saved trace to a self-contained HTML page."""
     from .export import trace_to_html
 
-    with open(args.path) as f:
-        data = json.load(f)
+    data = _load_trace_json(args.path)
     out = args.output or (args.path.rsplit(".json", 1)[0] + ".html")
     with open(out, "w") as f:
         f.write(trace_to_html(data))
@@ -312,6 +338,11 @@ def _cmd_record(args: argparse.Namespace) -> int:
         print(f"  inspect it: loom studio {args.save}", file=sys.stderr)
     except (OSError, json.JSONDecodeError):
         print("\nno traffic recorded (did the agent talk to the API?)", file=sys.stderr)
+        if "openai" not in args.target:
+            print("  talking to OpenAI instead? add: --target https://api.openai.com",
+                  file=sys.stderr)
+        print(f"  expected the agent to honor {'OPENAI_BASE_URL' if 'openai' in args.target else 'ANTHROPIC_BASE_URL'}",
+              file=sys.stderr)
     return code
 
 
@@ -481,17 +512,26 @@ def _cmd_proxy(args: argparse.Namespace) -> int:
     if not args.replay:
         _recover_wirelog(args.save)
     shield = _build_shield(args)
-    server = ProxyServer(
+    try:
+        server = ProxyServer(
         port=args.port,
         target=args.target,
         save_path=args.save if not args.replay else None,
         replay_path=args.replay or None,
         shield=shield if not args.replay else None,
         scrub=args.scrub,
-        max_body=args.max_body_mb * 1024 * 1024,
-        upstream_timeout=args.upstream_timeout,
-        auth=args.auth,
-    )
+            max_body=args.max_body_mb * 1024 * 1024,
+            upstream_timeout=args.upstream_timeout,
+            auth=args.auth,
+        )
+    except ValueError:
+        raise CLIError(
+            f"{args.replay} has no recorded wire traffic -- it's a harness trace, "
+            f"not a proxy recording. `loom replay {args.replay}` replays those; "
+            f"`loom proxy --replay` needs a trace made by `loom record`/`loom proxy`."
+        )
+    except FileNotFoundError:
+        raise CLIError(f"no such file: {args.replay}")
     mode = f"replaying {args.replay}" if args.replay else f"recording -> {args.save}"
     print(f"loom proxy on http://127.0.0.1:{server.port} ({mode})")
     print(f"  export ANTHROPIC_BASE_URL=http://127.0.0.1:{server.port}")
@@ -570,8 +610,7 @@ def _cmd_scrub(args: argparse.Namespace) -> int:
     """Redact secrets from a saved trace (or just report them with --check)."""
     from .scrub import scrub_trace
 
-    with open(args.path) as f:
-        data = json.load(f)
+    data = _load_trace_json(args.path)
     clean, found = scrub_trace(data, aggressive=args.aggressive)
     total = sum(found.values())
     for kind in sorted(found):
@@ -898,7 +937,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: "list[str] | None" = None) -> int:
     args = build_parser().parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except CLIError as e:
+        print(f"loom: {e}", file=sys.stderr)
+        return 2
+    except FileNotFoundError as e:
+        print(f"loom: no such file: {getattr(e, 'filename', e)}", file=sys.stderr)
+        return 2
+    except json.JSONDecodeError as e:
+        print(f"loom: invalid JSON (line {e.lineno}) -- expected a loom trace", file=sys.stderr)
+        return 2
+    except KeyboardInterrupt:
+        return 130
 
 
 if __name__ == "__main__":

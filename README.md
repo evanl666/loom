@@ -13,7 +13,7 @@ zero API calls. Diff prompt changes before merging. Turn every agent bug into
 a regression test.
 
 ```
-pip install loom-harness                       # zero dependencies
+pip install loom-harness                       # zero dependencies (or: uvx --from loom-harness loom)
 
 loom record -- claude -p "fix the failing test"   # record a real Claude Code session
 loom studio session.loom.json                     # time-travel through it in your browser
