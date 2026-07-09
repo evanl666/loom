@@ -390,6 +390,21 @@ re-executed** — the same exactly-once guarantee replay gives, extended across
 process death. Recovery is idempotent: recovering a finished run just replays
 it. A torn final line (crash mid-write) is detected and ignored.
 
+**What's guaranteed — and what isn't.** The journal is two-phase: an `intent`
+line is flushed *before* a side effect executes, the `effect` line lands after
+its result is known. So every recorded effect replays exactly once — but a
+crash can still land in the window between a tool starting and its result
+hitting disk, and no journal on earth can know from the log alone whether that
+tool ran. Loom doesn't pretend otherwise: recovery finds the dangling intent
+and **raises `UnfinishedEffect`** instead of silently re-executing, telling
+you exactly which tool was in flight. You check the outside world, then
+`Run.recover(..., on_unfinished="retry")` to accept the re-execution.
+Harness-internal effects (model calls, memory recalls, compaction) retry
+silently — a repeated model call costs tokens, not correctness. For tools that
+are genuinely destructive and non-idempotent (payments, sends, deletes), give
+the tool itself an idempotency key; Loom makes the ambiguity *visible and
+exactly as wide as one effect*, but only the outside system can close it.
+
 ## Context-rot detection — and self-healing
 
 Context rot (stale, bloated, unused context) is the leading cause of agent

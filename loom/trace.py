@@ -180,7 +180,13 @@ class Run:
         return run
 
     @classmethod
-    def recover(cls, journal_path: str, agent: Any, resume: bool = True) -> "Run":
+    def recover(
+        cls,
+        journal_path: str,
+        agent: Any,
+        resume: bool = True,
+        on_unfinished: str = "fail",
+    ) -> "Run":
         """Recover a run from its write-ahead journal after a crash.
 
         The journaled prefix replays for free (no API calls, no re-executed
@@ -188,10 +194,19 @@ class Run:
         idempotent: recovering a journal of a run that actually finished simply
         replays it to the same result. Pass ``resume=False`` to get the partial
         run back for inspection without continuing it.
-        """
-        from .journal import Journal
 
-        header, log = Journal.read(journal_path)
+        If the journal ends in an unfinished TOOL intent -- the process died
+        after starting a tool but before its result hit disk -- the tool may or
+        may not have run, and only the outside world knows. Continuing would
+        execute it (again?), so recovery raises ``UnfinishedEffect`` by
+        default. Check the side effect yourself, then recover with
+        ``on_unfinished="retry"`` to accept the re-execution. Harness-internal
+        effects (model calls, memory, compaction...) are safe to retry and
+        recover without ceremony.
+        """
+        from .journal import Journal, UnfinishedEffect
+
+        header, log, unfinished = Journal.read_full(journal_path)
         episodes = list(header.get("episodes") or [""])
         if not resume:
             return cls(
@@ -202,6 +217,15 @@ class Run:
                 output="",
                 truncated=True,
                 episodes=episodes,
+            )
+        dangling = [d for d in unfinished if d.get("kind", "").startswith("tool:")]
+        if dangling and on_unfinished != "retry":
+            d = dangling[-1]
+            raise UnfinishedEffect(
+                f"journal ends with {d['kind']!r} (seq {d.get('seq')}) started but not "
+                f"finished: the crash landed between executing the tool and persisting "
+                f"its result, so it may or may not have run. Verify the side effect, "
+                f'then Run.recover(..., on_unfinished="retry") to re-execute it.'
             )
         rec = Recorder.fork(log, at=len(log))
         return agent.run(episodes, recorder=rec)

@@ -146,6 +146,11 @@ class Recorder:
         if cached is not None:
             encoded, result = cached, decode(cached)
         else:
+            if self.journal is not None:
+                # Phase one of the two-phase journal: declare the effect before
+                # it runs, so a crash mid-effect is distinguishable from a
+                # crash between effects (cache hits execute nothing -- no intent).
+                self.journal.intent(seq, kind, key, self.depth)
             self.executing = True
             try:
                 result = fn()

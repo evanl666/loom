@@ -346,15 +346,34 @@ def _cmd_heal(args: argparse.Namespace) -> int:
 
 def _cmd_skills(args: argparse.Namespace) -> int:
     """Mine proven tool sequences from a trace corpus into a skill library."""
-    from .skills import mine, save
+    from .skills import approve, mine, save
     from .trace import Run
+
+    if args.approve:
+        library = args.paths[0]
+        if approve(library, args.approve):
+            print(f"approved {args.approve} in {library}")
+            return 0
+        print(f"loom: no skill named {args.approve!r} in {library}", file=sys.stderr)
+        return 1
 
     paths = _expand_trace_paths(args.paths)
     if not paths:
         print("no traces found", file=sys.stderr)
         return 2
     runs = [Run.load(p) for p in paths]
-    skills = mine(runs, min_support=args.min_support)
+
+    check = None
+    if args.forbid or args.require:
+        def check(run) -> bool:
+            ok = True
+            if args.forbid:
+                ok = ok and args.forbid not in run.output
+            if args.require:
+                ok = ok and args.require in run.output
+            return ok
+
+    skills = mine(runs, min_support=args.min_support, check=check)
     if not skills:
         print(f"no sequences seen in >= {args.min_support} successful runs")
         return 1
@@ -366,7 +385,8 @@ def _cmd_skills(args: argparse.Namespace) -> int:
             print(f"  parameters: {', '.join(s.params)}")
     if args.save:
         save(skills, args.save)
-        print(f"\nsaved {len(skills)} skill(s) -> {args.save}")
+        print(f"\nsaved {len(skills)} skill(s) -> {args.save} (unapproved)")
+        print(f"review the steps, then arm one: loom skills {args.save} --approve <name>")
     return 0
 
 
@@ -698,9 +718,17 @@ def build_parser() -> argparse.ArgumentParser:
     he.set_defaults(func=_cmd_heal)
 
     sk = sub.add_parser("skills", help="mine proven tool sequences from traces into skills")
-    sk.add_argument("paths", nargs="+", help="trace files or directories of *.loom.json")
+    sk.add_argument("paths", nargs="+",
+                    help="trace files or directories of *.loom.json "
+                         "(with --approve: the skill library JSON)")
     sk.add_argument("--min-support", type=int, default=2, dest="min_support")
+    sk.add_argument("--require", default="",
+                    help="only mine runs whose output contains this (success filter)")
+    sk.add_argument("--forbid", default="",
+                    help="only mine runs whose output does NOT contain this")
     sk.add_argument("--save", default="", help="write the skill library to this JSON file")
+    sk.add_argument("--approve", default="", metavar="NAME",
+                    help="mark a skill in the given library as human-approved")
     sk.set_defaults(func=_cmd_skills)
 
     st = sub.add_parser("studio", help="export a trace to the Studio viewer and open it")

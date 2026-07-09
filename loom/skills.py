@@ -14,6 +14,15 @@ the mined occurrences become the skill's parameters; values that never change
 are baked in. A skill executes its underlying real tools in order and is
 recorded as a single tool effect -- so replays serve its recorded result
 without re-executing anything, like every other tool.
+
+Mined skills are hypotheses, not facts: "the run finished" does not mean "the
+run was RIGHT", and a skill bakes real tool executions into one opaque call.
+So mining takes a ``check`` (what counts as a successful run -- same idea as
+``heal``'s), skills are born ``approved=False``, and ``as_tool`` refuses to
+arm an unapproved skill until a human has looked at its steps:
+
+    skills = mine(runs, check=lambda run: "ERROR" not in run.output)
+    save(skills, "skills.json")     # review, then: loom skills skills.json --approve <name>
 """
 
 from __future__ import annotations
@@ -42,9 +51,21 @@ class Skill:
     steps: list[dict]  # [{"tool": name, "args": {...}}, ...]
     params: list[str] = field(default_factory=list)
     support: int = 0
+    approved: bool = False  # a human has reviewed the steps and armed the skill
 
-    def as_tool(self, toolmap: "dict[str, Tool] | list[Tool]") -> Tool:
-        """Wrap as a callable Tool, bound to the real tools it orchestrates."""
+    def as_tool(self, toolmap: "dict[str, Tool] | list[Tool]", force: bool = False) -> Tool:
+        """Wrap as a callable Tool, bound to the real tools it orchestrates.
+
+        Refuses unapproved skills: a mined sequence executes real tools in one
+        opaque step, so a human signs off on the steps first (``approved=True``,
+        or ``loom skills <library> --approve <name>``). ``force=True`` skips
+        the gate for experiments.
+        """
+        if not self.approved and not force:
+            raise PermissionError(
+                f"skill {self.name!r} is not approved -- review its steps, then "
+                f"set approved=True (CLI: loom skills <library.json> --approve {self.name})"
+            )
         tools = (
             {t.name: t for t in toolmap} if isinstance(toolmap, list) else dict(toolmap)
         )
@@ -82,6 +103,7 @@ class Skill:
             "steps": self.steps,
             "params": self.params,
             "support": self.support,
+            "approved": self.approved,
         }
 
     @staticmethod
@@ -100,15 +122,19 @@ def _call_sequence(run) -> list[tuple[str, dict]]:
     return calls
 
 
-def mine(runs: list, min_support: int = 2, min_len: int = 2) -> list[Skill]:
+def mine(runs: list, min_support: int = 2, min_len: int = 2, check=None) -> list[Skill]:
     """Extract skills: tool sequences seen in >= ``min_support`` successful runs.
 
-    Only finished runs count (paused/truncated ones prove nothing). Longer
-    sequences win over their own sub-sequences.
+    Paused/truncated runs never count. "Finished" is not "successful", though:
+    pass ``check`` (``run -> bool``) to say what success means -- e.g. the run's
+    output passed review, or contains no error marker. Without a check, every
+    finished run counts, and the resulting skills deserve extra scrutiny before
+    approval. Longer sequences win over their own sub-sequences.
     """
-    sequences = [
-        _call_sequence(r) for r in runs if not r.paused and not r.truncated
-    ]
+    candidates = [r for r in runs if not r.paused and not r.truncated]
+    if check is not None:
+        candidates = [r for r in candidates if check(r)]
+    sequences = [_call_sequence(r) for r in candidates]
     sequences = [s for s in sequences if len(s) >= min_len]
 
     # Count contiguous n-grams of tool names, remembering each occurrence's args.
@@ -186,3 +212,14 @@ def load(path: str) -> list[Skill]:
     """Load a skill library saved by ``save``."""
     with open(path) as f:
         return [Skill.from_dict(d) for d in json.load(f)]
+
+
+def approve(path: str, name: str) -> bool:
+    """Mark one skill in a saved library as human-approved. Returns False if absent."""
+    skills = load(path)
+    for s in skills:
+        if s.name == name:
+            s.approved = True
+            save(skills, path)
+            return True
+    return False

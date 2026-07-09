@@ -55,6 +55,7 @@ def test_mine_finds_the_pattern_and_learns_parameters():
 
 def test_skill_executes_as_one_tool_and_replays_free(tmp_path):
     skills = mine([record_run("Berlin"), record_run("Lisbon")])
+    skills[0].approved = True
     macro = skills[0].as_tool([geocode, forecast])
 
     provider = ScriptedProvider(
@@ -104,7 +105,8 @@ def test_skill_library_round_trips(tmp_path):
     save(skills, path)
     loaded = load(path)
     assert loaded == skills
-    # And the loaded skill still binds and runs.
+    # And the loaded skill still binds and runs (once a human arms it).
+    loaded[0].approved = True
     macro = loaded[0].as_tool([geocode, forecast])
     out = macro(city="Oslo", coords="Oslo@52.5,13.4")
     assert "metric" in out
@@ -112,8 +114,40 @@ def test_skill_library_round_trips(tmp_path):
 
 def test_missing_tool_is_a_clear_error():
     skills = mine([record_run("Berlin"), record_run("Lisbon")])
+    skills[0].approved = True
     try:
         skills[0].as_tool([geocode])  # forecast missing
         assert False, "expected KeyError"
     except KeyError as e:
         assert "forecast" in str(e)
+
+
+# ---------------------------------------------------------------- safety gate
+
+
+def test_unapproved_skills_refuse_to_arm():
+    import pytest
+
+    skills = mine([record_run("Berlin"), record_run("Lisbon")])
+    assert skills[0].approved is False  # mined skills are born unapproved
+    with pytest.raises(PermissionError, match="not approved"):
+        skills[0].as_tool([geocode, forecast])
+    skills[0].as_tool([geocode, forecast], force=True)  # experiments can override
+
+
+def test_mine_check_defines_success():
+    good, bad = record_run("Berlin"), record_run("Lisbon")
+    # Both runs finished -- but the check says only Berlin's answer was right.
+    assert mine([good, bad], check=lambda r: "Berlin" in r.output) == []
+    assert len(mine([good, bad], check=lambda r: "in" in r.output)) == 1
+
+
+def test_approve_updates_the_library(tmp_path):
+    from loom.skills import approve
+
+    skills = mine([record_run("Berlin"), record_run("Lisbon")])
+    path = str(tmp_path / "skills.json")
+    save(skills, path)
+    assert approve(path, skills[0].name) is True
+    assert load(path)[0].approved is True
+    assert approve(path, "no_such_skill") is False

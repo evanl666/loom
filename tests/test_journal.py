@@ -134,3 +134,76 @@ def test_ask_rewrites_journal_with_full_conversation(tmp_path):
     header, entries = Journal.read(path)
     assert header["episodes"] == ["first question", "second question"]
     assert len(entries) == len(run.log) == 2
+
+
+# ------------------------------------------------------------------ two-phase
+
+
+def test_intents_precede_effects_and_are_fulfilled(tmp_path):
+    path = str(tmp_path / "run.jsonl")
+    Agent(model=scripted(), tools=[expensive], journal=path).run("do the thing")
+
+    lines = [json.loads(line) for line in open(path)]
+    kinds = [(d["type"], d.get("kind")) for d in lines]
+    # every effect is announced first: intent(model), effect(model), intent(tool)...
+    assert kinds[1] == ("intent", "model") and kinds[2] == ("effect", "model")
+    assert kinds[3] == ("intent", "tool:expensive") and kinds[4] == ("effect", "tool:expensive")
+
+    header, entries, unfinished = Journal.read_full(path)
+    assert len(entries) == 3 and unfinished == []  # all intents fulfilled
+
+
+def test_crash_inside_a_tool_leaves_an_unfinished_intent(tmp_path):
+    # Build the exact crash artifact: a journal that stops right after a tool
+    # intent. (Exceptions inside tools are handled by the loop and recorded;
+    # only real process death -- kill -9, power loss -- produces this file.)
+    full = str(tmp_path / "full.jsonl")
+    Agent(model=scripted(), tools=[expensive], journal=full).run("do the thing")
+    lines = open(full).read().splitlines(keepends=True)
+    cut = next(
+        i for i, line in enumerate(lines)
+        if '"intent"' in line and '"tool:expensive"' in line
+    )
+    path = str(tmp_path / "boom.jsonl")
+    with open(path, "w") as f:
+        f.writelines(lines[: cut + 1])
+
+    _, entries, unfinished = Journal.read_full(path)
+    assert unfinished and unfinished[-1]["kind"] == "tool:expensive"
+
+    # Recovery refuses to guess whether the side effect happened...
+    from loom.journal import UnfinishedEffect
+
+    with pytest.raises(UnfinishedEffect, match="may or may not have run"):
+        Run.recover(path, agent=Agent(model=scripted(), tools=[expensive]))
+
+    # ...unless told the re-execution is acceptable. (The first scripted
+    # response was consumed before the crash and replays from the journal.)
+    EXPENSIVE_CALLS["count"] = 0
+    remaining = ScriptedProvider(
+        [ModelResponse(text="final answer after tool", stop_reason="end_turn")]
+    )
+    done = Run.recover(
+        path,
+        agent=Agent(model=remaining, tools=[expensive]),
+        on_unfinished="retry",
+    )
+    assert done.output == "final answer after tool"
+    assert EXPENSIVE_CALLS["count"] == 1  # the accepted re-execution
+
+    # Inspection without resuming never raises: reading is always safe.
+    partial = Run.recover(path, agent=Agent(model=scripted()), resume=False)
+    assert partial.truncated
+
+
+def test_unfinished_model_intent_recovers_silently(tmp_path):
+    path = str(tmp_path / "crash.jsonl")
+    provider = CrashingProvider(scripted(), crash_after=0)  # dies on first model call
+    with pytest.raises(ConnectionError):
+        Agent(model=provider, tools=[expensive], journal=path).run("do the thing")
+
+    _, _, unfinished = Journal.read_full(path)
+    assert unfinished and unfinished[-1]["kind"] == "model"
+    # model calls are harness-internal: retrying costs tokens, not correctness
+    run = Run.recover(path, agent=Agent(model=scripted(), tools=[expensive]))
+    assert run.output == "final answer after tool"

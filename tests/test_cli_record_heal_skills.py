@@ -102,6 +102,26 @@ def test_skills_cli_mines_and_saves(tmp_path, capsys):
         assert json.load(f)[0]["name"] == "skill_geocode_then_forecast"
 
 
+def test_skills_cli_approve_and_filters(tmp_path, capsys):
+    from tests.test_skills import record_run
+
+    for i, city in enumerate(["Berlin", "Lisbon"]):
+        record_run(city).save(str(tmp_path / f"r{i}.loom.json"))
+    lib = str(tmp_path / "skills.json")
+    main(["skills", str(tmp_path), "--save", lib])
+    assert "unapproved" in capsys.readouterr().out
+    with open(lib) as f:
+        assert json.load(f)[0]["approved"] is False
+
+    assert main(["skills", lib, "--approve", "skill_geocode_then_forecast"]) == 0
+    with open(lib) as f:
+        assert json.load(f)[0]["approved"] is True
+    assert main(["skills", lib, "--approve", "nope"]) == 1
+
+    # a success filter that no run passes -> nothing mined
+    assert main(["skills", str(tmp_path), "--require", "IMPOSSIBLE"]) == 1
+
+
 def test_skills_cli_reports_nothing_found(tmp_path, capsys):
     from tests.test_skills import record_run
 
