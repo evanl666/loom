@@ -120,6 +120,14 @@ runs:
         head = json.load(open(tmp + '/loom-impact-head.json'))
         print('\n'.join('- ' + b for b in blame(base, head)))
         " > loom-blame.txt 2>/dev/null
+        python3 -c "
+        import json, os
+        from loom.impact import score_line
+        tmp = os.environ['RUNNER_TEMP']
+        base = json.load(open(tmp + '/loom-impact-base.json'))
+        head = json.load(open(tmp + '/loom-impact-head.json'))
+        print(score_line(base, head))
+        " > loom-score-line.txt 2>/dev/null
         if [ -s loom-cost-line.txt ]; then echo "cost: $(cat loom-cost-line.txt)"; fi
         if [ -s loom-tools-line.txt ]; then echo "tools: $(cat loom-tools-line.txt)"; fi
         if [ -s loom-risk-line.txt ]; then echo "risk: $(cat loom-risk-line.txt)"; fi
@@ -186,6 +194,10 @@ runs:
           if [ -s loom-tools-line.txt ]; then
             echo
             echo "🧰 $(cat loom-tools-line.txt)"
+          fi
+          if [ -s loom-score-line.txt ]; then
+            echo
+            echo "🔒 **$(cat loom-score-line.txt)**"
           fi
           if [ -s loom-risk-line.txt ]; then
             echo

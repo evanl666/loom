@@ -3,9 +3,34 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
 
 jobs:
+  version-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: __version__ == pyproject == tag
+        run: |
+          pip install -e . --quiet
+          python - <<'EOF'
+          import os, re, sys
+          import loom
+          pyproject = re.search(r'^version = "([^"]+)"',
+                                open("pyproject.toml").read(), re.M).group(1)
+          assert loom.__version__ == pyproject, \
+              f"loom.__version__ {loom.__version__} != pyproject {pyproject}"
+          ref = os.environ.get("GITHUB_REF", "")
+          if ref.startswith("refs/tags/v"):
+              tag = ref.removeprefix("refs/tags/v")
+              assert pyproject == tag, f"pyproject {pyproject} != tag {tag}"
+          print(f"version consistent: {pyproject}")
+          EOF
+
   test:
     runs-on: ubuntu-latest
     strategy:

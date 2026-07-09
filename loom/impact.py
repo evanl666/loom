@@ -262,6 +262,45 @@ def tools_delta(base: "dict", head: "dict") -> str:
     return "this change " + "; ".join(parts) if parts else ""
 
 
+# Capability weights for the security score: how much surface each dangerous
+# capability opens. Deliberately simple and documented -- a reviewer should be
+# able to recompute the number in their head.
+_SCORE_WEIGHTS = {
+    "fs-destructive": 18,
+    "secret-read": 15,
+    "network-egress": 12,
+    "code-exec": 10,
+    "fs-write": 5,
+}
+
+
+def security_score(doc: "dict") -> "int | None":
+    """A 0-100 agent security score from the tool inventory's capabilities.
+
+    100 = no dangerous capability exposed; each capability class present in
+    the inventory deducts its weight (once -- it measures surface, not count).
+    Codecov-style: the absolute number matters less than the delta on a PR.
+    """
+    tools = doc.get("agent_tools")
+    if tools is None:
+        return None
+    from .risk import categories_for_names
+
+    present = set()
+    for t in tools:
+        present |= categories_for_names([t])
+    return max(0, 100 - sum(_SCORE_WEIGHTS.get(c, 0) for c in present))
+
+
+def score_line(base: "dict", head: "dict") -> str:
+    """'Security score: 82 → 61' when the score moved; '' otherwise."""
+    b, h = security_score(base), security_score(head)
+    if b is None or h is None or b == h:
+        return ""
+    arrow = "⬇" if h < b else "⬆"
+    return f"Security score: {b} → {h} {arrow}"
+
+
 def risk_delta(base: "dict", head: "dict") -> str:
     """Per-category risk verdict between two ``to_json()`` docs.
 

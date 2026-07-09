@@ -278,3 +278,18 @@ def test_to_json_records_schema_and_system_hashes():
     # a different system prompt -> a different hash
     other = to_json([], agent=build_agent(system="Totally different."))
     assert other["system_hash"] != doc["system_hash"]
+
+
+def test_security_score_and_line():
+    from loom.impact import score_line, security_score
+
+    safe = {"agent_tools": ["Read", "Glob", "summarize"]}
+    risky = {"agent_tools": ["Read", "Bash", "WebFetch"]}
+    assert security_score(safe) == 100
+    # name-only inference: Bash -> code-exec (10), WebFetch -> network (12)
+    assert security_score(risky) == 78
+    assert security_score({"agent_tools": None}) is None
+
+    line = score_line(safe, risky)
+    assert line == "Security score: 100 → 78 ⬇"
+    assert score_line(safe, safe) == ""  # unchanged -> silent

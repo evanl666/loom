@@ -69,6 +69,52 @@ PROFILES: "dict[str, dict]" = {
         ],
         "sequence": ["taint sk-*: confirm *", "taint AKIA*: confirm *"],
     },
+    "prod-db-safe": {
+        "description": "Database work against production: SELECTs flow, anything that "
+                       "mutates schema or rows asks, drops/truncates/deletes are blocked.",
+        "default": "confirm",
+        "allow": ["Read(*)", "Glob(*)", "Grep(*)", "Bash(*SELECT *)", "Bash(*EXPLAIN *)",
+                  "Bash(*\\\\d*)", "Bash(*SHOW *)"],
+        "confirm": ["Bash(*INSERT *)", "Bash(*UPDATE *)", "Bash(*ALTER *)",
+                    "Bash(*CREATE *)", "Bash(*migrate*)"],
+        "deny": ["Bash(*DROP *)", "Bash(*TRUNCATE *)", "Bash(*DELETE FROM*)",
+                 "Read(*.env*)", "cap:destructive"],
+        "sequence": ["taint password*: confirm *", "taint sk-*: confirm *"],
+    },
+    "github-actions-safe": {
+        "description": "Running inside CI: fully non-interactive (nothing waits for a "
+                       "human), read/build/test allowed, secrets and egress denied.",
+        "default": "deny",
+        "allow": ["Read(*)", "Glob(*)", "Grep(*)", "LS(*)", "Write(*)", "Edit(*)",
+                  "Bash(*pytest*)", "Bash(*npm test*)", "Bash(*npm run build*)",
+                  "Bash(*go test*)", "Bash(*cargo test*)", "Bash(*make *)",
+                  "Bash(*git status*)", "Bash(*git diff*)", "Bash(*git log*)"],
+        "deny": ["Read(*.env*)", "Read(*/.ssh/*)", "cap:secret",
+                 "Bash(*curl*)", "Bash(*wget*)", "WebFetch(*)"],
+        "sequence": ["after Read(*secret*): deny *"],
+    },
+    "k8s-safe": {
+        "description": "Cluster operations: get/describe/logs flow, apply/scale ask, "
+                       "delete/drain and anything against kube-system is blocked.",
+        "default": "confirm",
+        "allow": ["Read(*)", "Glob(*)", "Grep(*)", "Bash(*kubectl get*)",
+                  "Bash(*kubectl describe*)", "Bash(*kubectl logs*)",
+                  "Bash(*kubectl top*)", "Bash(*helm list*)", "Bash(*helm status*)"],
+        "confirm": ["Bash(*kubectl apply*)", "Bash(*kubectl scale*)",
+                    "Bash(*kubectl rollout*)", "Bash(*helm upgrade*)", "Bash(*helm install*)"],
+        "deny": ["Bash(*kubectl delete*)", "Bash(*kubectl drain*)",
+                 "Bash(*kube-system*)", "Bash(*kubectl exec*)", "Read(*/.kube/config*)"],
+        "sequence": ["taint token*: confirm *"],
+    },
+    "customer-data-safe": {
+        "description": "Near PII: aggregate reads ask, exports/joins to the outside are "
+                       "blocked, any credential or a data sighting cuts egress.",
+        "default": "confirm",
+        "allow": ["Glob(*)", "Grep(*)"],
+        "deny": ["cap:network", "Bash(*COPY *)", "Bash(*\\\\copy*)", "Bash(*mysqldump*)",
+                 "Bash(*pg_dump*)", "Write(*export*)", "Read(*.env*)"],
+        "sequence": ["taint *@*.*: deny cap:network", "taint sk-*: confirm *"],
+    },
 }
 
 _SHIELD_KEYS = ("default", "allow", "confirm", "deny", "sequence")

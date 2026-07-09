@@ -105,6 +105,11 @@ def test_wrap_container_argv(monkeypatch):
     ro = sb.wrap_container(["x"], port=1, workdir="/r", target="", read_only=True)
     assert "/r:/workspace:ro" in ro
 
+    # resource limits
+    lim = sb.wrap_container(["x"], port=1, workdir="/r", target="", memory="2g", cpus="1.5")
+    j = " ".join(lim)
+    assert "--memory 2g" in j and "--cpus 1.5" in j
+
 
 def test_wrap_container_without_docker(monkeypatch):
     import loom.sandbox as sb

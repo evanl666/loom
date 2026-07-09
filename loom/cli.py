@@ -472,7 +472,8 @@ def _cmd_record(args: argparse.Namespace) -> int:
         try:
             command = wrap_container(command, port=server.port, image=args.container_image,
                                      workdir=os.getcwd(), target=args.target,
-                                     read_only=args.container_readonly)
+                                     read_only=args.container_readonly,
+                                     memory=args.container_memory, cpus=args.container_cpus)
         except RuntimeError as e:
             print(f"loom: {e}", file=sys.stderr)
             server.shutdown()
@@ -1529,6 +1530,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the Docker image to run the agent in (default python:3.12-slim)")
     rc.add_argument("--container-readonly", dest="container_readonly", action="store_true",
                     help="mount the repo read-only inside the container")
+    rc.add_argument("--container-memory", dest="container_memory", default="",
+                    help="memory limit for the container (e.g. 2g)")
+    rc.add_argument("--container-cpus", dest="container_cpus", default="",
+                    help="CPU limit for the container (e.g. 2)")
     rc.add_argument("--sandbox-allow", action="append", default=[], metavar="HOST:PORT",
                     help="extra host:port the sandboxed agent may reach (repeatable)")
     shield_flags(rc)

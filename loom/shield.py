@@ -123,6 +123,10 @@ def parse_sequence_rule(raw: str) -> SequenceRule:
 
 
 def _call_matches(pattern: str, name: str, tool_input) -> bool:
+    if pattern.startswith("cap:"):  # capability patterns work in sequence rules too
+        from .capabilities import matches_cap
+
+        return matches_cap(pattern, name, tool_input)
     sig = _signature(name, tool_input)
     return fnmatch(name, pattern) or fnmatch(sig, pattern) or fnmatch(_normalize(sig), pattern)
 

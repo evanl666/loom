@@ -216,3 +216,35 @@ def test_cli_policy_simulate_is_explain(tmp_path, capsys):
     ]), tools=[Read]).run("go").save(path)
     assert main(["policy", "simulate", path, "--profile", "claude-code-safe"]) == 0
     assert "deny" in capsys.readouterr().out
+
+
+def test_new_policy_packs_classify_sensibly():
+    packs = Shield(**to_shield_kwargs(PROFILES["prod-db-safe"]))
+    assert packs.classify("Bash", {"command": "SELECT * FROM users"})[0] == ALLOW
+    assert packs.classify("Bash", {"command": "DROP TABLE users"})[0] == DENY
+    assert packs.classify("Bash", {"command": "INSERT INTO t VALUES (1)"})[0] == CONFIRM
+
+    ci = Shield(**to_shield_kwargs(PROFILES["github-actions-safe"]))
+    assert ci.classify("Bash", {"command": "pytest -q"})[0] == ALLOW
+    assert ci.classify("WebFetch", {"url": "http://x"})[0] == DENY
+    assert ci.classify("UnknownTool", {})[0] == DENY  # non-interactive: deny by default
+
+    k8s = Shield(**to_shield_kwargs(PROFILES["k8s-safe"]))
+    assert k8s.classify("Bash", {"command": "kubectl get pods"})[0] == ALLOW
+    assert k8s.classify("Bash", {"command": "kubectl delete pod x"})[0] == DENY
+    assert k8s.classify("Bash", {"command": "kubectl apply -f x.yaml"})[0] == CONFIRM
+
+    pii = Shield(**to_shield_kwargs(PROFILES["customer-data-safe"]))
+    assert pii.classify("WebFetch", {"url": "http://x"})[0] == DENY  # cap:network
+    assert pii.classify("Bash", {"command": "pg_dump users"})[0] == DENY
+
+
+def test_sequence_consequence_supports_cap_patterns():
+    shield = Shield(sequence=["taint *@*.*: deny cap:network"])
+    # taint fires on an email-shaped tool result...
+    shield.observe_request({"messages": [
+        {"role": "tool", "tool_call_id": "t", "content": "user bob@example.com"}]})
+    assert shield.sequence[0].triggered
+    # ...after which anything network-capable is denied, whatever its name
+    allowed, event = shield._decide("send_email", {"to": "x"})
+    assert allowed is False and event["via"] == "sequence"

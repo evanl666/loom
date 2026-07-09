@@ -73,7 +73,7 @@ def wrap_sandboxed(command: "list[str]", ports: "list[int]",
 
 def wrap_container(command: "list[str]", port: int, image: str = "python:3.12-slim",
                    workdir: "str | None" = None, target: str = "",
-                   read_only: bool = False) -> "list[str]":
+                   read_only: bool = False, memory: str = "", cpus: str = "") -> "list[str]":
     """Run the agent command inside a Docker container.
 
     Shield controls what the model may *ask* for; a container controls what the
@@ -94,6 +94,11 @@ def wrap_container(command: "list[str]", port: int, image: str = "python:3.12-sl
     env_var = "OPENAI_BASE_URL" if "openai" in target else "ANTHROPIC_BASE_URL"
     base = f"http://host.docker.internal:{port}" + ("/v1" if "openai" in target else "")
     mount = f"{workdir}:/workspace" + (":ro" if read_only else "")
+    limits = []
+    if memory:
+        limits += ["--memory", memory]
+    if cpus:
+        limits += ["--cpus", cpus]
     return [
         "docker", "run", "--rm", "--init",
         "-v", mount, "-w", "/workspace",
@@ -101,5 +106,6 @@ def wrap_container(command: "list[str]", port: int, image: str = "python:3.12-sl
         # host-gateway mapping, added explicitly).
         "--add-host", "host.docker.internal:host-gateway",
         "-e", f"{env_var}={base}",
+        *limits,
         image, *command,
     ]
