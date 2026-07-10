@@ -123,3 +123,20 @@ def test_auto_fix_includes_copilot_proposed_fixes():
             raise RuntimeError("down")
     sess2 = DebugSession(p, agent=agent, copilot_model=Broken())
     assert sess2._proposed_fixes() == []
+
+
+def test_run_summary_always_keeps_request_and_output_on_long_runs():
+    # regression: the FINAL OUTPUT used to be appended then truncated away on a
+    # long run, so a `judge:` assertion about the output silently saw nothing.
+    log = []
+    for i in range(300):
+        log.append({"seq": len(log), "kind": "model", "result": {"tool_calls": [
+            {"id": str(i), "name": "lookup", "input": {"q": "x" * 60}}], "stop_reason": "tool_use"}})
+        log.append({"seq": len(log), "kind": "tool:lookup", "result": "r" * 300})
+    log.append({"seq": len(log), "kind": "model",
+                "result": {"text": "OUTPUT_SENTINEL", "stop_reason": "end_turn"}})
+    data = {"log": log, "prompt": "REQUEST_SENTINEL", "output": "OUTPUT_SENTINEL", "tools": {}}
+    s = run_summary(data)
+    assert len(s) <= 4000
+    assert "REQUEST_SENTINEL" in s and "OUTPUT_SENTINEL" in s   # both survive
+    assert "elided" in s                                        # the middle is elided

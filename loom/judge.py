@@ -34,19 +34,41 @@ def run_summary(data: dict, max_chars: int = 4000) -> str:
     """A compact, judge-readable view of a run: prompt, each action, output."""
     from .action import actions
 
-    lines = [f"USER REQUEST: {str(data.get('prompt', ''))[:500]}"]
+    head = f"USER REQUEST: {str(data.get('prompt', ''))[:500]}"
+    tail = f"FINAL OUTPUT: {str(data.get('output', ''))[:800]}"
+    steps: list[str] = []
     for a in actions(data):
         if a.type == "call":
             obs = (a.observation.text or "")[:200] if a.observation else ""
-            lines.append(f"[{a.step}] tool {a.tool}({json.dumps(a.input, default=str)[:200]})"
+            steps.append(f"[{a.step}] tool {a.tool}({json.dumps(a.input, default=str)[:200]})"
                          f" -> {obs}")
         elif a.type == "answer" and a.intent:
-            lines.append(f"[{a.step}] agent answered: {a.intent[:300]}")
+            steps.append(f"[{a.step}] agent answered: {a.intent[:300]}")
         elif a.type == "reason" and a.intent:
-            lines.append(f"[{a.step}] agent reasoning: {a.intent[:200]}")
-    lines.append(f"FINAL OUTPUT: {str(data.get('output', ''))[:800]}")
-    text = "\n".join(lines)
-    return text[:max_chars]
+            steps.append(f"[{a.step}] agent reasoning: {a.intent[:200]}")
+
+    # The request and the FINAL OUTPUT are what a judge most needs, so keep them
+    # whole and elide the MIDDLE of the step list to fit -- never chop the output
+    # off the end (the old bug: a long run's answer got truncated away).
+    budget = max(200, max_chars - len(head) - len(tail) - 60)
+    body = "\n".join(steps)
+    if len(body) > budget:
+        front: list[str] = []
+        back: list[str] = []
+        flen = blen = 0
+        i, j = 0, len(steps) - 1
+        while i <= j:
+            if flen <= blen:
+                if flen + len(steps[i]) + 1 > budget // 2:
+                    break
+                front.append(steps[i]); flen += len(steps[i]) + 1; i += 1
+            else:
+                if blen + len(steps[j]) + 1 > budget // 2:
+                    break
+                back.insert(0, steps[j]); blen += len(steps[j]) + 1; j -= 1
+        omitted = len(steps) - len(front) - len(back)
+        body = "\n".join(front + [f"... [{omitted} step(s) elided] ..."] + back)
+    return "\n".join([head, body, tail])
 
 
 def judge_text(model: Any, question: str, text: str, max_chars: int = 2500) -> dict:

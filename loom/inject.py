@@ -76,10 +76,15 @@ def find_injections(source: Any, judge: Any = None) -> "list[dict]":
         return [{"step": b.step, "tool": b.tool, "risk": b.risk}
                 for b in after if b.risk or (set(b.capabilities) & _UNTRUSTED)][:3]
 
+    untrusted = [a for a in acts if _is_untrusted(a)]
+    # When judging, prioritize untrusted results FOLLOWED by a risky/egress action
+    # (the ones an injection actually aims for) and cap the LLM calls, so --judge
+    # can't quietly fan out to hundreds of calls on a big scraping run.
+    if judge is not None:
+        untrusted.sort(key=lambda a: 0 if _followups(a) else 1)
+    budget = 25
     hits = []
-    for a in acts:
-        if not _is_untrusted(a):
-            continue
+    for a in untrusted:
         text = _obs(a)
         m = _INJECTION.search(text)
         if m:
@@ -89,10 +94,11 @@ def find_injections(source: Any, judge: Any = None) -> "list[dict]":
                 "context": _snippet(text[max(0, m.start() - 20):m.end() + 40]),
                 "followups": _followups(a),
             })
-        elif judge is not None and text.strip():
+        elif judge is not None and text.strip() and budget > 0:
             # regex found nothing -- ask the model (this is where paraphrases hide)
             from .judge import judge_text
 
+            budget -= 1
             v = judge_text(judge, _INJECTION_Q, text)
             if v.get("ok"):
                 hits.append({
@@ -101,6 +107,7 @@ def find_injections(source: Any, judge: Any = None) -> "list[dict]":
                     "context": _snippet(text),
                     "followups": _followups(a),
                 })
+    hits.sort(key=lambda h: h["step"])
     return hits
 
 
