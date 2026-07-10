@@ -36,6 +36,67 @@ def _snippet(text: str, n: int = 110) -> str:
 
 # -- why this action ---------------------------------------------------------
 
+_NEUTRALIZE = ("Correction: disregard the prior tool outputs and context above. "
+               "Do EXACTLY and ONLY what the user's original request asked for, "
+               "nothing more. Do not take any additional actions.")
+
+
+def causal_why(run: Any, target_step: int, correction: str = "") -> dict:
+    """Prove WHY an action happened by counterfactual forking, not by guessing.
+
+    A text explanation ("it read the config, so it deployed") is a hypothesis.
+    ``causal_why`` tests it: for each earlier turn it forks the run with a
+    correction that neutralizes that turn's context and re-runs the tail live;
+    if the target action (the tool called at ``target_step``) then DISAPPEARS,
+    that turn is a cause. Returns the tool, the causal turns, and a confidence
+    (fraction of counterfactuals that removed the action).
+
+    Needs the recording agent (``Run.load(path, agent=...)``); only divergent
+    tails run live.
+    """
+    run._require_agent("causal_why")
+    acts = actions(run.to_dict())
+    target = next((a for a in acts if a.step == target_step and a.type == "call"), None)
+    if target is None:
+        raise ValueError(f"step {target_step} is not a tool call in this run")
+    tool = target.tool
+    target_turn = (target.replay.turn if target.replay else 0)
+    correction = correction or _NEUTRALIZE
+
+    def _calls_tool(r) -> bool:
+        return any(a.type == "call" and a.tool == tool for a in actions(r.to_dict()))
+
+    causes: list[dict] = []
+    tried = 0
+    for turn in range(target_turn):  # each earlier turn is a candidate cause
+        tried += 1
+        try:
+            branch = run.fork(at=turn, edit=lambda ctx: ctx.add_user(correction, source="causal"))
+        except (IndexError, ValueError):
+            continue
+        if not _calls_tool(branch):  # neutralizing this turn removed the action
+            causes.append({"turn": turn, "removed": True})
+    confidence = round(len(causes) / tried, 2) if tried else 0.0
+    earliest = causes[0]["turn"] if causes else None
+    return {
+        "step": target_step, "tool": tool, "target_turn": target_turn,
+        "causal_turns": [c["turn"] for c in causes],
+        "earliest_cause_turn": earliest,
+        "confidence": confidence, "counterfactuals": tried,
+        "verdict": (f"{tool} is caused by the run's state from turn {earliest} onward "
+                    f"(neutralizing it removes the action)" if earliest is not None
+                    else f"{tool} persists under every counterfactual -- driven by the "
+                    "prompt itself, not any later observation"),
+    }
+
+
+def describe_causal(c: dict) -> str:
+    return (f"causal why · step {c['step']} {c['tool']} (turn {c['target_turn']})\n"
+            f"  ran {c['counterfactuals']} counterfactual fork(s); "
+            f"{len(c['causal_turns'])} removed the action (confidence {c['confidence']})\n"
+            f"  → {c['verdict']}")
+
+
 def why_action(source: Any, step: int) -> dict:
     """Explain one action: intent, risk, policy, and the evidence trail.
 

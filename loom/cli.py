@@ -2142,6 +2142,23 @@ def _cmd_share(args: argparse.Namespace) -> int:
 
 def _cmd_why(args: argparse.Namespace) -> int:
     """Ask a debugger agent a question about a saved trace."""
+    if args.step is not None and getattr(args, "causal", False):
+        # Causal "why": counterfactual forks prove which turn caused the action.
+        if not args.agent:
+            raise CLIError("--causal needs --agent module:attr to re-fork live")
+        agent, err = _load_agent(args.agent)
+        if agent is None:
+            raise CLIError(err)
+        from .insight import causal_why, describe_causal
+        from .trace import Run
+
+        run = Run.load(args.path, agent=agent)
+        try:
+            print(describe_causal(causal_why(run, args.step)))
+        except ValueError as e:
+            raise CLIError(str(e))
+        return 0
+
     if args.step is not None:
         # Offline "why did it do THAT?": stated intent + the observations the
         # action most plausibly drew on. Instant, deterministic, no API calls.
@@ -3125,6 +3142,9 @@ def build_parser() -> argparse.ArgumentParser:
                     help="explain the action at this step offline: intent, risk, "
                          "policy, and the observations it drew on (no API calls)")
     wy.add_argument("--model", default="claude-opus-4-8")
+    wy.add_argument("--causal", action="store_true",
+                    help="prove causation via counterfactual forks (needs --agent, --step)")
+    wy.add_argument("--agent", default="", help="module:attr for --causal live re-forking")
     wy.add_argument("--save", default="", help="record the diagnosis run to this path")
     wy.set_defaults(func=_cmd_why)
 
