@@ -1732,6 +1732,25 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return 1 if (args.gate and report["high"]) else 0
 
 
+def _cmd_experiment(args: argparse.Namespace) -> int:
+    """A/B test system prompts and models on one task, ranked by score/cost."""
+    from .experiment import (absent_check, contains_check, describe_experiment,
+                             run_experiment)
+
+    agent, err = _load_agent(args.agent)
+    if agent is None:
+        raise CLIError(err)
+    check = None
+    if args.contains:
+        check = contains_check(args.contains)
+    elif args.absent:
+        check = absent_check(args.absent)
+    results = run_experiment(agent, args.prompt, systems=args.system or None,
+                             models=args.model or None, check=check, save_dir=args.save)
+    print(json.dumps(results, indent=2) if args.json else describe_experiment(results))
+    return 0
+
+
 def _cmd_loops(args: argparse.Namespace) -> int:
     """Detect repeated / oscillating tool-call loops."""
     from .loops import describe_loops, detect_loops
@@ -2910,6 +2929,17 @@ def build_parser() -> argparse.ArgumentParser:
                          "(e.g. tool:send_email, cap:network, 'cap:network after cap:secret')")
     rp.add_argument("--gate", action="store_true", help="exit 1 if the breakpoint is hit")
     rp.set_defaults(func=_cmd_replay)
+
+    xp = sub.add_parser("experiment", help="A/B test system prompts + models on one task")
+    xp.add_argument("prompt")
+    xp.add_argument("--agent", required=True, help="module:attr (Agent or factory)")
+    xp.add_argument("--system", action="append", default=[], help="a system-prompt variant (repeatable)")
+    xp.add_argument("--model", action="append", default=[], help="a model variant (repeatable)")
+    xp.add_argument("--contains", default="", help="success = output contains this")
+    xp.add_argument("--absent", default="", help="success = output does NOT contain this")
+    xp.add_argument("--save", default="", help="save each variant's trace to this dir")
+    xp.add_argument("--json", action="store_true")
+    xp.set_defaults(func=_cmd_experiment)
 
     lp = sub.add_parser("loops", help="find where the agent got stuck repeating itself")
     lp.add_argument("path")
