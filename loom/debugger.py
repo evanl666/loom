@@ -81,6 +81,17 @@ def steps_for(data: dict) -> list[dict]:
         # its user message opens the next turn.
         if idx in ends_after and ep_i < len(episodes) and idx != ends_after[-1]:
             out.append(_user_node(episodes[ep_i])); ep_i += 1
+    # A tool call is a DELEGATION (labelled "subagent") when the next step goes a
+    # level deeper -- i.e. the call handed off to a sub-agent.
+    for i, d in enumerate(out):
+        if d.get("type") != "call":
+            continue
+        for nxt in out[i + 1:]:
+            if nxt.get("type") == "user":
+                continue
+            if nxt.get("nest", 0) > d.get("nest", 0):
+                d["is_delegation"] = True
+            break
     return out
 
 
@@ -110,6 +121,44 @@ def context_at(data: dict, step: int, acts=None) -> list[dict]:
             frame.append({"role": "human", "content": (a.observation.text if a.observation else ""),
                           "step": a.step})
     return frame
+
+
+def explain_step(data: dict, step: int, model) -> dict:
+    """Explain ONE step to a developer -- tightly. The old version reused the
+    whole-run copilot, so it narrated the run (and often the wrong step); this
+    gives the model only THIS step + the context the agent had seen up to it, and
+    forbids describing later steps. Returns {reply} or {error}."""
+    import json as _json
+
+    from .action import actions
+    from .judge import _resolve
+
+    acts = actions(data)
+    a = next((x for x in acts if x.step == step), None)
+    if a is None:
+        return {"reply": "(no such step)"}
+    frame = context_at(data, step - 1, acts=acts)  # what it had seen BEFORE this step
+    convo = "\n".join(f"{m['role']}: {str(m.get('content', ''))[:300]}" for m in frame[-10:])
+    if a.type == "call":
+        obs = (a.observation.text or "")[:400] if a.observation else ""
+        this = (f"The agent called tool `{a.tool}` with input "
+                f"{_json.dumps(a.input, default=str)[:400]} and got back: {obs}")
+    elif a.type in ("reason", "answer"):
+        this = f"The agent (the model) produced this text: {(a.intent or '')[:600]}"
+    else:
+        this = f"A {a.type} step."
+    system = ("You explain ONE step of an AI agent's run to a developer debugging it. "
+              "Explain what the agent did at THIS step and WHY, based ONLY on the "
+              "context it had seen so far. 2-3 sentences, concrete. Do NOT narrate "
+              "later steps or the whole run -- just this step. If it looks wrong or "
+              "risky, say so.")
+    user = f"CONTEXT the agent had seen:\n{convo}\n\nTHIS STEP (step {step}):\n{this}"
+    try:
+        provider = _resolve(model)
+        resp = provider.complete(system, [{"role": "user", "content": user}], [])
+        return {"reply": (resp.text or "").strip()}
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"explain error: {type(e).__name__}: {e}"}
 
 
 def context_delta(data: dict, step: int) -> dict:
@@ -837,15 +886,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not sess.copilot_model:
                 self._json(400, {"error": "no copilot model -- start with --copilot-model MODEL or --agent"})
                 return
-            q = ("In one short paragraph, explain what happened at this step and WHY "
-                 "the model did it -- what in the context led here. If it looks wrong "
-                 "or risky, say so plainly.")
-            try:
-                out = copilot_chat(sess.data, [{"role": "user", "content": q}],
-                                   sess.copilot_model, step=step)
-                self._json(200, out)
-            except Exception as e:  # noqa: BLE001
-                self._json(502, {"error": f"copilot error: {type(e).__name__}: {e}"})
+            self._json(200, explain_step(sess.data, step, sess.copilot_model))
             return
         if self.path != "/api/fork":
             self._json(404, {"error": "not found"})
@@ -1089,6 +1130,79 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
 .livedot{width:9px;height:9px;border-radius:50%;background:#2f9d6b;flex:none}
 .livedot.busy{background:#e5a54a;animation:pulse 1s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}
+/* ============ CLEAN LIGHT THEME (overrides the dark rules above) ============ */
+body{background:#f6f7f9;color:#1f2328}
+.muted{color:#8a9099}
+header{background:#fff;border-bottom:1px solid #e6e8eb}
+header b{color:#1f2328}
+#steps{background:#fbfbfc;border-right:1px solid #e6e8eb}
+.step{border-bottom:1px solid #f0f1f3}
+.step:hover{background:#f0f2f5}
+.step.cur{background:#e8f0fe;border-left:3px solid #2563eb}
+#toolbar{background:#fff;border-bottom:1px solid #e6e8eb}
+#toolbar .tgroup{background:#f3f4f6;border:1px solid #e6e8eb}
+#toolbar .tgroup button{background:transparent;color:#3a4048}
+#toolbar .tgroup button:hover{background:#e6e8eb}
+#toolbar #brk{background:#fff;border:1px solid #d6d9de;color:#1f2328}
+button{background:#fff;border:1px solid #d6d9de;color:#2a2f36}
+button:hover{background:#f0f2f5;border-color:#c4c8ce}
+button.accent,#toolbar .tgroup button.accent{background:#2563eb;border-color:#2563eb;color:#fff}
+button.accent:hover{background:#1d4fd7}
+button.on,#toolbar .tgroup button.on{background:#e8f0fe !important;color:#2563eb;border-color:#bcd2fb}
+#detail{color:#1f2328}
+.k{color:#8a9099;font-weight:600}
+pre{background:#f6f7f9;border:1px solid #e6e8eb;color:#1f2328}
+pre.code{background:#f8fafc;border-color:#e2e8f0;color:#0f172a}
+.chip{background:#f0f2f5;border:1px solid #e0e3e8;color:#3a4048}
+.chip.risk{background:#fdecec;border-color:#f5c6c6;color:#c0392b}
+.frame{border:1px solid #e6e8eb;background:#fff}.frame .rl{background:#f6f7f9;color:#6b7280;border-bottom:1px solid #eef0f2}
+.frame.curframe{border-color:#2563eb}.frame.curframe .rl{background:#e8f0fe;color:#2563eb}
+.frame pre{background:#fbfbfc}
+.risky{color:#e5484d}.depth{color:#b6bcc4}
+/* badges: model / tool / subagent / you -- soft pastel + darker ink */
+.badge{border:1px solid transparent}
+.b-answer{background:#e8f0fe;color:#1d4fd7}     /* model */
+.b-call{background:#e4f6f1;color:#0d7a5f}       /* tool */
+.b-sub{background:#efe7fb;color:#6b3fc0}        /* subagent */
+.b-reason{background:#eef1f4;color:#5a636e}     /* meta */
+.b-user{background:#fdf0da;color:#b26a00}       /* you */
+.b-blocked,.b-ask-human{background:#fdecec;color:#c0392b}
+.callrow{display:flex;gap:8px;align-items:center;padding:5px 9px;border:1px solid #e6e8eb;border-radius:8px;margin:4px 0;cursor:pointer;background:#fff}
+.callrow:hover{background:#f0f2f5;border-color:#cdd2d8}
+/* the floating drawer + panels */
+#drawer{background:#fff;border-left:1px solid #e0e3e8;box-shadow:-12px 0 40px rgba(20,25,35,.12)}
+#drawerhead{background:#fff;border-bottom:1px solid #eef0f2;color:#1f2328}
+#drawerx{color:#8a9099}#drawerx:hover{background:#f0f2f5;color:#1f2328}
+.cop-sum{color:#1f2937}
+.msg.a{background:#f6f7f9;border:1px solid #e6e8eb;color:#1f2328}
+.msg.u{background:#e8f0fe;color:#1d4fd7}
+.msg.a code{background:#eceff2}
+pre.mdcode{background:#f8fafc;border-color:#e2e8f0}
+.chatbar input,#drawer input,#drawer textarea,#drawer select{background:#fff;border:1px solid #d6d9de;color:#1f2328}
+.bnode{border:1px solid #e6e8eb;background:#fff}.bmeta{color:#2563eb}
+.anode{border-color:#e6e8eb}
+/* tree */
+.treehead{background:#fbfbfc;border-bottom:1px solid #f0f1f3;color:#1f2328}
+.treehead:hover{background:#f0f2f5}.treehead .tw{color:#8a9099}
+.tguide{background:#e0e3e8}.step.tstep{border-bottom:1px solid #f4f5f7}
+/* timeline + live bar */
+#tlbar{background:#fff;border-top:1px solid #e6e8eb}
+#tlinfo,#livestat{color:#8a9099}
+#livebar{background:#f0f7ff;border-bottom:1px solid #d8e6fb}
+#livebar #askin{background:#fff;border:1px solid #cdd8e8;color:#1f2328}
+/* command palette */
+#palbox{background:#fff;border:1px solid #e0e3e8;box-shadow:0 20px 60px rgba(20,25,35,.22)}
+#palin{background:#fff;color:#1f2328;border-bottom:1px solid #eef0f2}
+.palitem{border-bottom:1px solid #f0f1f3}.palitem.sel{background:#e8f0fe}.palitem:hover{background:#f0f2f5}
+.palitem .pk,.palitem .pm{color:#8a9099}
+kbd{background:#f0f2f5;border:1px solid #d6d9de;color:#3a4048}
+#explainbtn{background:#efe7fb;border:1px solid #ddccf5;color:#6b3fc0}#explainbtn:hover{background:#e6d9fa}
+button.fault{background:#fff6e6;border:1px solid #f3dca6;color:#b26a00}button.fault:hover{background:#fdeecd}
+.asr.ok{background:#e9f7ef}.asr.fail{background:#fdecec}.asr.err{background:#fef5e6}
+.cmpside.win{border-color:#0d7a5f;background:#e9f7ef}
+.cmptbl tr.diff{background:#fdf0f0}
+#viewbanner{background:#fff6e6;border-bottom:1px solid #f3dca6;color:#8a5a00}
+.atag{filter:none}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -1224,7 +1338,27 @@ function setBusy(b){
 }
 function setLiveStat(t){const e=document.getElementById("livestat"); if(e)e.textContent=t;}
 function typeClass(t){return "b-"+t}
+// Clean, human labels: model / tool / subagent / you (instead of reason/call/answer).
+function stepKind(s){
+  if(s.type==="user") return {label:"you", cls:"b-user"};
+  if(s.type==="call") return s.is_delegation ? {label:"subagent", cls:"b-sub"} : {label:"tool", cls:"b-call"};
+  if(s.type==="ask-human") return {label:"human", cls:"b-user"};
+  if(s.type==="meta") return {label:"meta", cls:"b-reason"};
+  return {label:"model", cls:"b-answer"};  // reason + answer are the model speaking
+}
 const LANES=["main agent","subagent","sub-subagent","depth 3"];
+// the tool calls a model turn (step i) decided to make: the calls at the same
+// nesting level that follow it (deeper sub-agent steps are skipped over).
+function callsOfModel(i){
+  const s=steps[i], n=s.nest||0, out=[];
+  for(let j=i+1;j<steps.length;j++){
+    const x=steps[j], xn=x.nest||0;
+    if(x.type==="call"&&xn===n) out.push(j);
+    else if(xn>n) continue;           // a sub-agent's own steps -- skip
+    else break;                        // back to this level, non-call -> done
+  }
+  return out;
+}
 function agentTag(s){return s.agent?`<span class="atag c${s.agent_color||0}" title="agent: ${E(s.agent)}">${E(s.agent)}</span>`:"";}
 let COLLAPSED={};  // tree: collapsed agent segments, by segment index
 function renderSteps(){
@@ -1232,10 +1366,10 @@ function renderSteps(){
   if(TREE){renderTree(el);return;}
   el.innerHTML=steps.map((s,i)=>{
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
-    const lbl=s.tool?E(s.tool):E(s.type);
+    const k=stepKind(s), lbl=s.tool?E(s.tool):"";
     const ind=s.depth?`<span class="depth">${"› ".repeat(s.depth)}</span>`:"";
     return `<div class="step${i===cur?' cur':''}" data-i="${i}"><span class="muted">${s.step}</span>`+
-      `<span class="badge ${typeClass(s.type)}">${E(s.type)}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
+      `<span class="badge ${k.cls}">${k.label}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
   }).join("");
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
@@ -1256,9 +1390,9 @@ function renderTree(el){
       `<span class="tw">${col?"▸":"▾"}</span><span class="atag c${seg.color}">${E(seg.agent)}</span>`+
       `<span class="muted" style="font-size:10px">${seg.items.length}</span></div>`;
     const kids=col?"":seg.items.map(idx=>{
-      const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", lbl=s.tool?E(s.tool):E(s.type);
+      const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
       return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad+18}px">`+
-        `<span class="muted">${s.step}</span><span class="badge ${typeClass(s.type)}">${E(s.type)}</span> <span>${lbl}</span>${risky}</div>`;
+        `<span class="muted">${s.step}</span><span class="badge ${k.cls}">${k.label}</span> <span>${lbl}</span>${risky}</div>`;
     }).join("");
     return head+kids;
   }).join("");
@@ -1303,17 +1437,32 @@ function select(i){
 }
 function renderDetail(){
   const s=steps[cur], o=s.observation||{}, d=document.getElementById("detail");
-  let h=`<span class="badge ${typeClass(s.type)}">${E(s.type)}</span> `+
-        (s.tool?`<b>${E(s.tool)}</b>`:"")+` <span class="muted">step ${s.step} · turn ${(s.replay||{}).turn??"?"}${s.depth?" · depth "+s.depth:""}</span>`;
-  if(s.intent) h+=`<div class="k">model reasoning</div><pre>${E(s.intent)}</pre>`;
-  const cf=codeFields(s.input);
-  if(cf){
-    h+=`<div class="k">📄 ${E(cf.path)}${cf.verb?` <span class="muted">(${cf.verb})</span>`:""}</div><pre class="code">${E(cf.code)}</pre>`;
-    if(cf.rest) h+=`<div class="k">args</div><pre>${E(cf.rest)}</pre>`;
-  } else if(s.input!=null){
-    h+=`<div class="k">${s.tool?"tool input":"input"}</div><pre>${E(J(s.input))}</pre>`;
+  const k=stepKind(s);
+  let h=`<span class="badge ${k.cls}">${k.label}</span> `+
+        (s.tool?`<b>${E(s.tool)}</b>`:"")+
+        ` <span class="muted">step ${s.step}${s.agent?" · "+E(s.agent):""}</span>`;
+  if(s.type==="call"){
+    // a tool / sub-agent call: INPUT and OUTPUT only (no model reasoning here)
+    const cf=codeFields(s.input);
+    if(cf){
+      h+=`<div class="k">📄 ${E(cf.path)}${cf.verb?` <span class="muted">(${cf.verb})</span>`:""}</div><pre class="code">${E(cf.code)}</pre>`;
+      if(cf.rest) h+=`<div class="k">args</div><pre>${E(cf.rest)}</pre>`;
+    } else if(s.input!=null){
+      h+=`<div class="k">input</div><pre>${E(J(s.input))}</pre>`;
+    }
+    if(o.text) h+=`<div class="k">output</div><pre>${E(o.text.length>4000?o.text.slice(0,4000)+"\n… (truncated)":o.text)}</pre>`;
+  } else if(s.type==="user"){
+    h+=`<div class="k">user request</div><pre>${E(s.intent||o.text||"")}</pre>`;
+  } else {
+    // a model turn: its text, then the tool calls it decided to make
+    if(s.intent) h+=`<div class="k">${s.type==="answer"?"final answer":"reasoning"}</div><pre>${E(s.intent)}</pre>`;
+    const cj=callsOfModel(cur);
+    if(cj.length) h+=`<div class="k">→ decided to call</div>`+cj.map(j=>{
+      const x=steps[j], xk=stepKind(x);
+      return `<div class="callrow" data-j="${j}"><span class="badge ${xk.cls}">${xk.label}</span> <b>${E(x.tool)}</b> <span class="muted">${E(J(x.input||{}).slice(0,90))}</span></div>`;
+    }).join("");
+    if(o.text&&!s.intent) h+=`<div class="k">output</div><pre>${E(o.text.slice(0,4000))}</pre>`;
   }
-  if(o.text) h+=`<div class="k">result</div><pre>${E(o.text.length>4000?o.text.slice(0,4000)+"\n… (truncated)":o.text)}</pre>`;
   if(s.type==="call"&&o.text!=null&&canFork&&steps.some(x=>x.step>s.step&&(x.replay||{}).forkable)){
     h+=`<div class="k">🧪 fault injection <span class="muted">— what if this tool had returned something else?</span></div>
       <textarea id="faultval" rows="2" placeholder="a different tool result to test error handling / edge cases / hostile output">${E((o.text||"").slice(0,2000))}</textarea>
@@ -1357,6 +1506,7 @@ function renderDetail(){
   </div>`;
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
   d.innerHTML=h;
+  d.querySelectorAll(".callrow").forEach(r=>r.onclick=()=>select(+r.dataset.j));
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
   const af=document.getElementById("autofix"); if(af) af.onclick=doAutoFix;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
