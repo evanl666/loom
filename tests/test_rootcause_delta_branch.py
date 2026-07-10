@@ -55,3 +55,23 @@ def test_fork_records_a_branch_node(tmp_path):
     node = sess.branches[0]
     assert node["id"] == 1 and node["label"] == "try again" and "score" in node
     assert res["branch_id"] == 1
+
+
+def test_compare_branches_against_original(tmp_path):
+    @tool
+    def get() -> str:
+        "get"
+        return "data"
+    agent = Agent(model=_Echo(), tools=[get])
+    p = tmp_path / "t.loom.json"
+    agent.run("go").save(str(p))
+    sess = DebugSession(str(p), agent=agent)
+    sess.fork(at=1, append="different tack")  # branch #1
+    c = sess.compare(0, 1)  # original vs branch
+    assert c["a"]["id"] == 0 and c["b"]["id"] == 1
+    assert "score" in c["a"] and "tokens" in c["b"]
+    assert c["winner"] in (0, 1)
+    assert isinstance(c["rows"], list) and c["rows"]
+    # branch payloads never leak the internal full-trace field
+    lean = [{k: v for k, v in n.items() if not k.startswith("_")} for n in sess.branches]
+    assert all(not any(k.startswith("_") for k in n) for n in lean)

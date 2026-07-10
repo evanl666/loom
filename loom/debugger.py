@@ -357,10 +357,56 @@ class DebugSession:
                 "model": model, "output": bdata.get("output", "")[:120],
                 "score": score_breakdown(bdata)["overall"],
                 "tokens": analyze_cost(bdata)["total_tokens"],
-                "diverge": payload["diverge"]}
+                "diverge": payload["diverge"], "_data": bdata}
         self.branches.append(node)
         payload["branch_id"] = node["id"]
         return payload
+
+    def _branch_data(self, bid: int) -> "dict | None":
+        """The trace for a branch id (0 = the original run)."""
+        if bid == 0:
+            return self.data
+        for n in self.branches:
+            if n["id"] == bid:
+                return n.get("_data")
+        return None
+
+    def compare(self, a_id: int, b_id: int) -> dict:
+        """Side-by-side diff of two branches (0 = the original run) -- the
+        experimentation payoff of the branch tree: fork three ways, then SEE
+        exactly where they diverge, and which won on score/tokens."""
+        from .cost import analyze_cost
+        from .diff import score_breakdown
+
+        da, db = self._branch_data(a_id), self._branch_data(b_id)
+        if da is None or db is None:
+            raise ValueError("unknown branch id")
+        sa, sb = steps_for(da), steps_for(db)
+        diverge = None
+        rows: list[dict] = []
+        for i in range(max(len(sa), len(sb))):
+            x, y = (sa[i] if i < len(sa) else None), (sb[i] if i < len(sb) else None)
+            kx = (x.get("type"), x.get("tool"), json.dumps(x.get("input"), sort_keys=True)) if x else None
+            ky = (y.get("type"), y.get("tool"), json.dumps(y.get("input"), sort_keys=True)) if y else None
+            same = kx == ky
+            if not same and diverge is None:
+                diverge = i
+            rows.append({
+                "i": i, "same": same,
+                "a": {"type": x.get("type"), "tool": x.get("tool"), "risk": x.get("risk")} if x else None,
+                "b": {"type": y.get("type"), "tool": y.get("tool"), "risk": y.get("risk")} if y else None,
+            })
+
+        def _side(bid: int, d: dict) -> dict:
+            lbl = "original run" if bid == 0 else next(
+                (n["label"] for n in self.branches if n["id"] == bid), f"branch {bid}")
+            return {"id": bid, "label": lbl, "output": (d.get("output") or "")[:600],
+                    "score": score_breakdown(d)["overall"],
+                    "tokens": analyze_cost(d)["total_tokens"]}
+
+        A, B = _side(a_id, da), _side(b_id, db)
+        winner = A["id"] if (A["score"], -A["tokens"]) >= (B["score"], -B["tokens"]) else B["id"]
+        return {"a": A, "b": B, "rows": rows, "diverge": diverge, "winner": winner}
 
     _FIXES = [
         ("add a stop instruction", {"append": "You have enough information. Give the final "
@@ -533,7 +579,31 @@ class _Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/copilot":
             self._json(200, copilot_report(sess.data))
         elif self.path == "/api/branches":
-            self._json(200, {"branches": sess.branches})
+            lean = [{k: v for k, v in n.items() if not k.startswith("_")}
+                    for n in sess.branches]
+            self._json(200, {"branches": lean})
+        elif self.path.startswith("/api/branch?"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                bid = int(parse_qs(urlparse(self.path).query).get("id", ["0"])[0])
+            except (TypeError, ValueError):
+                bid = 0
+            bd = sess._branch_data(bid)
+            if bd is None:
+                self._json(404, {"error": "unknown branch id"})
+            else:
+                lbl = "original run" if bid == 0 else next(
+                    (n["label"] for n in sess.branches if n["id"] == bid), f"branch {bid}")
+                self._json(200, {"id": bid, "label": lbl,
+                                 "steps": steps_for(bd), "output": bd.get("output", "")})
+        elif self.path.startswith("/api/compare"):
+            from urllib.parse import parse_qs, urlparse
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                a_id = int(q.get("a", ["0"])[0]); b_id = int(q.get("b", ["0"])[0])
+                self._json(200, sess.compare(a_id, b_id))
+            except (TypeError, ValueError) as e:
+                self._json(400, {"error": str(e)})
         elif self.path == "/api/export":
             self._send(200, json.dumps(sess.export_session(), indent=2).encode(),
                        "application/json")
@@ -697,6 +767,13 @@ header b{font-size:14px}.muted{color:#8a8a92}
 .b-blocked,.b-ask-human{background:#3a2323;color:#ff9b9b}
 .risky{color:#ff6b6b}.depth{color:#6a6a72}
 #detail{flex:1;overflow:auto;padding:16px 20px}
+#tlbar{border-top:1px solid #26262b;background:#131316;padding:6px 10px;display:flex;gap:8px;align-items:flex-end;position:sticky;bottom:0}
+#tlbar #play{padding:2px 9px;font-size:13px}#tlbar #play.on{background:#3a2c1a;border-color:#7a5a2a}
+#tlinfo{font-size:10px;color:#8a8a92;white-space:nowrap;padding-bottom:2px}
+#timeline{flex:1;display:flex;gap:2px;align-items:flex-end;height:36px;overflow-x:auto}
+#timeline span{width:8px;flex:none;border-radius:2px 2px 0 0;cursor:pointer;opacity:.75;transition:opacity .1s}
+#timeline span:hover{opacity:1}#timeline span.cur{opacity:1;outline:2px solid #e6e6e6;outline-offset:-1px}
+#timeline .reason{background:#7fc3ff}#timeline .call{background:#c79bff}#timeline .answer{background:#7ee0a0}#timeline .risky{background:#ff6b6b}
 #toolbar{padding:8px 12px;border-bottom:1px solid #26262b;display:flex;gap:6px;align-items:center;background:#131316;position:sticky;top:0}
 button{font:inherit;background:#22222a;color:#e6e6e6;border:1px solid #33333c;border-radius:6px;padding:4px 10px;cursor:pointer}
 button:hover{background:#2c2c36}button:disabled{opacity:.4;cursor:default}
@@ -753,6 +830,18 @@ button.fault:hover{background:#4a3c22}
 #faultval{background:#161311;border-color:#3a2f1a}
 .bnode{border:1px solid #24242a;border-radius:8px;padding:8px 11px;margin:6px 0;font-size:12.5px}
 .bmeta{color:#7fc3ff;font-size:11px;margin-left:6px}
+#cmprow{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+#cmprow select{background:#161619;color:#e6e6e6;border:1px solid #33333c;border-radius:6px;padding:3px 6px;font:inherit;max-width:190px}
+.cmphead{display:flex;gap:8px}.cmphead .cmpside{flex:1;min-width:0}
+.cmpside{border:1px solid #24242a;border-radius:8px;padding:7px 10px;font-size:12px;overflow:auto}
+.cmpside.win{border-color:#2f7a45;background:#152a1c}
+.cmptbl{width:100%;border-collapse:collapse;font-size:12px;margin:6px 0}
+.cmptbl th{text-align:left;color:#8a8a92;font-weight:400;padding:2px 6px}
+.cmptbl td{padding:2px 6px;border-top:1px solid #1c1c20}
+.cmptbl tr.diff{background:#241b1b}.cmptbl tr.dv td{border-top:2px solid #ff6b6b}
+#viewbanner{background:#2a2418;border-bottom:1px solid #7a5a2a;color:#e8c98a;padding:5px 12px;font-size:12px;display:flex;gap:10px;align-items:center}
+#viewbanner.hidden{display:none}#viewbanner #backorig{padding:2px 8px;font-size:11px}
+.bnode[data-view]{cursor:pointer}.bnode[data-view]:hover{border-color:#7fc3ff;background:#14202b}
 button.on{background:#1d3a5c;color:#dbeaff}
 .lane{font-size:9px;padding:0 5px;border-radius:8px;margin-right:5px;text-transform:uppercase;letter-spacing:.3px}
 .lane.l0{background:#25333f;color:#7fc3ff}.lane.l1{background:#2d2438;color:#c79bff}.lane.l2{background:#1f3a2a;color:#7ee0a0}.lane.l3{background:#3a2323;color:#ff9b9b}
@@ -778,6 +867,8 @@ button.on{background:#1d3a5c;color:#dbeaff}
     </div>
     <div id="copilotpanel" class="hidden"></div>
     <div id="detail"></div>
+    <div id="tlbar"><button id="play" title="watch the run animate">▶</button>
+      <span class="muted" id="tlinfo"></span><div id="timeline"></div></div>
   </div>
 </div>
 <script>
@@ -815,7 +906,8 @@ async function load(){
   steps=RUN.steps; canFork=RUN.can_fork; CAN_CHAT=RUN.can_chat;
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
   document.getElementById("model").textContent=RUN.model||"";
-  renderSteps(); select(0);
+  renderSteps(); renderTimeline(); select(0);
+  const pb=document.getElementById("play"); if(pb) pb.onclick=togglePlay;
 }
 function typeClass(t){return "b-"+t}
 const LANES=["main agent","subagent","sub-subagent","depth 3"];
@@ -834,9 +926,34 @@ function renderSteps(){
   }).join("");
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
+function stepTokens(s){
+  const o=s.observation||{};
+  if(o.tokens&&(o.tokens.input_tokens||o.tokens.output_tokens)) return (o.tokens.input_tokens||0)+(o.tokens.output_tokens||0);
+  return o.text?Math.max(1,Math.round(o.text.length/4)):0;
+}
+function renderTimeline(){
+  const tl=document.getElementById("timeline"); if(!tl)return;
+  const toks=steps.map(stepTokens), mx=Math.max(1,...toks);
+  tl.innerHTML=steps.map((s,i)=>{
+    const h=6+Math.round(28*toks[i]/mx);
+    const cls=s.risk?"tk risky":(s.type==="call"?"tk call":s.type==="answer"?"tk answer":"tk reason");
+    return `<span class="${cls}${i===cur?" cur":""}" data-i="${i}" style="height:${h}px" title="step ${s.step} ${E(s.tool||s.type)} · ${toks[i]} tok${s.risk?" ⚠"+E(s.risk):""}"></span>`;
+  }).join("");
+  tl.querySelectorAll("span").forEach(d=>d.onclick=()=>select(+d.dataset.i));
+  const total=toks.reduce((a,b)=>a+b,0);
+  document.getElementById("tlinfo").textContent=`${steps.length} steps · ${total.toLocaleString()} tok`;
+}
+let PLAY=null;
+function togglePlay(){
+  const b=document.getElementById("play");
+  if(PLAY){clearInterval(PLAY);PLAY=null;b.textContent="▶";b.classList.remove("on");return;}
+  b.textContent="⏸";b.classList.add("on");
+  PLAY=setInterval(()=>{ if(cur>=steps.length-1){togglePlay();return;} select(cur+1); },900);
+}
 function select(i){
   cur=Math.max(0,Math.min(steps.length-1,i));
   document.querySelectorAll(".step").forEach((d,j)=>d.classList.toggle("cur",j===cur));
+  document.querySelectorAll("#timeline span").forEach((d,j)=>d.classList.toggle("cur",j===cur));
   const c=document.querySelector(".step.cur"); if(c)c.scrollIntoView({block:"nearest"});
   document.getElementById("pos").textContent=`step ${cur+1} / ${steps.length}`;
   renderDetail();
@@ -1114,10 +1231,47 @@ async function showBranches(){
   p.classList.remove("hidden"); p.dataset.view="branches";
   const r=await (await fetch("/api/branches")).json();
   if(!r.branches.length){p.innerHTML='<div class="muted">no branches yet — fork a step to start the tree</div>';return;}
-  p.innerHTML=`<div class="k">🌳 branch tree (${r.branches.length})</div>`+r.branches.map(b=>
-    `<div class="bnode"><b>#${b.id}</b> <span class="muted">@call ${b.at}</span> — ${E(b.label)}
+  const opts=[`<option value="0">#0 original run</option>`].concat(
+    r.branches.map(b=>`<option value="${b.id}">#${b.id} ${E(b.label).slice(0,30)}</option>`)).join("");
+  p.innerHTML=`<div class="k">🌳 branch tree (${r.branches.length}) <span class="muted">— click a node to walk it</span></div>`+r.branches.map(b=>
+    `<div class="bnode" data-view="${b.id}"><b>#${b.id}</b> <span class="muted">@call ${b.at}</span> — ${E(b.label)}
       <span class="bmeta">score ${b.score} · ${b.tokens.toLocaleString()} tok</span>
-      <div class="muted">${E(b.output)}</div></div>`).join("");
+      <div class="muted">${E(b.output)}</div></div>`).join("")+
+    `<div class="k" style="margin-top:12px">⇄ compare branches</div>
+     <div id="cmprow"><select id="cmpa">${opts}</select><span class="muted">vs</span>
+       <select id="cmpb">${opts.replace('value="0"','value="0"')}</select>
+       <button id="cmpgo">compare</button></div><div id="cmpout"></div>`;
+  const sb=document.getElementById("cmpb"); if(sb&&r.branches.length)sb.value=String(r.branches[r.branches.length-1].id);
+  document.getElementById("cmpgo").onclick=runCompare;
+  p.querySelectorAll(".bnode[data-view]").forEach(d=>d.onclick=e=>{if(e.target.tagName!=="SELECT")viewBranch(+d.dataset.view);});
+}
+let VIEWING=0;  // 0 = original run
+async function viewBranch(id){
+  const r=await (await fetch("/api/branch?id="+id)).json();
+  if(r.error)return;
+  VIEWING=id; steps=r.steps;
+  renderSteps(); renderTimeline(); select(0);
+  let bn=document.getElementById("viewbanner");
+  if(!bn){bn=document.createElement("div");bn.id="viewbanner";document.getElementById("toolbar").after(bn);}
+  bn.innerHTML=`👁 viewing branch <b>#${id}</b> — ${E(r.label)} <button id="backorig">← back to original run</button>`;
+  bn.classList.toggle("hidden",id===0);
+  const bo=document.getElementById("backorig"); if(bo)bo.onclick=()=>viewBranch(0);
+}
+async function runCompare(){
+  const a=document.getElementById("cmpa").value, b=document.getElementById("cmpb").value;
+  const out=document.getElementById("cmpout"); out.innerHTML='<div class="muted">comparing…</div>';
+  const c=await (await fetch(`/api/compare?a=${a}&b=${b}`)).json();
+  if(c.error){out.innerHTML=`<div class="muted">${E(c.error)}</div>`;return;}
+  const head=s=>`<div class="cmpside${c.winner===s.id?' win':''}"><b>#${s.id}</b> ${E(s.label)}
+    <div class="bmeta">score ${s.score} · ${s.tokens.toLocaleString()} tok ${c.winner===s.id?'🏆':''}</div></div>`;
+  const cell=x=>x?`${x.type==="call"?"🔧 "+E(x.tool):x.type==="answer"?"✅ answer":"💭 reason"}${x.risk?" ⚠":""}`:'<span class="muted">—</span>';
+  const rows=c.rows.map(rw=>`<tr class="${rw.same?'':'diff'}${rw.i===c.diverge?' dv':''}">
+    <td>${rw.i}</td><td>${cell(rw.a)}</td><td>${cell(rw.b)}</td></tr>`).join("");
+  out.innerHTML=`<div class="cmphead">${head(c.a)}${head(c.b)}</div>
+    ${c.diverge==null?'<div class="muted" style="margin:6px 0">identical trajectories</div>':`<div class="muted" style="margin:6px 0">first divergence at call ${c.diverge}</div>`}
+    <table class="cmptbl"><tr><th>#</th><th>A</th><th>B</th></tr>${rows}</table>
+    <div class="k">outputs</div>
+    <div class="cmphead"><div class="cmpside">${md(c.a.output)}</div><div class="cmpside">${md(c.b.output)}</div></div>`;
 }
 let SWIM=false;
 function toggleSwim(){SWIM=!SWIM; document.getElementById("swim").classList.toggle("on",SWIM); renderSteps(); select(cur);}
