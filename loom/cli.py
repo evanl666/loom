@@ -1521,7 +1521,20 @@ def _cmd_redteam(args: argparse.Namespace) -> int:
     if not args.profile and not args.policy:
         args.profile = "claude-code-safe"  # test something by default
     shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
-    results = run_all(shield, only=args.scenario or None)
+    tools = None
+    if args.generate:
+        if args.tools:
+            tools = [t.strip() for t in args.tools.split(",") if t.strip()]
+        elif args.from_trace:
+            data = _load_trace_json(args.from_trace)
+            names = set((data.get("tools") or {}).keys())
+            from .action import actions
+            names |= {a.tool for a in actions(data) if a.type == "call" and a.tool}
+            tools = sorted(names)
+        if not tools:
+            raise CLIError("--generate needs the agent's tools: add --tools a,b,c or --from-trace <trace>")
+    results = run_all(shield, only=args.scenario or None,
+                      generate=(args.generate or None), tools=tools)
     print(describe(results))
     got_through = [r for r in results if not r["stopped"]]
     return 1 if got_through else 0
@@ -1953,7 +1966,7 @@ def _cmd_inject(args: argparse.Namespace) -> int:
     from .inject import describe_injections, find_injections
 
     _import_builtin_packs()
-    hits = find_injections(_load_trace_json(args.path))
+    hits = find_injections(_load_trace_json(args.path), judge=(args.judge or None))
     print(describe_injections(hits))
     return 1 if (hits and args.gate) else 0
 
@@ -3626,6 +3639,10 @@ def build_parser() -> argparse.ArgumentParser:
     rt_run.add_argument("--scenario", default="", help="one scenario (default: all)")
     rt_run.add_argument("--profile", default="", help="a built-in profile to test")
     rt_run.add_argument("--policy", default="", help="a policy file to test")
+    rt_run.add_argument("--generate", default="", metavar="MODEL",
+                        help="also have an LLM invent attacks for YOUR tool surface")
+    rt_run.add_argument("--tools", default="", help="comma-separated tool names for --generate")
+    rt_run.add_argument("--from-trace", default="", help="infer --generate tools from a trace")
     rt_run.set_defaults(func=_cmd_redteam)
 
     hd = sub.add_parser("harden", help="deployment wizard: recommended policy + flags per scenario")
@@ -3808,6 +3825,8 @@ def build_parser() -> argparse.ArgumentParser:
     ij = sub.add_parser("inject", help="find indirect prompt injection in untrusted tool results")
     ij.add_argument("path")
     ij.add_argument("--gate", action="store_true", help="exit 1 if an injection marker is found")
+    ij.add_argument("--judge", default="", metavar="MODEL",
+                    help="also LLM-scan untrusted results the regex missed (paraphrased injections)")
     ij.set_defaults(func=_cmd_inject)
 
     dl = sub.add_parser("dlp", help="DLP: data flows by sensitivity class + policy suggestion")

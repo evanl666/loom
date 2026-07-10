@@ -146,6 +146,9 @@ recorded as a replayable, taint-able trace.
 | `loom whatif --step N --result X` | **fault injection**: re-run with a tool result overridden |
 | `loom experiment "task" --system … --model …` | **A/B** prompts + models, scored & ranked |
 | `loom intent <trace> --judge` | **intent firewall**: flag actions that don't serve the request |
+| `loom inject <trace> --judge` | prompt-injection detection — `--judge` catches **paraphrased** injections the regex misses |
+| `loom redteam run --generate <model>` | **AI red-teamer**: invents attacks for *your* tool surface, checks the firewall stops them |
+| `loom experiment … --judge <m> --criteria "…"` | A/B variants ranked by a **semantic** success judge, not string match |
 | `loom assert <trace> -e "never issue_refund*"` | **behavioural assertions** as a CI gate — add `--judge` for semantic `judge: <expectation>` lines |
 | `loom canary run --agent m:a` | **honeytokens**: bait the agent, catch exfiltration |
 | `loom taint` / `loom dlp --judge` | exfiltration lineage · **semantic DLP** |

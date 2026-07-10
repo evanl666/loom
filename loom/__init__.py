@@ -39,7 +39,7 @@ from .trace import Run, SweepResult
 from . import packs  # noqa: F401  (imports & registers the built-in Coding Pack)
 from .packs import coding  # noqa: F401
 
-__version__ = "0.31.4"
+__version__ = "0.32.0"
 
 __all__ = [
     "Agent",
