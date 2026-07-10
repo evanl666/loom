@@ -24,9 +24,24 @@ import threading
 from typing import Any, Callable
 
 
+def start_proxy(target: str = "https://api.anthropic.com"):
+    """Start an in-process recording proxy and point the model-client env vars
+    at it. Call this BEFORE importing a framework whose clients read
+    ANTHROPIC_BASE_URL / OPENAI_BASE_URL at construction time."""
+    from .proxy import ProxyServer
+
+    proxy = ProxyServer(port=0, target=target, save_path=None)
+    threading.Thread(target=proxy.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{proxy.server_address[1]}"
+    os.environ["ANTHROPIC_BASE_URL"] = base
+    os.environ["ANTHROPIC_API_BASE"] = base      # litellm / CrewAI dialect
+    os.environ["OPENAI_BASE_URL"] = base + "/v1"
+    return proxy
+
+
 class LiveSession:
     def __init__(self, agent: Any = None, func: "Callable[[str], Any] | None" = None,
-                 target: str = "https://api.anthropic.com"):
+                 target: str = "https://api.anthropic.com", proxy: Any = None):
         if (agent is None) == (func is None):
             raise ValueError("LiveSession needs exactly one of agent= or func=")
         self.agent = agent
@@ -38,13 +53,14 @@ class LiveSession:
         self._episodes: list[str] = []
         self._log: list = []            # accumulated EffectEntry (native path)
         self._live_rec = None           # the Recorder/WireRecorder growing right now
-        self._proxy = None
+        self._proxy = proxy
         self._lock = threading.Lock()
         if func is not None:
-            from .proxy import ProxyServer
-
-            self._proxy = ProxyServer(port=0, target=target, save_path=None)
-            threading.Thread(target=self._proxy.serve_forever, daemon=True).start()
+            # A caller that must set ANTHROPIC_BASE_URL before importing the
+            # framework (clients bake base_url at construction) starts the proxy
+            # first and passes it in; otherwise start one now.
+            if self._proxy is None:
+                self._proxy = start_proxy(target)
             self._live_rec = self._proxy.recorder
 
     # -- introspection ------------------------------------------------------

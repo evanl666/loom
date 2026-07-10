@@ -108,6 +108,10 @@ and journaled crash-recovery all fall out of the same primitive.
 - **Assert & explain:** check plain-English expectations (`never issue_refund`,
   `output contains …`) against the run, ask the copilot to **explain any step**,
   and drive it all from a **⌘K command palette**.
+- **Multi-agent aware:** for a supervisor/sub-agent system — your own, or a
+  third-party framework (LangGraph, CrewAI, the Claude Agent SDK) recorded via
+  the proxy — Loom **recovers the agent hierarchy from the wire** and shows it
+  as a collapsible **tree**, each step laned and colored by which agent ran it.
 
 ---
 
@@ -136,6 +140,7 @@ recorded as a replayable, taint-able trace.
 | `loom record <agent> "<task>"` | record any Claude/OpenAI agent through a proxy |
 | `loom replay <trace>` | re-run byte-identical, $0, offline |
 | `loom debug <trace> --agent m:a` | **interactive step-debugger** + live fork |
+| `loom live --agent m:a` | **run an agent live** in the debugger: watch steps stream, ask follow-ups |
 | `loom studio <trace>` | self-contained visual report |
 | `loom rootcause` / `loom loops` | the **first bad step** + cascade · repeated/oscillating loops |
 | `loom whatif --step N --result X` | **fault injection**: re-run with a tool result overridden |

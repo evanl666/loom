@@ -1846,12 +1846,16 @@ def _cmd_live(args: argparse.Namespace) -> int:
     import webbrowser
 
     from .debugger import DebugServer
-    from .livesession import LiveSession
+    from .livesession import LiveSession, start_proxy
 
     sys.path.insert(0, os.getcwd())
     module_name, _, attr = args.agent.partition(":")
     if not attr:
         raise CLIError("--agent must look like module:attr")
+
+    # Start the proxy + set ANTHROPIC_BASE_URL BEFORE importing the module, so a
+    # framework that builds its model client at import time is captured.
+    proxy = start_proxy(args.target)
     try:
         obj = getattr(importlib.import_module(module_name), attr)
     except (ImportError, AttributeError) as e:
@@ -1861,7 +1865,7 @@ def _cmd_live(args: argparse.Namespace) -> int:
         live = LiveSession(agent=obj)          # a native loom.Agent
         kind = "loom.Agent"
     elif callable(obj):
-        live = LiveSession(func=obj, target=args.target)  # external adapter(prompt)
+        live = LiveSession(func=obj, proxy=proxy)  # external adapter(prompt)
         kind = "external adapter (proxied)"
     else:
         raise CLIError(f"{args.agent!r} is neither a loom.Agent nor a callable(prompt)")
