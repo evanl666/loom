@@ -293,6 +293,8 @@ class Agent:
             )
         finally:
             _deactivate(ambient_token)
+            if rec.journal is not None:
+                rec.journal.close()  # flush already happened per-write; just free the fd
         run_obj = Run(
             agent=self,
             recorder=rec,

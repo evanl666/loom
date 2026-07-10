@@ -207,3 +207,29 @@ def test_unfinished_model_intent_recovers_silently(tmp_path):
     # model calls are harness-internal: retrying costs tokens, not correctness
     run = Run.recover(path, agent=Agent(model=scripted(), tools=[expensive]))
     assert run.output == "final answer after tool"
+
+
+def test_journal_file_handle_is_closed_after_run(tmp_path):
+    """The write-ahead journal must release its fd when the run ends, or a
+    long-lived process that keeps Run objects leaks a descriptor per run."""
+    from loom import Agent, tool
+    from loom.providers import ModelResponse, ScriptedProvider, ToolCall
+
+    @tool
+    def add(a: int, b: int) -> int:
+        "add"
+        return a + b
+
+    jp = str(tmp_path / "task.jsonl")
+    agent = Agent(
+        model=ScriptedProvider([
+            ModelResponse(tool_calls=[ToolCall("t1", "add", {"a": 1, "b": 2})], stop_reason="tool_use"),
+            ModelResponse(text="3", stop_reason="end_turn"),
+        ]),
+        tools=[add],
+        journal=jp,
+    )
+    run = agent.run("go")
+    j = run.recorder.journal
+    assert j._f is None  # handle released
+    j.close()  # idempotent, no error

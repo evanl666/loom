@@ -72,6 +72,16 @@ class Journal:
         self._f.write(json.dumps({"type": "effect", **entry.to_dict()}) + "\n")
         self._f.flush()
 
+    def close(self) -> None:
+        """Release the file handle. Idempotent; safe if start() never ran.
+
+        Every write already flushes, so closing changes nothing on disk -- it
+        just stops leaking the descriptor once the run is over.
+        """
+        if self._f is not None:
+            self._f.close()
+            self._f = None
+
     @staticmethod
     def read_full(path: str) -> "tuple[dict, list[EffectEntry], list[dict]]":
         """Parse a journal, tolerating a torn final line (crash mid-write).

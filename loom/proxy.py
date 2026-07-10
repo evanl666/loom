@@ -574,14 +574,28 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(payload)
 
     def do_POST(self) -> None:
-        length = int(self.headers.get("content-length", 0))
+        try:
+            length = int(self.headers.get("content-length", 0))
+        except (TypeError, ValueError):
+            self._send_json(400, {"error": "invalid content-length header"})
+            return
+        if length < 0:
+            self._send_json(400, {"error": "negative content-length"})
+            return
         if self.server.max_body and length > self.server.max_body:
             self._send_json(413, {
                 "error": f"request body {length} bytes exceeds the proxy cap "
                          f"({self.server.max_body}); raise it with --max-body-mb"
             })
             return
-        request = json.loads(self.rfile.read(length) or b"{}")
+        try:
+            request = json.loads(self.rfile.read(length) or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            self._send_json(400, {"error": "request body is not valid JSON"})
+            return
+        if not isinstance(request, dict):
+            self._send_json(400, {"error": "request body must be a JSON object"})
+            return
         wants_stream = bool(request.get("stream"))
 
         if (self.server.auth and not self.path.startswith("/loom/")
@@ -674,7 +688,18 @@ class _Handler(BaseHTTPRequestHandler):
                 else:
                     response = reconstruct_sse(raw)
             else:
-                response = json.loads(upstream.read())
+                raw_body = upstream.read()
+                try:
+                    response = json.loads(raw_body or b"{}")
+                except (json.JSONDecodeError, ValueError):
+                    # Upstream returned 200 with a non-JSON body (edge/CDN error
+                    # page, wrong endpoint). Surface it as a gateway error rather
+                    # than crashing the handler.
+                    self._send_json(502, {
+                        "error": "upstream returned a non-JSON response",
+                        "body": raw_body.decode("utf-8", "replace")[:2000],
+                    })
+                    return
 
         events: list = list(taint_events)
         if shield is not None:

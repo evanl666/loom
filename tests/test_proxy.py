@@ -402,3 +402,63 @@ def test_sse_reconstruction():
     assert msg["content"][1]["input"] == {"a": 1, "b": 2}
     assert msg["stop_reason"] == "tool_use"
     assert msg["usage"] == {"input_tokens": 5, "output_tokens": 7}
+
+def test_malformed_requests_get_clean_http_errors_not_crashes():
+    """A misbehaving client (bad content-length, non-JSON body, non-object body)
+    must get a 4xx, not crash the handler with a traceback + connection reset."""
+    import http.client
+
+    proxy = _serve(ProxyServer(port=0, target="http://127.0.0.1:59999"))
+    try:
+        # bad content-length
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.putrequest("POST", "/v1/messages")
+        c.putheader("content-length", "abc")
+        c.endheaders()
+        assert c.getresponse().status == 400
+        c.close()
+
+        # malformed JSON body
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("POST", "/v1/messages", body=b"{not json")
+        assert c.getresponse().status == 400
+        c.close()
+
+        # valid JSON but not an object
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("POST", "/v1/messages", body=b"[1,2,3]")
+        assert c.getresponse().status == 400
+        c.close()
+    finally:
+        proxy.shutdown()
+
+
+def test_upstream_non_json_response_is_a_502_not_a_crash():
+    """If upstream returns 200 with a non-JSON body, surface a gateway error."""
+    import http.client
+
+    class _HtmlUpstream(ThreadingHTTPServer):
+        def __init__(self):
+            super().__init__(("127.0.0.1", 0), _HtmlHandler)
+
+    class _HtmlHandler(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            self.send_response(200)
+            self.send_header("content-type", "text/html")
+            self.end_headers()
+            self.wfile.write(b"<html>edge error</html>")
+
+    upstream = _serve(_HtmlUpstream())
+    proxy = _serve(ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}"))
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("POST", "/v1/messages", body=b'{"stream": false}')
+        assert c.getresponse().status == 502
+        c.close()
+    finally:
+        proxy.shutdown()
+        upstream.shutdown()
