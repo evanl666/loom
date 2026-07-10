@@ -2319,6 +2319,24 @@ def _cmd_policy(args: argparse.Namespace) -> int:
             print(f"{mark} {action:8} {sig}" + (f"   (rule: {rule})" if rule else "   (default)"))
         return 0
 
+    if args.policy_cmd in ("rollout", "promote", "rollback"):
+        from . import rollout as _ro
+
+        try:
+            if args.policy_cmd == "rollout":
+                print(_ro.describe(_ro.assess(args.policy, _expand_trace_paths(args.traces))))
+            elif args.policy_cmd == "promote":
+                r = _ro.promote(args.policy, _expand_trace_paths(args.traces),
+                                by=args.by, force=args.force)
+                fx = " (FORCED past the gate)" if r["forced"] else ""
+                print(f"✓ promoted {r['policy']} → {r['stage'].upper()}{fx}")
+            else:  # rollback
+                r = _ro.rollback(args.policy, by=args.by)
+                print(f"↩ rolled back {r['policy']} → {r['stage'].upper()}")
+        except (ValueError, FileNotFoundError) as e:
+            raise CLIError(str(e))
+        return 0
+
     # test: run the policy against a JSON list of {name, input} calls
     shield = Shield(**to_shield_kwargs(resolve(profile=args.profile, policy_path=args.policy)))
     with open(args.calls) as f:
@@ -2889,6 +2907,21 @@ def build_parser() -> argparse.ArgumentParser:
     po_sim.add_argument("--md", default="", metavar="FILE",
                         help="write a Markdown summary for a PR comment ('-' = stdout)")
     po_sim.set_defaults(func=_cmd_policy)
+    po_roll = posub.add_parser("rollout", help="lifecycle status: stage + blast radius + gate")
+    po_roll.add_argument("policy")
+    po_roll.add_argument("--traces", nargs="+", required=True, help="corpus to assess against")
+    po_roll.set_defaults(func=_cmd_policy)
+    po_prom = posub.add_parser("promote", help="advance a stage (draft→canary→enforce), gated")
+    po_prom.add_argument("policy")
+    po_prom.add_argument("--traces", nargs="+", required=True)
+    po_prom.add_argument("--by", default="", help="who is promoting (recorded in history)")
+    po_prom.add_argument("--force", action="store_true", help="promote past the breakage gate")
+    po_prom.set_defaults(func=_cmd_policy)
+    po_rb = posub.add_parser("rollback", help="step a policy back one stage")
+    po_rb.add_argument("policy")
+    po_rb.add_argument("--by", default="")
+    po_rb.add_argument("--traces", nargs="*", default=[])  # unused, for symmetry
+    po_rb.set_defaults(func=_cmd_policy)
 
     tr_p = sub.add_parser("trace", help="validate / verify / sign / explain a trace's format")
     trsub = tr_p.add_subparsers(dest="trace_cmd", required=True)
