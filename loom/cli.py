@@ -1606,6 +1606,18 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_autopilot(args: argparse.Namespace) -> int:
+    """Turn an incident trace into a full fix bundle (autopsy/movie/diagnosis/patch/PR)."""
+    from .autopilot import describe_autopilot, open_pr, run_autopilot
+
+    manifest = run_autopilot(args.path, args.output or "autopilot-fix")
+    print(describe_autopilot(manifest))
+    if args.open_pr:
+        ok, msg = open_pr(manifest["outdir"])
+        print(("opened PR: " if ok else "PR failed: ") + msg, file=sys.stderr)
+    return 0
+
+
 def _cmd_behavior(args: argparse.Namespace) -> int:
     """Extract a behavior contract from a run and emit behavior unit tests."""
     from .behavior import behavior_spec, describe_behavior, to_pytest
@@ -3414,6 +3426,12 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("--format", default="sft", choices=["sft", "trajectory", "eval", "dpo"])
     ds.add_argument("-o", "--output", default="", help="output .jsonl (default: stdout)")
     ds.set_defaults(func=_cmd_dataset)
+
+    ap = sub.add_parser("autopilot", help="incident → full fix bundle (autopsy/movie/diagnosis/patch/PR)")
+    ap.add_argument("path")
+    ap.add_argument("-o", "--output", default="", help="bundle directory (default: autopilot-fix/)")
+    ap.add_argument("--open-pr", action="store_true", help="commit the bundle and open a GitHub PR")
+    ap.set_defaults(func=_cmd_autopilot)
 
     bh = sub.add_parser("behavior", help="turn a good run into behavior unit tests")
     bh.add_argument("path")
