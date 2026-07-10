@@ -158,6 +158,7 @@ recorded as a replayable, taint-able trace.
 | `loom cost --fix` / `--md` | token-burn RCA + patches · PR comment |
 | `loom policy rollout / synthesize` | gated canary → enforce · **auto-generate** least-privilege |
 | `loom mcp gateway / audit -- <srv>` | firewall + record an MCP server · npm-audit for MCP |
+| `RemoteAgent(name, call=…)` | record a **black-box remote (HTTP/gRPC) agent** call as one replayable, firewallable Action |
 | `loom shadow` / `loom behavior` | offline policy canary · behavior unit tests |
 | `loom fuzz` / `loom dataset from` | hostile-trace CI guard · SFT/DPO/eval data |
 
