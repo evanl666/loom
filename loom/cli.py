@@ -730,14 +730,24 @@ def _cmd_skills(args: argparse.Namespace) -> int:
 
 
 def _cmd_studio(args: argparse.Namespace) -> int:
-    """Export a trace to the Studio viewer and open it in the default browser."""
+    """Freeze a trace into the interactive debugger UI as a self-contained file.
+
+    Studio IS the debugger, delivered as a static page: the agent tree, timeline,
+    step inspector, and context frame all work offline -- server-only features
+    (fork / live / copilot / assert) are off. Shareable without Loom or the agent."""
+    import os
     import webbrowser
 
-    code = _cmd_export(args)
-    if code == 0:
-        out = args.output or (args.path.rsplit(".json", 1)[0] + ".html")
-        webbrowser.open(f"file://{__import__('os').path.abspath(out)}")
-    return code
+    from .debugger import static_page
+
+    data = _load_trace_json(args.path)
+    out = args.output or (args.path.rsplit(".json", 1)[0] + ".html")
+    with open(out, "w") as f:
+        f.write(static_page(data))
+    print(f"wrote {out}")
+    if not getattr(args, "no_open", False):
+        webbrowser.open(f"file://{os.path.abspath(out)}")
+    return 0
 
 
 def _cmd_diff(args: argparse.Namespace) -> int:
@@ -3218,6 +3228,7 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("studio", help="export a trace to the Studio viewer and open it")
     st.add_argument("path")
     st.add_argument("-o", "--output", default="", help="output path (default: <trace>.html)")
+    st.add_argument("--no-open", action="store_true", help="don't open a browser")
     st.set_defaults(func=_cmd_studio)
 
     px = sub.add_parser("proxy", help="record any Anthropic-API agent through a local proxy")

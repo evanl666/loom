@@ -1108,6 +1108,9 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
   <div id="pallist"></div></div></div>
 <script>
 const E=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+// Static Studio export: the SAME page, but data is inlined and server-only
+// features (fork / live / copilot / assert) are off. See debugger.static_page().
+const STATIC=!!window.LOOM_STATIC, SD=window.LOOM_STATIC||{};
 function md(t){ // minimal, XSS-safe markdown: escape first, protect code blocks
   const blocks=[];
   t=String(t||"").replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>{blocks.push(c.replace(/\n$/,"")); return "~CB~"+(blocks.length-1)+"~CB~";});
@@ -1137,8 +1140,12 @@ function codeFields(inp){
 let RUN=null, steps=[], cur=0, canFork=false, CAN_CHAT=false;
 
 async function load(){
-  RUN=await (await fetch("/api/run")).json();
+  RUN = STATIC ? SD.run : await (await fetch("/api/run")).json();
   steps=RUN.steps; canFork=RUN.can_fork; CAN_CHAT=RUN.can_chat;
+  if(STATIC){ // hide server-only controls; this is a frozen, shareable snapshot
+    ["copilot","assertbtn","export","brk"].forEach(id=>{const e=document.getElementById(id); if(e)e.style.display="none";});
+    const b=document.querySelector("header b"); if(b)b.textContent="🔬 Loom Studio";
+  }
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
   document.getElementById("model").textContent=RUN.model||"";
   autoTree();
@@ -1288,7 +1295,7 @@ function renderDetail(){
   }
   h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
   if(CAN_CHAT) h+=`<button id="explainbtn" title="ask the copilot to explain this step">🔎 Explain this step</button><div id="explainout"></div>`;
-  if(s.type==="call") h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
+  if(s.type==="call"&&!STATIC) h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
   h+=`<div id="dynpanels"></div>`;  // pack-contributed panels (SQL plan, file, screenshot…)
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
   if(s.risk) h+=`<div class="k">risk</div><span class="chip risk">⚠ ${E(s.risk)}</span>`;
@@ -1330,7 +1337,7 @@ function renderDetail(){
 }
 async function loadPanels(step){
   const box=document.getElementById("dynpanels"); if(!box)return;
-  const r=await (await fetch("/api/panels?step="+step)).json();
+  const r = STATIC ? {panels: SD.panels[step]||[]} : await (await fetch("/api/panels?step="+step)).json();
   let h=r.panels.map(p=>`<div class="k">🧩 ${E(p.title)}</div>`+(p.code!=null?`<pre class="code">${E(p.code)}</pre>`:`<div>${E(p.text||"")}</div>`)).join("");
   const s=steps[cur];
   if(s.type==="call"&&canFork) h+=`<div class="k">▷ dry-run <span class="muted">— run just this tool with edited args (no model call)</span></div>
@@ -1371,7 +1378,7 @@ async function loadContext(){
   const s=steps[cur], box=document.getElementById("ctx");
   document.getElementById("ctxbtn").remove();
   box.innerHTML='<span class="muted">loading…</span>';
-  const r=await (await fetch("/api/context?step="+s.step)).json();
+  const r = STATIC ? {frame: SD.context[s.step]||[]} : await (await fetch("/api/context?step="+s.step)).json();
   box.innerHTML=r.frame.map(m=>{
     const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human"}[m.role]||m.role;
     const cur=m.step===s.step?" curframe":"";
@@ -1466,7 +1473,7 @@ async function explainStep(step){
 async function showAgents(){
   if(drawerOpen("agents")){closeDrawer();return;}
   const p=openDrawer("agents","🕸 Agents");
-  const r=await (await fetch("/api/agents")).json();
+  const r = STATIC ? SD.agents : await (await fetch("/api/agents")).json();
   if(!r.multi){p.innerHTML='<div class="muted">single-agent run — no sub-agents detected.</div>';return;}
   const src={native:"recorded by Loom's harness (agent names known)",wire:"recovered from the wire (system-prompt fingerprint)",flat:"depth only"}[r.source]||r.source;
   let h=`<div class="muted" style="font-size:11px;margin-bottom:10px">${r.agents.length} agents · ${E(src)}</div>`;
@@ -1528,7 +1535,8 @@ function paletteItems(){
     {kind:"cmd",label:"⏮ first step",meta:"",run:()=>select(0)},
     {kind:"cmd",label:"⏭ last step",meta:"",run:()=>select(steps.length-1)},
   ];
-  return items.concat(cmds);
+  const use = STATIC ? cmds.filter(c=>!/assert|copilot|export session/i.test(c.label)) : cmds;
+  return items.concat(use);
 }
 function openPalette(){
   const p=document.getElementById("palette"); p.classList.remove("hidden");
@@ -1626,7 +1634,7 @@ async function setBreak(){
 }
 document.getElementById("brk").onkeydown=e=>{if(e.key==="Enter")setBreak();};
 async function gotoRootCause(){
-  const r=await (await fetch("/api/rootcause")).json();
+  const r = STATIC ? SD.rootcause : await (await fetch("/api/rootcause")).json();
   if(!r.found){alert("no root-cause signal — the run looks clean");return;}
   const i=steps.findIndex(s=>s.step===r.step);
   if(i>=0)select(i);
@@ -1639,7 +1647,7 @@ async function gotoRootCause(){
 async function showBranches(){
   if(drawerOpen("branches")){closeDrawer();return;}
   const p=openDrawer("branches","🌳 Branches");
-  const r=await (await fetch("/api/branches")).json();
+  const r = STATIC ? {branches: SD.branches||[]} : await (await fetch("/api/branches")).json();
   if(!r.branches.length){p.innerHTML='<div class="muted">no branches yet — fork a step to start the tree</div>';return;}
   const opts=[`<option value="0">#0 original run</option>`].concat(
     r.branches.map(b=>`<option value="${b.id}">#${b.id} ${E(b.label).slice(0,30)}</option>`)).join("");
@@ -1706,3 +1714,66 @@ document.getElementById("first").onclick=()=>select(0);
 document.getElementById("last").onclick=()=>select(steps.length-1);
 load();
 </script></body></html>"""
+
+
+def _panels_for(data: dict, step: int) -> "list[dict]":
+    """Domain panels contributed by packs for the action at ``step`` (module-level
+    twin of DebugSession.panels_for, for the static export)."""
+    from .action import actions
+    from .packs import install_builtin, packs
+
+    install_builtin()
+    a = next((x for x in actions(data) if x.step == step), None)
+    if a is None:
+        return []
+    out: list[dict] = []
+    for pack in packs():
+        hook = getattr(pack, "debugger_panels", None)
+        if hook is None:
+            continue
+        try:
+            out.extend(hook(a, data) or [])
+        except Exception:  # noqa: BLE001
+            continue
+    return out
+
+
+def static_data(data: dict) -> dict:
+    """Everything the debugger page fetches, precomputed -- so the SAME UI can be
+    frozen into a self-contained file (no server, no agent, no model)."""
+    from .multiagent import infer_agents
+    from .rootcause import first_bad_step
+
+    steps = steps_for(data)
+    run = {
+        "prompt": data.get("prompt", ""), "output": data.get("output", ""),
+        "model": data.get("model", ""), "steps": steps,
+        "can_fork": False, "can_chat": False, "live": False, "running": False,
+        "system": data.get("system", ""), "all_tools": [],
+    }
+    ctx: dict = {}
+    panels: dict = {}
+    for s in steps:
+        st = s.get("step")
+        if st is None or st < 0 or str(st) in ctx:
+            continue
+        ctx[str(st)] = context_at(data, st)
+        p = _panels_for(data, st)
+        if p:
+            panels[str(st)] = p
+    try:
+        rc = first_bad_step(data)
+    except Exception:  # noqa: BLE001
+        rc = {"found": False}
+    return {"run": run, "agents": infer_agents(data), "context": ctx,
+            "panels": panels, "rootcause": rc, "branches": []}
+
+
+def static_page(data: dict) -> str:
+    """The interactive debugger UI as a self-contained static file (Loom Studio):
+    the same page, with its data inlined and server-only features (fork / live /
+    copilot / assert) switched off. Shareable -- the viewer needs neither Loom
+    nor the agent."""
+    payload = json.dumps(static_data(data)).replace("</", "<\\/")
+    inject = "<script>window.LOOM_STATIC=" + payload + ";</script>\n"
+    return _PAGE.replace("<script>", inject + "<script>", 1)

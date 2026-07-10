@@ -141,7 +141,7 @@ recorded as a replayable, taint-able trace.
 | `loom replay <trace>` | re-run byte-identical, $0, offline |
 | `loom debug <trace> --agent m:a` | **interactive step-debugger** + live fork |
 | `loom live --agent m:a` | **run an agent live** in the debugger: watch steps stream, ask follow-ups |
-| `loom studio <trace>` | self-contained visual report |
+| `loom studio <trace>` | the **debugger UI frozen into a shareable file** (tree, timeline, inspector — offline, no agent) |
 | `loom rootcause` / `loom loops` | the **first bad step** + cascade · repeated/oscillating loops |
 | `loom whatif --step N --result X` | **fault injection**: re-run with a tool result overridden |
 | `loom experiment "task" --system … --model …` | **A/B** prompts + models, scored & ranked |
