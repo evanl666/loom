@@ -239,9 +239,10 @@ def install_builtin() -> None:
     Registers explicit instances (idempotent by name) rather than relying on
     import side effects -- an import happens once per process, so a registry
     cleared later (tests, custom setups) could never get the packs back."""
-    from . import browser, coding, sql, support
+    from . import browser, coding, remote, sql, support
 
     register(coding.CodingPack())
     register(sql.SqlPack())
     register(browser.BrowserPack())
     register(support.SupportPack())
+    register(remote.RemoteAgentPack())
