@@ -84,6 +84,124 @@ class WorldSnapshot:
         return results
 
 
+class WorldRepo:
+    """Git-branch-style management of an agent's world snapshots.
+
+    ``branch`` captures the current world under a name, ``checkout`` restores a
+    named branch, ``diff`` compares two branches. The repo is a ``.loom-world/``
+    directory holding one snapshot store per branch -- so you can run an agent,
+    branch its world, try a different path, and jump back, like source control
+    for state instead of code.
+    """
+
+    def __init__(self, repo_dir: str = ".loom-world"):
+        self.repo_dir = os.path.abspath(repo_dir)
+        os.makedirs(self.repo_dir, exist_ok=True)
+
+    def _branch_dir(self, name: str) -> str:
+        safe = "".join(c for c in name if c.isalnum() or c in "-_.")
+        if not safe:
+            raise ValueError(f"invalid branch name {name!r}")
+        return os.path.join(self.repo_dir, safe)
+
+    def branch(self, name: str, dirs: "list[str]" = (), sqlite: "list[str]" = ()) -> str:
+        if not dirs and not sqlite:
+            raise ValueError("a branch needs at least one --dir or --sqlite to capture")
+        w = WorldSnapshot(self._branch_dir(name))
+        for d in dirs:
+            w.add_dir(d)
+        for db in sqlite:
+            w.add_sqlite(db)
+        w.save()
+        return self._branch_dir(name)
+
+    def list(self) -> "list[dict]":
+        out = []
+        for name in sorted(os.listdir(self.repo_dir)):
+            m = os.path.join(self.repo_dir, name, "manifest.json")
+            if os.path.isfile(m):
+                try:
+                    with open(m) as f:
+                        entries = (json.load(f) or {}).get("entries", [])
+                    out.append({"branch": name, "worlds": len(entries),
+                                "targets": [e["target"] for e in entries]})
+                except (OSError, json.JSONDecodeError):
+                    continue
+        return out
+
+    def checkout(self, name: str) -> "list[dict]":
+        d = self._branch_dir(name)
+        if not os.path.isfile(os.path.join(d, "manifest.json")):
+            raise ValueError(f"no branch named {name!r}")
+        return WorldSnapshot.load(d).restore_all()
+
+    def diff(self, a: str, b: str) -> dict:
+        """Compare two branches: per world, what differs (files / table rows)."""
+        ea = self._entries(a)
+        eb = self._entries(b)
+        worlds = []
+        by_target_b = {e["target"]: e for e in eb}
+        for e in ea:
+            other = by_target_b.get(e["target"])
+            if not other:
+                continue
+            if e["kind"] == "dir":
+                worlds.append({"target": e["target"], "kind": "dir",
+                               **_dir_diff(e["store"], other["store"])})
+            elif e["kind"] == "sqlite":
+                worlds.append({"target": e["target"], "kind": "sqlite",
+                               **_sqlite_diff(e["store"], other["store"])})
+        return {"a": a, "b": b, "worlds": worlds}
+
+    def _entries(self, name: str) -> "list[dict]":
+        with open(os.path.join(self._branch_dir(name), "manifest.json")) as f:
+            return (json.load(f) or {}).get("entries", [])
+
+
+def _dir_diff(tar_a: str, tar_b: str) -> dict:
+    import tarfile
+    def names(p):
+        with tarfile.open(p) as t:
+            return {m.name for m in t.getmembers() if m.isfile()}
+    na, nb = names(tar_a), names(tar_b)
+    return {"added": sorted(nb - na), "removed": sorted(na - nb)}
+
+
+def _sqlite_diff(db_a: str, db_b: str) -> dict:
+    import sqlite3
+    def counts(p):
+        c = sqlite3.connect(p)
+        try:
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")]
+            return {t: c.execute(f"SELECT count(*) FROM '{t}'").fetchone()[0] for t in tables}
+        finally:
+            c.close()
+    ca, cb = counts(db_a), counts(db_b)
+    changed = {t: [ca.get(t, 0), cb.get(t, 0)] for t in set(ca) | set(cb)
+               if ca.get(t) != cb.get(t)}
+    return {"tables_changed": changed}
+
+
+def describe_world_diff(d: dict) -> str:
+    lines = [f"world diff: {d['a']} → {d['b']}"]
+    if not d["worlds"]:
+        return lines[0] + "  (no shared worlds)"
+    for w in d["worlds"]:
+        if w["kind"] == "dir":
+            lines.append(f"  📁 {w['target']}: +{len(w['added'])} / -{len(w['removed'])} file(s)")
+            for f in w["added"][:5]:
+                lines.append(f"      + {f}")
+            for f in w["removed"][:5]:
+                lines.append(f"      - {f}")
+        else:
+            ch = w["tables_changed"]
+            lines.append(f"  🗄  {w['target']}: {len(ch)} table(s) changed")
+            for t, (x, y) in list(ch.items())[:6]:
+                lines.append(f"      {t}: {x} → {y} rows")
+    return "\n".join(lines)
+
+
 def describe_restore(results: "list[dict]") -> str:
     if not results:
         return "nothing to restore (empty snapshot)"

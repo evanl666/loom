@@ -33,3 +33,35 @@ def test_snapshot_restores_dir_and_sqlite(tmp_path):
     assert not (ws / "evil.txt").exists()  # the agent's junk is gone
     rows = sqlite3.connect(db).execute("SELECT name FROM users ORDER BY id").fetchall()
     assert [r[0] for r in rows] == ["alice", "bob"]
+
+
+def test_world_repo_branch_diff_checkout(tmp_path):
+    import sqlite3
+
+    from loom.worldstate import WorldRepo
+
+    ws = tmp_path / "ws"; ws.mkdir()
+    (ws / "f.txt").write_text("v1")
+    db = str(tmp_path / "db.sqlite")
+    c = sqlite3.connect(db); c.execute("CREATE TABLE t(x int)"); c.execute("INSERT INTO t VALUES (1)")
+    c.commit(); c.close()
+
+    repo = WorldRepo(str(tmp_path / ".repo"))
+    repo.branch("main", dirs=[str(ws)], sqlite=[db])
+
+    # mutate the world, branch again
+    (ws / "f.txt").write_text("v2"); (ws / "g.txt").write_text("new")
+    c = sqlite3.connect(db); c.execute("INSERT INTO t VALUES (2), (3)"); c.commit(); c.close()
+    repo.branch("experiment", dirs=[str(ws)], sqlite=[db])
+
+    assert {b["branch"] for b in repo.list()} == {"main", "experiment"}
+    d = repo.diff("main", "experiment")
+    dir_w = next(w for w in d["worlds"] if w["kind"] == "dir")
+    assert "./g.txt" in dir_w["added"]
+    db_w = next(w for w in d["worlds"] if w["kind"] == "sqlite")
+    assert db_w["tables_changed"]["t"] == [1, 3]
+
+    # checkout main -> the whole world jumps back
+    repo.checkout("main")
+    assert (ws / "f.txt").read_text() == "v1" and not (ws / "g.txt").exists()
+    assert sqlite3.connect(db).execute("SELECT count(*) FROM t").fetchone()[0] == 1

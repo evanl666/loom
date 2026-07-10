@@ -1546,6 +1546,28 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     return 1 if (args.gate and c["findings"]) else 0
 
 
+def _cmd_world(args: argparse.Namespace) -> int:
+    """Git-branch-style management of an agent's world (branch/checkout/list/diff)."""
+    from .worldstate import WorldRepo, describe_restore, describe_world_diff
+
+    repo = WorldRepo(args.repo)
+    try:
+        if args.world_cmd == "branch":
+            repo.branch(args.name, dirs=args.dir, sqlite=args.sqlite)
+            print(f"branched world '{args.name}' -> {args.repo}", file=sys.stderr)
+        elif args.world_cmd == "checkout":
+            print(describe_restore(repo.checkout(args.name)))
+        elif args.world_cmd == "list":
+            rows = repo.list()
+            print("\n".join(f"  {r['branch']:<20} {r['worlds']} world(s)" for r in rows)
+                  or "no branches yet")
+        elif args.world_cmd == "diff":
+            print(describe_world_diff(repo.diff(args.a, args.b)))
+    except (ValueError, OSError) as e:
+        raise CLIError(str(e))
+    return 0
+
+
 def _cmd_snapshot(args: argparse.Namespace) -> int:
     """Capture / restore an agent's external world (dirs + SQLite DBs)."""
     from .worldstate import WorldSnapshot, describe_restore
@@ -3323,6 +3345,24 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--fix", action="store_true", help="also emit concrete cost patches")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
+
+    wd = sub.add_parser("world", help="git-branch-style management of an agent's world")
+    wdsub = wd.add_subparsers(dest="world_cmd", required=True)
+    for c in ("branch",):
+        wc = wdsub.add_parser(c, help="capture the current world under a name")
+        wc.add_argument("name")
+        wc.add_argument("--dir", action="append", default=[], metavar="DIR")
+        wc.add_argument("--sqlite", action="append", default=[], metavar="DB")
+        wc.add_argument("--repo", default=".loom-world")
+        wc.set_defaults(func=_cmd_world)
+    wco = wdsub.add_parser("checkout", help="restore a named world branch")
+    wco.add_argument("name"); wco.add_argument("--repo", default=".loom-world")
+    wco.set_defaults(func=_cmd_world)
+    wls = wdsub.add_parser("list", help="list world branches")
+    wls.add_argument("--repo", default=".loom-world"); wls.set_defaults(func=_cmd_world)
+    wdf = wdsub.add_parser("diff", help="diff two world branches (files / table rows)")
+    wdf.add_argument("a"); wdf.add_argument("b"); wdf.add_argument("--repo", default=".loom-world")
+    wdf.set_defaults(func=_cmd_world)
 
     sn = sub.add_parser("snapshot", help="capture / restore an agent's world (dirs + SQLite DBs)")
     snsub = sn.add_subparsers(dest="snapshot_cmd", required=True)
