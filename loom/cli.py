@@ -1571,6 +1571,19 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_intent(args: argparse.Namespace) -> int:
+    """Intent firewall: flag actions that don't serve the user's request."""
+    from .intent import describe_intent, intent_report
+
+    report = intent_report(_load_trace_json(args.path), judge=args.judge,
+                           threshold=args.threshold)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(describe_intent(report))
+    return 1 if (args.gate and report["misaligned"]) else 0
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     """Security posture for an agent's tool surface (a run or a corpus)."""
     from .scan import describe_scan, scan
@@ -3268,6 +3281,14 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("--format", default="sft", choices=["sft", "trajectory", "eval", "dpo"])
     ds.add_argument("-o", "--output", default="", help="output .jsonl (default: stdout)")
     ds.set_defaults(func=_cmd_dataset)
+
+    it = sub.add_parser("intent", help="intent firewall: flag actions that don't serve the request")
+    it.add_argument("path")
+    it.add_argument("--judge", required=True, metavar="MODEL", help="the judge model")
+    it.add_argument("--threshold", type=float, default=0.5, help="alignment score cutoff")
+    it.add_argument("--gate", action="store_true", help="exit 1 if any action is off-mission")
+    it.add_argument("--json", action="store_true", help="machine-readable")
+    it.set_defaults(func=_cmd_intent)
 
     sc = sub.add_parser("scan", help="agent supply-chain security posture (tool surface + gaps)")
     sc.add_argument("path", help="a trace or a directory of traces")
