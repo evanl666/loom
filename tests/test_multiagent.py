@@ -125,3 +125,17 @@ def test_wire_delayed_delegation_attributed_to_the_requester():
     # re-anchored: the hand-off is shown BEFORE the analyst's calc
     order = [s.get("tool") for s in steps if s.get("type") == "call"]
     assert order.index("ask_analyst") < order.index("calc")
+
+
+def test_tool_only_model_call_still_shows_a_model_step():
+    """A model call that makes a tool call but produces no text must still be a
+    visible 'model' step -- so a tool call is never orphaned (no model deciding
+    it). Regression for the debugger reading 'tool call' with no model before it."""
+    data = {"log": [
+        {"seq": 0, "kind": "model", "result": {"tool_calls": [
+            {"id": "1", "name": "search", "input": {}}], "stop_reason": "tool_use"}},  # no text
+        {"seq": 1, "kind": "tool:search", "result": "r"},
+        {"seq": 2, "kind": "model", "result": {"text": "done", "stop_reason": "end_turn"}}],
+        "prompt": "x", "output": "done", "tools": {}}
+    types = [a.type for a in actions(data)]
+    assert types[0] == "reason" and types[1] == "call"   # model decision, then the call

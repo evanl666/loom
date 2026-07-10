@@ -290,10 +290,12 @@ def actions(source: Any) -> list[Action]:
                 for tc in resp.tool_calls:
                     pending.setdefault(e.depth, []).append(
                         (tc.name, intent, tc.input, e.seq, max(cur_turn, 0)))
-                if intent.strip():  # a "thought" preceding the calls
-                    out.append(Action(step=e.seq, depth=e.depth, type="reason",
-                                       intent=intent, replay=replay,
-                                       observation=Observation(tokens=resp.usage)))
+                # Always emit the model turn that MADE these calls -- even with no
+                # reasoning text -- so every tool call has a visible "the model
+                # decided to call X" step before it, not an orphaned call.
+                out.append(Action(step=e.seq, depth=e.depth, type="reason",
+                                   intent=intent, replay=replay,
+                                   observation=Observation(tokens=resp.usage)))
             else:  # a final text answer
                 out.append(Action(step=e.seq, depth=e.depth, type="answer", intent=intent,
                                    replay=replay,
