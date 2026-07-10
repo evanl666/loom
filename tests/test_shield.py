@@ -652,3 +652,36 @@ def test_approval_records_operator_identity():
 def test_timeout_has_no_operator_identity():
     out, events = Shield(confirm=["Bash*"], timeout=0.05).screen(LIST_FILES)
     assert events[0]["via"] == "timeout" and "by" not in events[0]
+
+
+def test_screen_tolerates_malformed_responses_and_still_blocks():
+    """screen() runs on the untrusted upstream response inside the proxy. A
+    malformed or hostile response (null content, null tool name, junk tool_call
+    entries, a dict-shaped `arguments`) must not crash the handler -- and a real
+    tool call must still be blocked, not slip through on a crash."""
+    from loom.shield import Shield
+
+    sh = Shield(deny=["Bash*"])
+    junk = [
+        {},
+        {"content": None},
+        {"content": "hello"},
+        {"content": [None, 123, "x"]},
+        {"content": [{"type": "tool_use", "name": None, "input": {}}]},
+        {"content": [{"type": "tool_use", "name": "Bash", "input": None}]},
+        {"choices": None},
+        {"choices": [{"message": None}]},
+        {"choices": [{"message": {"tool_calls": [None, {"function": None}]}}]},
+        {"choices": [{"message": {"tool_calls": [{"id": "c", "function": {"name": None, "arguments": "{}"}}]}}]},
+    ]
+    for resp in junk:
+        sh.screen(dict(resp))  # must not raise
+
+    # Some OpenAI-compatible servers send `arguments` already parsed (a dict).
+    # That used to crash json.loads and bypass the firewall; it must now DENY.
+    _, events = sh.screen(
+        {"choices": [{"message": {"tool_calls": [
+            {"id": "c", "function": {"name": "Bash", "arguments": {"cmd": "rm -rf /"}}}
+        ]}}]}
+    )
+    assert any(e.get("action") == "deny" for e in events)

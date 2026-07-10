@@ -532,9 +532,9 @@ class Shield:
     def _screen_anthropic(self, response: dict) -> "tuple[dict, list[dict]]":
         events: list[dict] = []
         content, changed = [], False
-        for b in response.get("content", []):
+        for b in response.get("content") or []:
             if isinstance(b, dict) and b.get("type") == "tool_use":
-                name, tool_input = b.get("name", ""), b.get("input", {})
+                name, tool_input = b.get("name") or "", b.get("input") or {}
                 allowed, event = self._judge(name, tool_input)
                 if event:
                     events.append(event)
@@ -573,12 +573,20 @@ class Shield:
         message = choice.get("message", {}) or {}
         kept, notices, changed = [], [], False
         for tc in message.get("tool_calls") or []:
+            if not isinstance(tc, dict):
+                continue  # a malformed/hostile upstream may emit junk entries
             fn = tc.get("function", {}) or {}
-            name = fn.get("name", "")
-            try:
-                tool_input = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                tool_input = {"_raw": fn.get("arguments", "")}
+            name = fn.get("name") or ""
+            args = fn.get("arguments")
+            if isinstance(args, dict):
+                tool_input = args  # some servers already send a parsed object
+            elif isinstance(args, str):
+                try:
+                    tool_input = json.loads(args or "{}")
+                except json.JSONDecodeError:
+                    tool_input = {"_raw": args}
+            else:
+                tool_input = {}
             allowed, event = self._judge(name, tool_input)
             if event:
                 events.append(event)
