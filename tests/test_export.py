@@ -223,3 +223,19 @@ def test_studio_data_flow_panel_from_taint():
         ModelResponse(text="done"),
     ]), tools=[Read, Bash]).run("go")
     assert "Data flow" not in trace_to_html(run2.to_dict())
+
+
+def test_studio_cli_does_not_crash_on_missing_export_flags(tmp_path, monkeypatch):
+    """`loom studio` reuses _cmd_export, whose parser lacks --jsonl/--otel.
+    Reading them non-defensively crashed studio for EVERY user with
+    AttributeError. It must render the HTML and exit 0."""
+    import webbrowser
+
+    from loom.cli import main
+
+    monkeypatch.setattr(webbrowser, "open", lambda *a, **k: True)  # don't pop a browser
+    trace = tmp_path / "s.loom.json"
+    make_run().save(str(trace))
+    out = tmp_path / "s.html"
+    assert main(["studio", str(trace), "-o", str(out)]) == 0
+    assert out.exists() and out.read_text().startswith("<!DOCTYPE html>")

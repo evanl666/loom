@@ -240,16 +240,20 @@ def _doctor_environment() -> int:
 
 def _cmd_export(args: argparse.Namespace) -> int:
     """Render a saved trace to HTML, or flatten it to observability events."""
-    if args.jsonl or args.otel:
+    # _cmd_studio reuses this handler, but its parser has no --jsonl/--otel, so
+    # read them defensively rather than crashing on a missing attribute.
+    jsonl = getattr(args, "jsonl", "")
+    otel = getattr(args, "otel", False)
+    if jsonl or otel:
         from .events import export_events
 
         paths = _expand_trace_paths([args.path])
-        dest = args.jsonl or "-"
+        dest = jsonl or "-"
         if dest == "-":
-            n = export_events(paths, sys.stdout, otel=args.otel)
+            n = export_events(paths, sys.stdout, otel=otel)
         else:
             with open(dest, "w") as f:
-                n = export_events(paths, f, otel=args.otel)
+                n = export_events(paths, f, otel=otel)
             print(f"wrote {n} event(s) -> {dest}", file=sys.stderr)
         return 0
 
