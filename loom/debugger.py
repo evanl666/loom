@@ -67,6 +67,47 @@ def context_at(data: dict, step: int) -> list[dict]:
     return frame
 
 
+def copilot_report(data: dict) -> dict:
+    """The Debug Copilot: point at the suspicious steps, suggest fork edits and a
+    policy patch, and summarize the run -- so you don't have to read the trace."""
+    from .action import actions
+    from .diagnose import diagnose
+    from .scan import scan
+
+    diag = diagnose(data)
+    rep = scan(data)
+    acts = actions(data)
+
+    suspicious = []
+    for a in acts:
+        if a.type != "call":
+            continue
+        reasons = []
+        if a.risky:
+            reasons.append(f"risky ({a.risk})")
+        if a.policy is not None and a.policy.blocked:
+            reasons.append("firewall-blocked")
+        if set(a.capabilities) & {"money_movement", "destructive", "database_write"}:
+            reasons.append("high-impact")
+        if reasons:
+            suspicious.append({"step": a.step, "turn": (a.replay.turn if a.replay else 0),
+                               "tool": a.tool, "why": ", ".join(reasons)})
+
+    fork_edits = [{"turn": s["turn"],
+                   "suggestion": f"Try forking at turn {s['turn']} with: "
+                                 f"“Do NOT call {s['tool']}; only do what the user asked.”"}
+                  for s in suspicious[:3]]
+    policy = sorted({f"{s['tool']}*" for s in suspicious})
+    summary = (f"This run is graded {rep['grade']}. "
+               + (diag.get("suggestion", "") or "No obvious failure category. ")
+               + (f" {len(suspicious)} step(s) worth a look." if suspicious
+                  else " Nothing suspicious stood out."))
+    return {"summary": summary, "grade": rep["grade"],
+            "category": diag.get("category", "unknown"),
+            "suspicious": suspicious, "fork_edits": fork_edits,
+            "policy_suggestion": policy}
+
+
 def _branch_payload(base_data: dict, branch_data: dict, at: int) -> dict:
     """Original vs branch steps + the first step that differs."""
     a = steps_for(base_data)
@@ -144,6 +185,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "steps": steps_for(sess.data),
                 "can_fork": sess.agent is not None,
             })
+        elif self.path == "/api/copilot":
+            self._json(200, copilot_report(sess.data))
         elif self.path.startswith("/api/context"):
             from urllib.parse import parse_qs, urlparse
             try:
@@ -239,6 +282,10 @@ pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:bl
 .frame .rl{display:block;font-size:11px;color:#8a8a92;padding:4px 10px;background:#161619;border-bottom:1px solid #22222a}
 .frame.curframe{border-color:#4a9eff}.frame.curframe .rl{color:#4a9eff;background:#12202f}
 .frame pre{border:0;border-radius:0;max-height:180px;background:#0f0f12}
+#copilotpanel{padding:12px 16px;border-bottom:1px solid #26262b;background:#12151a}
+#copilotpanel.hidden{display:none}.cop-sum{margin-bottom:8px;color:#cfe3ff}
+.chip.jump{cursor:pointer}.chip.jump:hover{border-color:#4a9eff}
+.cop-edit{font-size:12px;color:#c79bff;margin:4px 0}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -251,8 +298,9 @@ pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:bl
       <button id="next" title="next (→)">step ▶</button>
       <button id="last" title="last (End)">⏭</button>
       <span class="muted" id="pos" style="margin-left:8px"></span>
-      <span class="muted" style="margin-left:auto">← → step · click a step to jump</span>
+      <button id="copilot" style="margin-left:auto">🤖 Copilot</button>
     </div>
+    <div id="copilotpanel" class="hidden"></div>
     <div id="detail"></div>
   </div>
 </div>
@@ -370,6 +418,27 @@ document.addEventListener("keydown",e=>{
   if(e.key==="ArrowLeft")select(cur-1); else if(e.key==="ArrowRight")select(cur+1);
   else if(e.key==="Home")select(0); else if(e.key==="End")select(steps.length-1);
 });
+async function loadCopilot(){
+  const p=document.getElementById("copilotpanel");
+  if(!p.classList.contains("hidden")){p.classList.add("hidden");return;}
+  p.classList.remove("hidden"); p.innerHTML='<span class="muted">analyzing…</span>';
+  const r=await (await fetch("/api/copilot")).json();
+  let h=`<div class="cop-sum">🤖 ${E(r.summary)}</div>`;
+  if(r.suspicious.length){
+    h+=`<div class="k">suspicious steps</div>`+r.suspicious.map(s=>
+      `<span class="chip jump" data-step="${s.step}">step ${s.step} · ${E(s.tool)} <span class="muted">(${E(s.why)})</span></span>`).join("");
+  }
+  if(r.fork_edits.length){
+    h+=`<div class="k">suggested experiments</div>`+r.fork_edits.map(f=>`<div class="cop-edit">🍴 ${E(f.suggestion)}</div>`).join("");
+  }
+  if(r.policy_suggestion.length){
+    h+=`<div class="k">policy patch</div><pre>deny/confirm: ${E(r.policy_suggestion.join(", "))}</pre>`;
+  }
+  p.innerHTML=h;
+  p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{
+    const i=steps.findIndex(s=>s.step===+c.dataset.step); if(i>=0)select(i);});
+}
+document.getElementById("copilot").onclick=loadCopilot;
 document.getElementById("prev").onclick=()=>select(cur-1);
 document.getElementById("next").onclick=()=>select(cur+1);
 document.getElementById("first").onclick=()=>select(0);

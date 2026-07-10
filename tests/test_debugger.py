@@ -92,3 +92,39 @@ def test_context_endpoint(tmp_path):
         assert r["frame"] and r["frame"][0]["role"] == "user"
     finally:
         server.shutdown()
+
+
+def test_copilot_report_points_at_suspicious_steps(tmp_path):
+    from loom import Agent, tool
+    from loom.debugger import copilot_report
+    from loom.providers import ModelResponse, ScriptedProvider, ToolCall
+
+    @tool(capabilities={"money_movement"})
+    def refund(x: int) -> str:
+        "Refund."
+        return "ok"
+
+    prov = ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("t", "refund", {"x": 1})], stop_reason="tool_use"),
+        ModelResponse(text="done", stop_reason="end_turn"),
+    ])
+    data = Agent(model=prov, tools=[refund]).run("do it").to_dict()
+    rep = copilot_report(data)
+    assert any(s["tool"] == "refund" for s in rep["suspicious"])
+    assert "refund*" in rep["policy_suggestion"]
+    assert rep["fork_edits"] and rep["summary"]
+
+
+def test_copilot_endpoint(tmp_path):
+    import json
+    import threading
+    import urllib.request
+
+    server = DebugServer(_make_trace(tmp_path), agent=None, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        r = json.load(urllib.request.urlopen(
+            f"http://127.0.0.1:{server.port}/api/copilot", timeout=5))
+        assert "summary" in r and "grade" in r
+    finally:
+        server.shutdown()
