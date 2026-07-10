@@ -170,6 +170,11 @@ def load_document(path: str) -> dict:
     with open(path) as f:
         text = f.read()
     data = _parse(text, path)
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{path} is not a valid policy (expected a mapping of settings like "
+            f"deny/allow/confirm/default, got {type(data).__name__})"
+        )
     if "profiles" in data and set(data) <= {"profiles", "profile", "version"}:
         profiles = data["profiles"]
         chosen = data.get("profile")

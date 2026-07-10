@@ -84,15 +84,30 @@ def _sensitive_values(text: str) -> "list[tuple[str, str]]":
     """(kind, value) for every credential/PII value in a piece of text."""
     from .scrub import PATTERNS
 
+    import bisect
+
     out: list[tuple[str, str]] = []
-    claimed: list[tuple[int, int]] = []  # spans already taken, most-specific first
+    # Claimed spans are kept sorted by start and are always pairwise DISJOINT
+    # (an overlapping match is skipped, never added), so an overlap check only
+    # needs the two neighbours around the insertion point -- O(log n) via
+    # bisect rather than scanning every claimed span, which was O(n^2) and
+    # stalled on large inputs full of match-shaped values.
+    starts: list[int] = []
+    claimed: list[tuple[int, int]] = []
 
     def _take(kind: str, val: str, span: "tuple[int, int]") -> None:
-        # Skip a match overlapping one already claimed by a higher-priority
-        # detector, so a card/SSN isn't ALSO reported as a phone.
-        if any(span[0] < c1 and span[1] > c0 for c0, c1 in claimed):
-            return
-        claimed.append(span)
+        s, e = span
+        i = bisect.bisect_right(starts, s)
+        if i > 0:
+            c0, c1 = claimed[i - 1]
+            if s < c1 and e > c0:
+                return
+        if i < len(claimed):
+            c0, c1 = claimed[i]
+            if s < c1 and e > c0:
+                return
+        starts.insert(i, s)
+        claimed.insert(i, span)
         out.append((kind, val))
 
     for kind, pattern in PATTERNS:

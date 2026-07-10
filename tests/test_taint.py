@@ -209,3 +209,20 @@ def test_a_card_is_not_double_flagged_as_a_phone():
     assert kinds.count("credit-card") == 1 and "phone" not in kinds
     # and an SSN isn't also a phone
     assert [k for k, _ in _sensitive_values("SSN 123-45-6789")] == ["ssn"]
+
+
+def test_sensitive_value_scan_is_linear_not_quadratic():
+    """The overlap-dedup used to scan every claimed span per match (O(n^2)),
+    stalling on large inputs full of match-shaped values. A big blob must scan
+    in roughly linear time and still dedup correctly."""
+    import time
+
+    from loom.taint import _sensitive_values
+
+    blob = "4532015112830366 " * 20000  # ~20k Luhn-valid cards
+    t = time.perf_counter()
+    found = _sensitive_values(blob)
+    elapsed = time.perf_counter() - t
+    assert len(found) == 20000
+    assert all(k == "credit-card" for k, _ in found)
+    assert elapsed < 1.0  # was ~4s before the fix

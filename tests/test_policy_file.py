@@ -333,3 +333,18 @@ def test_policy_diff_reports_rollout_changes(tmp_path, capsys):
     # reversed direction: the run is RELEASED
     assert main(["policy", "diff", str(new), str(old), "--traces", str(tmp_path)]) == 0
     assert "released (no longer denied): 1 run(s)" in capsys.readouterr().out
+
+
+def test_load_document_rejects_non_mapping_policy(tmp_path):
+    """A policy file that parses to a list/scalar/string (not a mapping) must
+    raise a clear ValueError, not a TypeError from `in` on an int or silently
+    return a non-dict that breaks downstream."""
+    import pytest
+
+    from loom.policy_file import load_document
+
+    for name, content in [("scalar.yaml", "42"), ("list.yaml", "- a\n- b"), ("str.yaml", "text")]:
+        p = tmp_path / name
+        p.write_text(content)
+        with pytest.raises(ValueError, match="not a valid policy"):
+            load_document(str(p))
