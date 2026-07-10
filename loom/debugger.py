@@ -45,15 +45,23 @@ def steps_for(data: dict) -> list[dict]:
     color = {a["id"]: a["color"] for a in ia["agents"]}
     step_agent = ia["step_agent"]
     agent_level = ia["agent_level"]
-    # Show the user's request as the first node (the conversation's root), so the
-    # step list / tree reads as a real dialogue, not just the agent's moves.
+    # Show each user turn as a node (the conversation's roots), interleaved at
+    # episode boundaries, so the step list / tree reads as a real dialogue --
+    # not just the agent's moves.
+    episodes = [e for e in (data.get("episodes") or [data.get("prompt", "")]) if e]
+    acts = list(actions(data))
+    ends_after = [i for i, a in enumerate(acts) if a.type == "answer" and a.depth == 0]
+
+    def _user_node(text: str) -> dict:
+        return {"step": -1, "depth": 0, "type": "user", "intent": str(text),
+                "observation": {"text": str(text)}, "nest": 0,
+                **({"agent": "you", "agent_id": "user", "agent_color": 3} if ia["multi"] else {})}
+
     out = []
-    prompt = (data.get("episodes") or [data.get("prompt", "")])[0]
-    if prompt:
-        out.append({"step": -1, "depth": 0, "type": "user", "intent": str(prompt),
-                    "observation": {"text": str(prompt)}, "nest": 0,
-                    **({"agent": "you", "agent_id": "user", "agent_color": 3} if ia["multi"] else {})})
-    for a in actions(data):
+    ep_i = 0
+    if episodes:
+        out.append(_user_node(episodes[0])); ep_i = 1
+    for idx, a in enumerate(acts):
         d = a.to_dict()
         aid = step_agent.get(str(a.step))
         if aid and ia["multi"]:
@@ -64,6 +72,10 @@ def steps_for(data: dict) -> list[dict]:
             # native trace's own recorded depth wins when it goes deeper.
             d["nest"] = max(agent_level.get(aid, 0), a.depth)
         out.append(d)
+        # a top-level final answer ends an episode; if another episode follows,
+        # its user message opens the next turn.
+        if idx in ends_after and ep_i < len(episodes) and idx != ends_after[-1]:
+            out.append(_user_node(episodes[ep_i])); ep_i += 1
     return out
 
 
@@ -309,24 +321,39 @@ def _branch_payload(base_data: dict, branch_data: dict, at: int) -> dict:
 class DebugSession:
     """Holds the trace + optional agent, and executes forks on demand."""
 
-    def __init__(self, trace_path: str, agent: Any = None, copilot_model: str = ""):
+    def __init__(self, trace_path: "str | None" = None, agent: Any = None,
+                 copilot_model: str = "", live: Any = None):
         self.trace_path = trace_path
         self.agent = agent
+        self.live = live  # a LiveSession -> self.data streams from a running agent
         # model the chat copilot talks to; falls back to the fork agent's model
         self.copilot_model = copilot_model or (getattr(agent, "model", "") if agent else "")
         self.branches: list[dict] = []  # a tree of experiments (Git-branch-style)
         self.comments: list[dict] = []  # step annotations / root-cause labels
         self.macro: list[dict] = []     # recorded human debug actions -> a recipe
+        self._static_data: dict = {}
+        if live is not None:
+            return  # data is served live from the session (see the `data` property)
         with open(trace_path) as f:
             loaded = json.load(f)
         if isinstance(loaded, dict) and loaded.get("loomdebug"):
             # a .loomdebug session artifact: restore base + branches + comments
-            self.data = loaded.get("base", {})
+            self._static_data = loaded.get("base", {})
             self.branches = loaded.get("branches", [])
             self.comments = loaded.get("comments", [])
             self.macro = loaded.get("macro", [])
         else:
-            self.data = loaded
+            self._static_data = loaded
+
+    @property
+    def data(self) -> dict:
+        # In live mode the trace is whatever the running agent has produced so
+        # far, so every analyzer (steps, agents, taint, copilot) sees it grow.
+        return self.live.trace() if self.live is not None else self._static_data
+
+    @data.setter
+    def data(self, value: dict) -> None:
+        self._static_data = value
 
     def _agent_for(self, model: str, system: "str | None" = None,
                    tools: "list[str] | None" = None):
@@ -591,10 +618,17 @@ class _Handler(BaseHTTPRequestHandler):
                 "steps": steps_for(sess.data),
                 "can_fork": sess.agent is not None,
                 "can_chat": bool(sess.copilot_model),
+                "live": sess.live is not None,
+                "running": bool(sess.live and sess.live.running),
                 "system": (getattr(sess.agent, "system", "") if sess.agent
                            else sess.data.get("system", "")),
                 "all_tools": (sorted(sess.agent.tools) if sess.agent else []),
             })
+        elif self.path == "/api/live":
+            if sess.live is None:
+                self._json(400, {"error": "not a live session"})
+            else:
+                self._json(200, sess.live.snapshot())
         elif self.path.startswith("/api/breaks"):
             from urllib.parse import parse_qs, urlparse
             from .breakpoint import find_all_breaks
@@ -730,6 +764,23 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 self._json(502, {"error": f"copilot error: {type(e).__name__}: {e}"})
             return
+        if self.path == "/api/ask":
+            if sess.live is None:
+                self._json(400, {"error": "not a live session"})
+                return
+            try:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                prompt = str(body.get("prompt", "")).strip()
+            except (ValueError, TypeError):
+                self._json(400, {"error": "bad json body"})
+                return
+            if not prompt:
+                self._json(400, {"error": "empty prompt"})
+                return
+            started = sess.live.ask(prompt)
+            self._json(200, {"started": started, "running": sess.live.running})
+            return
         if self.path == "/api/assert":
             from .assertions import check_assertions
             try:
@@ -793,9 +844,10 @@ class _Handler(BaseHTTPRequestHandler):
 class DebugServer:
     """Serves the step-debugger for one trace. Bind port 0 to pick a free port."""
 
-    def __init__(self, trace_path: str, agent: Any = None,
-                 port: int = 8790, host: str = "127.0.0.1", copilot_model: str = ""):
-        self.session = DebugSession(trace_path, agent, copilot_model=copilot_model)
+    def __init__(self, trace_path: "str | None" = None, agent: Any = None,
+                 port: int = 8790, host: str = "127.0.0.1", copilot_model: str = "",
+                 live: Any = None):
+        self.session = DebugSession(trace_path, agent, copilot_model=copilot_model, live=live)
         self.httpd = ThreadingHTTPServer((host, port), _Handler)
         self.httpd.session = self.session  # type: ignore[attr-defined]
         self.httpd.daemon_threads = True
@@ -992,6 +1044,15 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
 .step.tstep{border-bottom:1px solid #141518}
 .b-user{background:#3a2a16;color:#ffcf8f}
 .step .b-user+*{color:#e8c98a}
+/* live session bar */
+#livebar{display:flex;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid #202228;background:#101418}
+#livebar.hidden{display:none}
+#livebar #askin{flex:1;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:8px 11px;color:#e7e8ea;font:inherit}
+#livebar #askin:focus{outline:none;border-color:#3a6ea5}
+#livebar #askin:disabled{opacity:.5}
+.livedot{width:9px;height:9px;border-radius:50%;background:#2f9d6b;flex:none}
+.livedot.busy{background:#e5a54a;animation:pulse 1s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -1020,6 +1081,12 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
         <button id="assertbtn" title="check behavioural assertions">✔ assert</button>
         <button id="copilot" class="accent" title="AI copilot">🤖 Copilot</button>
       </div>
+    </div>
+    <div id="livebar" class="hidden">
+      <span class="livedot"></span>
+      <input id="askin" placeholder="ask the agent — it runs live, steps stream in below…">
+      <button id="asksend" class="accent">▶ run</button>
+      <span class="muted" id="livestat"></span>
     </div>
     <div id="detail"></div>
     <div id="tlbar"><button id="play" title="watch the run animate">▶</button>
@@ -1069,12 +1136,50 @@ async function load(){
   steps=RUN.steps; canFork=RUN.can_fork; CAN_CHAT=RUN.can_chat;
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
   document.getElementById("model").textContent=RUN.model||"";
-  // auto-enable the tree when there's an actual hierarchy (multiple agents)
-  const ags=new Set(steps.filter(s=>s.agent_id&&s.agent_id!=="user").map(s=>s.agent_id));
-  if(ags.size>1){TREE=true; document.getElementById("swim").classList.add("on");}
+  autoTree();
   renderSteps(); renderTimeline(); select(0);
   const pb=document.getElementById("play"); if(pb) pb.onclick=togglePlay;
+  LIVE=RUN.live;
+  if(LIVE){
+    document.getElementById("livebar").classList.remove("hidden");
+    const s=document.getElementById("asksend"), inp=document.getElementById("askin");
+    s.onclick=askAgent; inp.onkeydown=e=>{if(e.key==="Enter")askAgent();};
+    setLiveStat(steps.length?(steps.length+" steps"):"ready — ask the agent something");
+    if(RUN.running) startPolling();
+  }
 }
+function autoTree(){  // turn on the tree when a real hierarchy appears
+  const ags=new Set(steps.filter(s=>s.agent_id&&s.agent_id!=="user").map(s=>s.agent_id));
+  if(ags.size>1&&!TREE){TREE=true; document.getElementById("swim").classList.add("on");}
+}
+// ---- live session: ask + stream steps as the agent runs ----
+let LIVE=false, POLL=null;
+async function askAgent(){
+  const inp=document.getElementById("askin"), q=inp.value.trim(); if(!q)return;
+  inp.value="";
+  const r=await (await fetch("/api/ask",{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({prompt:q})})).json();
+  if(r.error){setLiveStat("⚠ "+r.error);return;}
+  startPolling();
+}
+function startPolling(){setBusy(true); if(POLL)clearInterval(POLL); POLL=setInterval(pollLive,700); pollLive();}
+async function pollLive(){
+  let snap; try{snap=await (await fetch("/api/live")).json();}catch(e){return;}
+  if(snap.error&&!snap.steps){setLiveStat("⚠ "+snap.error);return;}
+  const atEnd=cur>=steps.length-1, grew=snap.steps.length!==steps.length;
+  steps=snap.steps; autoTree(); renderSteps(); renderTimeline();
+  if(grew&&atEnd&&steps.length) select(steps.length-1);
+  else document.querySelectorAll(".step").forEach(d=>d.classList.toggle("cur",+d.dataset.i===cur));
+  setLiveStat(snap.running?("running · "+steps.length+" steps"):
+    (snap.error?("⚠ "+snap.error):("done · "+steps.length+" steps · "+(snap.turns||0)+" turn"+(snap.turns===1?"":"s"))));
+  if(!snap.running){setBusy(false); if(POLL){clearInterval(POLL);POLL=null;}}
+}
+function setBusy(b){
+  const d=document.querySelector(".livedot"); if(d)d.classList.toggle("busy",b);
+  const i=document.getElementById("askin"),s=document.getElementById("asksend");
+  if(i)i.disabled=b; if(s)s.disabled=b;
+}
+function setLiveStat(t){const e=document.getElementById("livestat"); if(e)e.textContent=t;}
 function typeClass(t){return "b-"+t}
 const LANES=["main agent","subagent","sub-subagent","depth 3"];
 function agentTag(s){return s.agent?`<span class="atag c${s.agent_color||0}" title="agent: ${E(s.agent)}">${E(s.agent)}</span>`:"";}

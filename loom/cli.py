@@ -1837,6 +1837,51 @@ def _cmd_debug(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_live(args: argparse.Namespace) -> int:
+    """Run an agent LIVE with the debugger open: watch steps stream in and keep
+    asking follow-ups. --agent module:attr is a loom.Agent OR a callable
+    ``ask(prompt)`` adapter around any framework (LangGraph, Claude SDK, ...)."""
+    import importlib
+    import os
+    import webbrowser
+
+    from .debugger import DebugServer
+    from .livesession import LiveSession
+
+    sys.path.insert(0, os.getcwd())
+    module_name, _, attr = args.agent.partition(":")
+    if not attr:
+        raise CLIError("--agent must look like module:attr")
+    try:
+        obj = getattr(importlib.import_module(module_name), attr)
+    except (ImportError, AttributeError) as e:
+        raise CLIError(f"could not load {args.agent!r}: {e}")
+
+    if hasattr(obj, "run") and hasattr(obj, "tools"):
+        live = LiveSession(agent=obj)          # a native loom.Agent
+        kind = "loom.Agent"
+    elif callable(obj):
+        live = LiveSession(func=obj, target=args.target)  # external adapter(prompt)
+        kind = "external adapter (proxied)"
+    else:
+        raise CLIError(f"{args.agent!r} is neither a loom.Agent nor a callable(prompt)")
+
+    server = DebugServer(port=args.port, host=args.host,
+                         copilot_model=args.copilot_model, live=live)
+    url = f"http://{args.host}:{server.port}/"
+    print(f"loom live [{kind}]: {url}", file=sys.stderr)
+    print("  type a prompt in the UI; steps stream in as the agent runs.", file=sys.stderr)
+    if args.prompt:
+        live.ask(args.prompt)  # kick off an initial turn
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+    return 0
+
+
 def _cmd_fuzz(args: argparse.Namespace) -> int:
     """Prove the analyzers tolerate hostile / malformed traces (CI robustness)."""
     from .fuzz import describe_fuzz, fuzz_check
@@ -3703,6 +3748,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="model for the conversational Copilot (else the --agent model)")
     db.add_argument("--no-open", action="store_true", help="don't open a browser")
     db.set_defaults(func=_cmd_debug)
+
+    lv = sub.add_parser("live", help="run an agent LIVE with the debugger open: watch steps stream + ask follow-ups")
+    lv.add_argument("--agent", required=True,
+                    help="module:attr -- a loom.Agent OR a callable ask(prompt) adapter (LangGraph/Claude-SDK/...)")
+    lv.add_argument("--prompt", default="", help="an initial prompt to kick off (optional)")
+    lv.add_argument("--target", default="https://api.anthropic.com",
+                    help="upstream model API for external adapters (proxied)")
+    lv.add_argument("--port", type=int, default=8791)
+    lv.add_argument("--host", default="127.0.0.1")
+    lv.add_argument("--copilot-model", default="", help="model for the conversational Copilot")
+    lv.add_argument("--no-open", action="store_true", help="don't open a browser")
+    lv.set_defaults(func=_cmd_live)
 
     fz = sub.add_parser("fuzz", help="stress analyzers with hostile/malformed traces (CI robustness)")
     fz.add_argument("path", nargs="?", default="",
