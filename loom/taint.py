@@ -241,6 +241,92 @@ def dlp_report(source: Any, sink_allowlist: "list[str] | None" = None) -> dict:
     }
 
 
+def semantic_paths(source: Any, judge: Any) -> "list[dict]":
+    """Egress that DERIVES from a sensitive value WITHOUT carrying it verbatim --
+    base64/hex-encoded, summarized, or paraphrased -- confirmed by an LLM judge.
+
+    Value-lineage (``taint_paths``) catches a secret sent byte-for-byte; a smart
+    exfiltrator encodes or describes it. For each sensitive source and each later
+    egress sink that does NOT contain the value verbatim, the judge is asked
+    whether the outgoing content encodes or reveals it. ``judge`` is a model id
+    or provider. Judged paths carry ``method: "semantic"`` and a confidence.
+    """
+    import json as _json
+    import re as _re
+
+    if isinstance(judge, str):
+        from .providers import AnthropicProvider
+        judge = AnthropicProvider(judge)
+
+    acts = [a for a in actions(source) if a.type == "call" and a.step >= 0]
+    origin: dict[str, dict] = {}
+    for a in acts:
+        for kind, val in _sensitive_values(_obs_text(a)):
+            origin.setdefault(val, {"kind": kind, "step": a.step, "tool": a.tool})
+    if not origin:
+        return []
+
+    egress_caps = {"network", "user_communication", "browser_submit", "money_movement"}
+    out: list[dict] = []
+    seen: set = set()
+    system = ('You are a data-loss detector. Reply with ONLY JSON '
+              '{"leaks": true/false, "how": "verbatim|encoded|paraphrase|none"}. '
+              '"leaks" is true if the OUTGOING content contains, encodes '
+              "(base64/hex/rot13), summarizes, or otherwise reveals the SECRET.")
+    for a in acts:
+        caps = set(a.capabilities)
+        if not (bool(caps & egress_caps) or "exec" in caps):
+            continue
+        payload = _json.dumps(a.input, default=str) + " " + _obs_text(a)
+        for val, src in origin.items():
+            if a.step <= src["step"] or _carries(payload, val):
+                continue
+            key = (src["step"], a.step, src["kind"])
+            if key in seen:
+                continue
+            try:
+                resp = judge.complete(system, [{"role": "user",
+                    "content": f"SECRET: {val[:120]}\n\nOUTGOING content:\n{payload[:1500]}"}], [])
+                m = _re.search(r"\{.*\}", getattr(resp, "text", "") or "", _re.S)
+                verdict = _json.loads(m.group(0)) if m else {}
+            except Exception:
+                continue  # judge trouble never breaks the report
+            if verdict.get("leaks"):
+                seen.add(key)
+                cls, sev = sensitivity_class(src["kind"])
+                out.append({
+                    "kind": src["kind"], "sensitivity": cls, "severity": sev,
+                    "source": {"step": src["step"], "tool": src["tool"]},
+                    "sink": {"step": a.step, "tool": a.tool,
+                             "via": sorted(caps & egress_caps) or ["exec"]},
+                    "method": "semantic", "how": verdict.get("how", "semantic"),
+                    "value_preview": _preview(val)})
+    return out
+
+
+def dlp_evidence(source: Any, judge: Any = None,
+                 sink_allowlist: "list[str] | None" = None) -> dict:
+    """A security-team DLP evidence report: verbatim value-lineage leaks plus
+    (with ``judge``) semantic/encoded leaks, each labelled by method, class,
+    severity, and egress channel. Extends ``dlp_report`` with the semantic pass.
+    """
+    base = dlp_report(source, sink_allowlist=sink_allowlist)
+    for v in base["violations"]:
+        v.setdefault("method", "verbatim")
+    semantic = semantic_paths(source, judge) if judge is not None else []
+    from fnmatch import fnmatchcase
+    allow = sink_allowlist or []
+    for p in semantic:
+        (base["allowed"] if any(fnmatchcase(p["sink"]["tool"], g) for g in allow)
+         else base["violations"]).append(p)
+    _SEV = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    worst = min((v["severity"] for v in base["violations"]),
+                key=lambda s: _SEV.get(s, 9), default="none")
+    return {**base, "worst_severity": worst,
+            "semantic_count": len(semantic),
+            "methods": sorted({v.get("method", "verbatim") for v in base["violations"]})}
+
+
 def _preview(value: str) -> str:
     """A safe, non-leaking preview of a tainted value."""
     if len(value) <= 10:

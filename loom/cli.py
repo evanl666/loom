@@ -1625,10 +1625,17 @@ def _cmd_inject(args: argparse.Namespace) -> int:
 
 def _cmd_dlp(args: argparse.Namespace) -> int:
     """DLP view: data flows by sensitivity class + a suggested policy."""
-    from .taint import dlp_report
+    from .taint import dlp_evidence, dlp_report
 
     _import_builtin_packs()
-    report = dlp_report(_load_trace_json(args.path), sink_allowlist=args.allow_sink)
+    if getattr(args, "judge", ""):
+        report = dlp_evidence(_load_trace_json(args.path), judge=args.judge,
+                              sink_allowlist=args.allow_sink)
+        if report.get("semantic_count"):
+            print(f"(semantic judge found {report['semantic_count']} encoded/paraphrased "
+                  "leak(s) beyond verbatim)", file=sys.stderr)
+    else:
+        report = dlp_report(_load_trace_json(args.path), sink_allowlist=args.allow_sink)
     if args.json:
         print(json.dumps(report, indent=2))
         return 1 if (args.gate and report["violations"]) else 0
@@ -3210,6 +3217,8 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--allow-sink", action="append", default=[], metavar="TOOL",
                     help="sanctioned sink tool (glob); flows to it aren't violations")
     dl.add_argument("--gate", action="store_true", help="exit 1 on any violation (CI gate)")
+    dl.add_argument("--judge", default="", metavar="MODEL",
+                    help="also detect encoded/paraphrased leaks with an LLM judge")
     dl.add_argument("--json", action="store_true", help="machine-readable")
     dl.set_defaults(func=_cmd_dlp)
 
