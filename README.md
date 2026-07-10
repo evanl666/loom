@@ -159,7 +159,8 @@ recorded as a replayable, taint-able trace.
 | `loom tools --verify` | **trust-but-verify**: declared vs observed capabilities |
 | `loom why --causal` | prove an action's cause by **counterfactual fork** |
 | `loom autopilot <trace>` | incident → autopsy + movie + policy patch + PR |
-| `loom cost --fix` / `--md` | token-burn RCA + patches · PR comment |
+| `loom cost --fix` / `--explain <m>` | token-burn RCA + patches · **AI cost advisor** (plain-language why + fixes) |
+| `loom canary run --generate <m>` | honeytokens with **AI-generated, domain-tailored bait** |
 | `loom policy rollout / synthesize` | gated canary → enforce · **auto-generate** least-privilege |
 | `loom mcp gateway / audit -- <srv>` | firewall + record an MCP server · npm-audit for MCP |
 | `RemoteAgent(name, call=…)` | record a **black-box remote (HTTP/gRPC) agent** call as one replayable, firewallable Action |

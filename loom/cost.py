@@ -82,6 +82,7 @@ def analyze_cost(data: dict) -> dict:
         "turns": len(turns),
         "per_turn": turns,
         "top_tools": sorted(tool_counts.items(), key=lambda kv: -kv[1])[:5],
+        "tool_result_tokens": tool_result_tokens,
         "findings": findings,
     }
 
@@ -120,6 +121,47 @@ def cost_patches(data: dict) -> "list[dict]":
                 "patch": "loom artifacts externalize <trace> --threshold 8kb",
                 "why": f"{f['detail']}; externalize big tool results out of the context window"})
     return patches
+
+
+def cost_explain(data: dict, model: Any) -> str:
+    """A plain-language, run-specific cost diagnosis from an LLM: WHY this run was
+    expensive and 2-3 concrete optimizations, going beyond the fixed patterns
+    (e.g. a tool that returns tokens the model never uses, a repeated identical
+    call, a bloated system prompt). Best-effort: "" on any failure."""
+    try:
+        from .judge import _resolve
+
+        c = analyze_cost(data)
+        turns = c.get("per_turn") or []
+        top = c.get("top_tools") or []
+        # a compact, judge-readable cost picture
+        lines = [f"total: {c.get('total_tokens', 0):,} tokens "
+                 f"({sum(t['input'] for t in turns):,} in / "
+                 f"{sum(t['output'] for t in turns):,} out) over {len(turns)} model call(s)"]
+        lines.append("per-call input/output tokens: "
+                     + ", ".join(f"{t['input']}/{t['output']}" for t in turns[:20]))
+        if top:
+            lines.append("tool call counts: " + ", ".join(f"{n}×{name}" for name, n in top[:10]))
+        big = sorted(c.get("tool_result_tokens", []), key=lambda r: -r[2])[:5]
+        if big:
+            lines.append("largest tool results (tokens): "
+                         + ", ".join(f"{k}~{tok}" for _s, k, tok in big))
+        if c.get("findings"):
+            lines.append("detected patterns: "
+                         + "; ".join(f["detail"] for f in c["findings"]))
+
+        provider = _resolve(model)
+        system = (
+            "You are a cost-optimization engineer reviewing an AI agent run's token "
+            "spend. In 3-5 sentences, explain WHERE the tokens went and WHY, then "
+            "give 2-3 SPECIFIC optimizations (name the tool / turn / config). Be "
+            "concrete and terse; if the run is already lean, say so."
+        )
+        resp = provider.complete(
+            system, [{"role": "user", "content": "\n".join(lines)}], [])
+        return (resp.text or "").strip()
+    except Exception:  # noqa: BLE001 -- the deterministic patches still stand
+        return ""
 
 
 def cost_markdown(data: dict) -> str:

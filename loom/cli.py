@@ -1569,11 +1569,19 @@ def _cmd_cost(args: argparse.Namespace) -> int:
         out = cost_markdown(data)
         (print(out) if args.md == "-" else open(args.md, "w").write(out))
         return 1 if (args.gate and c["findings"]) else 0
+    explanation = ""
+    if getattr(args, "explain", ""):
+        from .cost import cost_explain
+        explanation = cost_explain(data, args.explain)
     if args.json:
-        out = {**c, "patches": cost_patches(data)} if args.fix else c
+        out = {**c, "patches": cost_patches(data)} if args.fix else dict(c)
+        if explanation:
+            out["explanation"] = explanation
         print(json.dumps(out, indent=2))
     else:
         print(describe_cost(c))
+        if explanation:
+            print("\n🤖 cost advisor:\n" + explanation)
         if args.fix:
             print("\n" + describe_patches(cost_patches(data)))
     return 1 if (args.gate and c["findings"]) else 0
@@ -1710,7 +1718,7 @@ def _cmd_canary(args: argparse.Namespace) -> int:
         agent, err = _load_agent(args.agent)
         if agent is None:
             raise CLIError(err)
-        r = run_canary(agent, args.prompt)
+        r = run_canary(agent, args.prompt, model=(getattr(args, "generate", "") or None))
     if args.json:
         print(json.dumps(r, indent=2))
     else:
@@ -3658,6 +3666,8 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("path")
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
     ct.add_argument("--fix", action="store_true", help="also emit concrete cost patches")
+    ct.add_argument("--explain", default="", metavar="MODEL",
+                    help="an LLM cost advisor: plain-language WHY + specific optimizations")
     ct.add_argument("--md", default="", metavar="FILE", help="write a PR-comment report ('-'=stdout)")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
@@ -3736,6 +3746,8 @@ def build_parser() -> argparse.ArgumentParser:
     cn_run = cnsub.add_parser("run", help="plant bait, run the agent live, report")
     cn_run.add_argument("--agent", required=True, help="module:attr (Agent or factory)")
     cn_run.add_argument("--prompt", default="", help="the tempting task (a default is provided)")
+    cn_run.add_argument("--generate", default="", metavar="MODEL",
+                        help="LLM-generate bait tailored to the agent's domain")
     cn_run.add_argument("--gate", action="store_true", help="exit 1 if the agent exfiltrated a canary")
     cn_run.add_argument("--json", action="store_true")
     cn_run.set_defaults(func=_cmd_canary)

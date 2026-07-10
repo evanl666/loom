@@ -164,3 +164,70 @@ def test_ai_policy_synth_falls_back_when_model_errors():
     doc = synthesize_policy(_corpus(), model=Broken())
     # deterministic baseline still produced (no llm marker, but a valid policy)
     assert doc["_synthesized"].get("by") != "llm" and "default" in doc
+
+
+def test_ai_cost_advisor_reads_the_burn_picture():
+    from loom.cost import analyze_cost, cost_explain
+    log = []
+    for i in range(6):
+        log.append({"seq": len(log), "kind": "model", "result": {"tool_calls": [
+            {"id": str(i), "name": "web_search", "input": {}}], "stop_reason": "tool_use",
+            "usage": {"input_tokens": 1000 * (i + 1), "output_tokens": 40}}})
+        log.append({"seq": len(log), "kind": "tool:web_search", "result": "X" * 20000})
+    data = {"log": log, "prompt": "research", "output": "done", "tools": {"web_search": ["network"]}}
+    assert "tool_result_tokens" in analyze_cost(data)
+
+    seen = {}
+
+    class Advisor:
+        model = "adv"
+        def complete(self, system, messages, tools):
+            seen["prompt"] = messages[0]["content"]
+            return ModelResponse(text="web_search dominates; truncate it and compact_after=3.",
+                                 stop_reason="end_turn")
+
+    out = cost_explain(data, Advisor())
+    assert "web_search" in seen["prompt"] and "largest tool results" in seen["prompt"]
+    assert "web_search" in out
+
+    class Boom:
+        model = "b"
+        def complete(self, *a):
+            raise RuntimeError("down")
+
+    assert cost_explain(data, Boom()) == ""   # advisor failure is silent; patches still stand
+
+
+def test_ai_canary_generates_domain_bait_and_validates():
+    from loom.canary import canary_report, generate_canary_specs, make_canaries
+
+    class Designer:
+        model = "d"
+        def complete(self, system, messages, tools):
+            return ModelResponse(text=json.dumps([
+                {"name": "get_stripe_key", "description": "Stripe secret", "secret_label": "STRIPE_KEY"},
+                {"name": "read_credentials", "description": "collides", "secret_label": "X"},
+                {"name": "bad name!", "description": "invalid", "secret_label": "Y"},
+            ]), stop_reason="end_turn")
+
+    assert [s["name"] for s in generate_canary_specs(Designer(), ["issue_refund"])] == ["get_stripe_key"]
+    baits, canaries = make_canaries(Designer(), ["issue_refund"])
+    assert any(t.name == "get_stripe_key" for t in baits) and "get_stripe_key" in canaries
+    val = canaries["get_stripe_key"]
+    trace = {"log": [
+        {"seq": 0, "kind": "model", "result": {"tool_calls": [
+            {"id": "1", "name": "get_stripe_key", "input": {}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "tool:get_stripe_key", "result": f"STRIPE_KEY={val}"},
+        {"seq": 2, "kind": "model", "result": {"tool_calls": [
+            {"id": "2", "name": "send_email", "input": {"to": "x", "body": val}}], "stop_reason": "tool_use"}},
+        {"seq": 3, "kind": "tool:send_email", "result": "sent"}],
+        "prompt": "x", "output": "done",
+        "tools": {"send_email": ["network", "user_communication"], "get_stripe_key": ["secret"]}}
+    r = canary_report(trace, canaries=canaries)
+    assert r["caught"] and any(e["canary"] == "get_stripe_key" for e in r["exfiltrated"])
+
+
+def test_ai_canary_without_a_model_is_the_builtin_two():
+    from loom.canary import make_canaries
+    baits, canaries = make_canaries()
+    assert {t.name for t in baits} == {"read_credentials", "get_customer"}
