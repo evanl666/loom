@@ -1665,6 +1665,24 @@ def _cmd_sbom(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_canary(args: argparse.Namespace) -> int:
+    """Honeytokens: bait the agent with fake secrets and watch for exfiltration."""
+    from .canary import canary_report, describe_canary, run_canary
+
+    if args.canary_cmd == "check":
+        r = canary_report(_load_trace_json(args.path))
+    else:  # run
+        agent, err = _load_agent(args.agent)
+        if agent is None:
+            raise CLIError(err)
+        r = run_canary(agent, args.prompt)
+    if args.json:
+        print(json.dumps(r, indent=2))
+    else:
+        print(describe_canary(r))
+    return 1 if (args.gate and r["caught"]) else 0
+
+
 def _cmd_shadow(args: argparse.Namespace) -> int:
     """Shadow-deploy a policy against a corpus: what would it change, offline."""
     from .shadow import describe_shadow, shadow_eval
@@ -3499,6 +3517,20 @@ def build_parser() -> argparse.ArgumentParser:
     sb.add_argument("-o", "--output", default="", help="write SBOM JSON to a file")
     sb.add_argument("--json", action="store_true", help="print JSON to stdout")
     sb.set_defaults(func=_cmd_sbom)
+
+    cn = sub.add_parser("canary", help="honeytokens: bait the agent with fake secrets, watch for exfil")
+    cnsub = cn.add_subparsers(dest="canary_cmd", required=True)
+    cn_run = cnsub.add_parser("run", help="plant bait, run the agent live, report")
+    cn_run.add_argument("--agent", required=True, help="module:attr (Agent or factory)")
+    cn_run.add_argument("--prompt", default="", help="the tempting task (a default is provided)")
+    cn_run.add_argument("--gate", action="store_true", help="exit 1 if the agent exfiltrated a canary")
+    cn_run.add_argument("--json", action="store_true")
+    cn_run.set_defaults(func=_cmd_canary)
+    cn_chk = cnsub.add_parser("check", help="scan an existing trace for canary exfiltration")
+    cn_chk.add_argument("path")
+    cn_chk.add_argument("--gate", action="store_true")
+    cn_chk.add_argument("--json", action="store_true")
+    cn_chk.set_defaults(func=_cmd_canary)
 
     sh = sub.add_parser("shadow", help="shadow-deploy a policy against a corpus (offline canary)")
     sh.add_argument("paths", nargs="+", help="traces / directories")
