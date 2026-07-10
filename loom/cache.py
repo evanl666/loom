@@ -42,7 +42,8 @@ class EffectCache:
                         d = json.loads(line)
                     except json.JSONDecodeError:
                         continue  # tolerate a torn tail
-                    self._store[d["key"]] = d["result"]
+                    if isinstance(d, dict) and "key" in d and "result" in d:
+                        self._store[d["key"]] = d["result"]
 
     def wants(self, kind: str) -> bool:
         return any(fnmatch(kind, pattern) for pattern in self.kinds)
