@@ -103,7 +103,12 @@ class OpenAIProvider:
 
     @staticmethod
     def _from_openai(resp) -> ModelResponse:
-        choice = resp.choices[0]
+        choices = getattr(resp, "choices", None) or []
+        if not choices:
+            # A content-filtered or otherwise degenerate response can carry no
+            # choices; treat it as an empty end-of-turn rather than IndexError.
+            return ModelResponse(text="", stop_reason="end_turn")
+        choice = choices[0]
         msg = choice.message
         text = msg.content or ""
         tool_calls: list[ToolCall] = []

@@ -267,9 +267,16 @@ class Run:
         """Load a trace. Pass the same ``agent`` to replay/fork it live."""
         with open(path) as f:
             data = json.load(f)
+        if not isinstance(data, dict) or not isinstance(data.get("log"), list) \
+                or "prompt" not in data or "output" not in data:
+            raise ValueError(
+                f"{path} is not a loom trace (expected an object with 'log', "
+                f"'prompt', and 'output'). Point at a *.loom.json file, or use "
+                f"'loom record'/'loom proxy' to create one."
+            )
         _check_trace_version(data, path)
         _check_integrity(data, path)
-        log = [EffectEntry.from_dict(e) for e in data["log"]]
+        log = [EffectEntry.from_dict(e) for e in data["log"] if isinstance(e, dict)]
         rec = Recorder.replay(log)
         run = cls(
             agent=agent,

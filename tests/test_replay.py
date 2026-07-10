@@ -68,3 +68,38 @@ def Run_load(agent, path):
     from loom import Run
 
     return Run.load(path, agent=agent)
+
+
+def test_load_rejects_non_trace_json_with_a_clear_error(tmp_path):
+    """Run.load powers nearly every CLI command; pointing it at a JSON file that
+    isn't a loom trace must give a clear ValueError, not a cryptic KeyError/
+    AttributeError from deep inside."""
+    import pytest
+
+    from loom import Run
+
+    for name, content in [
+        ("empty.json", "{}"),
+        ("random.json", '{"foo": 1}'),
+        ("array.json", "[1, 2, 3]"),
+        ("scalar.json", '"hello"'),
+        ("null.json", "null"),
+        ("badlog.json", '{"log": "nope", "prompt": "p", "output": "o"}'),
+    ]:
+        p = tmp_path / name
+        p.write_text(content)
+        with pytest.raises(ValueError, match="not a loom trace"):
+            Run.load(str(p))
+
+
+def test_openai_adapter_handles_empty_choices():
+    """A content-filtered response can carry no choices; the adapter must return
+    an empty end-of-turn, not IndexError on choices[0]."""
+    from types import SimpleNamespace as NS
+
+    from loom.providers.openai import OpenAIProvider
+
+    r = OpenAIProvider._from_openai(NS(choices=[], usage=None))
+    assert r.text == "" and r.stop_reason == "end_turn" and not r.tool_calls
+    r2 = OpenAIProvider._from_openai(NS(choices=None))
+    assert r2.text == "" and r2.stop_reason == "end_turn"
