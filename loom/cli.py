@@ -2154,6 +2154,21 @@ def _cmd_tools(args: argparse.Namespace) -> int:
     """Show an agent's tool contract, or per-tool trust across a corpus."""
     from .capabilities import manifest
 
+    if getattr(args, "verify", False):
+        if not args.agent:
+            raise CLIError("--verify needs --agent module:attr (the tools to probe)")
+        agent, err = _load_agent(args.agent)
+        if agent is None:
+            raise CLIError(err)
+        from .contract import describe_verify, verify_tools
+
+        results = verify_tools(list(agent.tools.values()))
+        if args.json:
+            print(json.dumps(results, indent=2))
+        else:
+            print(describe_verify(results))
+        return 1 if any(r["undeclared"] for r in results) else 0
+
     if args.trust:
         # Cross-run reputation: which tools error/get-blocked/take risk most.
         from .kpi import tool_trust, tool_trust_text
@@ -3217,6 +3232,8 @@ def build_parser() -> argparse.ArgumentParser:
     tls.add_argument("--trust", default="", metavar="CORPUS",
                      help="instead: a per-tool trust score over a directory of traces "
                           "(error/blocked/risky rates + undo support)")
+    tls.add_argument("--verify", action="store_true",
+                     help="probe each tool in a monitored sandbox: declared vs OBSERVED caps")
     tls.add_argument("--json", action="store_true", help="machine-readable")
     tls.set_defaults(func=_cmd_tools)
 
