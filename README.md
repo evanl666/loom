@@ -130,16 +130,20 @@ recorded as a replayable, taint-able trace.
 | `loom replay <trace>` | re-run byte-identical, $0, offline |
 | `loom debug <trace> --agent m:a` | **interactive step-debugger** + live fork |
 | `loom studio <trace>` | self-contained visual report |
+| `loom intent <trace> --judge` | **intent firewall**: flag actions that don't serve the request |
+| `loom canary run --agent m:a` | **honeytokens**: bait the agent, catch exfiltration |
 | `loom taint` / `loom dlp --judge` | exfiltration lineage · **semantic DLP** |
-| `loom scan <trace\|dir>` | agent **supply-chain** posture + gaps |
-| `loom snapshot capture/restore` | **world-state** time travel (files + SQLite) |
-| `loom undo <trace>` | revert the files the agent changed |
-| `loom cost <trace> --fix` | token-burn RCA + concrete patches |
-| `loom incident` / `loom autopsy` | shareable incident report / one-page autopsy |
-| `loom policy rollout/promote` | draft → canary → enforce a firewall, gated |
-| `loom mcp gateway -- <server>` | firewall + record an MCP server |
-| `loom fuzz <trace>` | prove the analyzers survive hostile traces (CI) |
-| `loom dataset from runs/` | compile a corpus into SFT / DPO / eval data |
+| `loom scan` / `loom sbom` | supply-chain posture · CycloneDX **bill of materials** |
+| `loom memory forensics/audit` | catch **memory poisoning** (+ `MemoryFirewall` at runtime) |
+| `loom snapshot` / `loom world` | **world-state** time travel · git-style world branches |
+| `loom tools --verify` | **trust-but-verify**: declared vs observed capabilities |
+| `loom why --causal` | prove an action's cause by **counterfactual fork** |
+| `loom autopilot <trace>` | incident → autopsy + movie + policy patch + PR |
+| `loom cost --fix` / `--md` | token-burn RCA + patches · PR comment |
+| `loom policy rollout / synthesize` | gated canary → enforce · **auto-generate** least-privilege |
+| `loom mcp gateway / audit -- <srv>` | firewall + record an MCP server · npm-audit for MCP |
+| `loom shadow` / `loom behavior` | offline policy canary · behavior unit tests |
+| `loom fuzz` / `loom dataset from` | hostile-trace CI guard · SFT/DPO/eval data |
 
 Run `loom --help` for the full set.
 
