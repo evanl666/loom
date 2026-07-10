@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 
@@ -44,15 +44,23 @@ class EffectEntry:
     key: str  # hash of the inputs at record time
     result: Any  # JSON-serializable result payload
     depth: int = 0  # 0 = top-level agent, 1+ = nested subagent
+    # Optional per-call provenance used for multi-agent attribution: for native
+    # runs the agent name; for proxied (wire) runs a fingerprint of the request
+    # (system-prompt hash, tool set, model) so a sub-agent can be recovered even
+    # when the framework never told us about it. Absent on old/simple traces.
+    meta: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "seq": self.seq,
             "kind": self.kind,
             "key": self.key,
             "result": self.result,
             "depth": self.depth,
         }
+        if self.meta:
+            d["meta"] = self.meta
+        return d
 
     @staticmethod
     def from_dict(d: dict) -> "EffectEntry":
@@ -65,6 +73,7 @@ class EffectEntry:
             key=d.get("key", ""),
             result=d.get("result"),
             depth=d.get("depth", 0),
+            meta=d.get("meta") or {},
         )
 
 
@@ -89,6 +98,7 @@ class Recorder:
         self.allow_live = allow_live
         self._cursor = 0
         self.depth = 0  # current nesting depth; agents set this before recording
+        self.agent_name = ""  # name of the agent currently recording (multi-agent attribution)
         self.journal = None  # optional write-ahead Journal; set by the agent
         self.cache = None  # optional EffectCache; set by the agent
         self.executing = False  # True while an effect's thunk runs (see loom/ambient.py)
@@ -186,7 +196,8 @@ class Recorder:
             if self.cache is not None and self.cache.wants(kind):
                 self.cache.put(key, encoded)
 
-        entry = EffectEntry(seq=seq, kind=kind, key=key, result=encoded, depth=self.depth)
+        meta = {"agent": self.agent_name} if self.agent_name else {}
+        entry = EffectEntry(seq=seq, kind=kind, key=key, result=encoded, depth=self.depth, meta=meta)
         # Forking overwrites the tail of the original log from this point on.
         del self.log[seq:]
         self.log.append(entry)

@@ -34,10 +34,25 @@ def steps_for(data: dict) -> list[dict]:
     browser agent -- i.e. the actual *code/world change* behind the step.
     """
     from .action import actions
+    from .multiagent import infer_agents
     from .packs import install_builtin
 
     install_builtin()
-    return [a.to_dict() for a in actions(data)]
+    # Attribute every step to its agent (works for our harness AND proxied
+    # third-party multi-agent systems), so the UI can lane/color by agent.
+    ia = infer_agents(data)
+    label = {a["id"]: a["label"] for a in ia["agents"]}
+    color = {a["id"]: a["color"] for a in ia["agents"]}
+    step_agent = ia["step_agent"]
+    out = []
+    for a in actions(data):
+        d = a.to_dict()
+        aid = step_agent.get(str(a.step))
+        if aid and ia["multi"]:
+            d["agent"] = label.get(aid, aid)
+            d["agent_color"] = color.get(aid, 0)
+        out.append(d)
+    return out
 
 
 def context_at(data: dict, step: int) -> list[dict]:
@@ -583,6 +598,9 @@ class _Handler(BaseHTTPRequestHandler):
             lean = [{k: v for k, v in n.items() if not k.startswith("_")}
                     for n in sess.branches]
             self._json(200, {"branches": lean})
+        elif self.path == "/api/agents":
+            from .multiagent import infer_agents
+            self._json(200, infer_agents(sess.data))
         elif self.path.startswith("/api/branch?"):
             from urllib.parse import parse_qs, urlparse
             try:
@@ -828,8 +846,17 @@ pre.code{background:#0c0c0f;border-color:#2c2c34;color:#d7d7de;max-height:420px;
 .frame .rl{display:block;font-size:11px;color:#8a8a92;padding:4px 10px;background:#161619;border-bottom:1px solid #22222a}
 .frame.curframe{border-color:#4a9eff}.frame.curframe .rl{color:#4a9eff;background:#12202f}
 .frame pre{border:0;border-radius:0;max-height:180px;background:#0f0f12}
-#copilotpanel{padding:12px 16px;border-bottom:1px solid #26262b;background:#12151a}
-#copilotpanel.hidden{display:none}.cop-sum{margin-bottom:8px;color:#cfe3ff}
+/* floating right drawer (copilot / branches / assert) */
+#drawer{position:fixed;top:0;right:0;bottom:0;width:430px;max-width:92vw;z-index:40;
+  background:#141518;border-left:1px solid #2a2c33;box-shadow:-18px 0 50px rgba(0,0,0,.5);
+  display:flex;flex-direction:column;transform:translateX(0);transition:transform .2s cubic-bezier(.4,0,.2,1)}
+#drawer.hidden{transform:translateX(103%);box-shadow:none}
+#drawerhead{display:flex;align-items:center;padding:13px 16px;border-bottom:1px solid #24262c;
+  font-size:13px;font-weight:600;letter-spacing:.2px;background:#17191d}
+#drawerx{margin-left:auto;background:transparent;border:0;color:#8b8d94;font-size:15px;padding:2px 6px;border-radius:6px}
+#drawerx:hover{background:#262931;color:#e7e8ea}
+#copilotpanel{flex:1;overflow:auto;padding:14px 16px}
+.cop-sum{margin-bottom:8px;color:#cfe3ff}
 .chip.jump{cursor:pointer}.chip.jump:hover{border-color:#4a9eff}
 .cop-edit{font-size:12px;color:#c79bff;margin:4px 0}
 .frame.poison{border-color:#e5484d}.frame.poison .rl{color:#ff9b9b;background:#2a1518}
@@ -892,33 +919,96 @@ button.on{background:#1d3a5c;color:#dbeaff}
 .asr .ai{font-weight:600;min-width:18px}.asr .ad{color:#8a8a92;font-size:11px;margin-left:auto}
 #explainbtn{background:#25203a;border-color:#443a66;color:#c9b8ff;margin-top:8px}
 #explainbtn:hover{background:#2e2748}
+/* ---- visual refresh -------------------------------------------------- */
+body{background:#0b0c0e;color:#e7e8ea}
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+header{background:#111214;padding:11px 18px;border-bottom:1px solid #202228}
+header b{font-size:13.5px;letter-spacing:.2px}
+.muted{color:#8b8d94}
+#steps{width:288px;border-right:1px solid #202228;background:#0e0f11}
+.step{padding:8px 12px;border-bottom:1px solid #17181b;transition:background .08s}
+.step:hover{background:#151619}
+.step.cur{background:#152232;border-left:3px solid #4a9eff;padding-left:9px}
+#detail{padding:18px 22px}
+/* toolbar: grouped, roomy, wraps cleanly */
+#toolbar{padding:8px 14px;gap:8px;background:#111214;border-bottom:1px solid #202228;flex-wrap:wrap}
+#toolbar .tgroup{display:flex;gap:4px;align-items:center;background:#17181b;border:1px solid #24262c;border-radius:9px;padding:3px}
+#toolbar .tspring{flex:1}
+#toolbar #pos{font-size:11px;white-space:nowrap}
+#toolbar #brk{width:250px;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:6px 10px;font-size:12px}
+#toolbar #brk:focus{outline:none;border-color:#3a6ea5}
+button{background:#1c1d21;border:1px solid #2a2c33;border-radius:7px;padding:5px 11px;transition:background .1s,border-color .1s}
+button:hover{background:#26282e;border-color:#34363e}
+#toolbar .tgroup button{border:0;background:transparent;padding:5px 9px;border-radius:6px}
+#toolbar .tgroup button:hover{background:#26282e}
+button.ico{min-width:32px;text-align:center}
+button.accent{background:#173a5e;border:1px solid #235a8c;color:#dbeaff;font-weight:600}
+#toolbar .tgroup button.accent{background:#173a5e}
+button.accent:hover{background:#1d4a76;border-color:#2c6ba5}
+button.on{background:#173a5e !important;color:#dbeaff}
+.k{color:#7d7f87;margin:16px 0 6px;font-size:10.5px;font-weight:600}
+.badge{border-radius:5px}
+.chip{border-radius:7px;background:#1a1b1f;border-color:#2a2c33}
+pre{background:#0e0f11;border-color:#212228;border-radius:9px}
+.frame{border-color:#212228;border-radius:9px}
+.frame .rl{background:#141518}
+.msg{border-radius:12px}.msg.a{background:#151619;border-color:#212228}
+.chatbar input{background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:7px 10px}
+.chatbar input:focus{outline:none;border-color:#3a6ea5}
+#tlbar{background:#101113;border-top:1px solid #202228}
+/* multi-agent attribution: per-agent color chips, lanes, overview */
+.atag{font-size:9.5px;padding:1px 6px;border-radius:6px;margin:0 5px 0 1px;letter-spacing:.2px;white-space:nowrap;font-weight:600}
+.lane{font-weight:600}
+.anode{border:1px solid #24262c;border-left-width:3px;border-radius:9px;padding:9px 12px;margin:7px 0}
+.edge{font-size:12px;padding:3px 0;color:#c9cbd2}
+.c0{background:#16283d;color:#8cc2ff;border-left-color:#3f7fd0}
+.c1{background:#2a1f38;color:#c9a4ff;border-left-color:#8a5fd0}
+.c2{background:#123528;color:#7fe0ad;border-left-color:#2f9d6b}
+.c3{background:#3a2a16;color:#ffcf8f;border-left-color:#c78a3a}
+.c4{background:#3a1f27;color:#ff9db0;border-left-color:#c74f6b}
+.c5{background:#123a3a;color:#7fe0e0;border-left-color:#2f9d9d}
+.c6{background:#2e2e14;color:#dbe07f;border-left-color:#9d9d2f}
+.c7{background:#2a2333;color:#b8a4d0;border-left-color:#6f5a8c}
+.anode .chip{background:#0e0f11}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
 <div id="wrap">
   <div id="steps"></div>
-  <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+  <div id="main">
     <div id="toolbar">
-      <button id="first" title="first (Home)">⏮</button>
-      <button id="prev" title="prev (←)">◀ step</button>
-      <button id="next" title="next (→)">step ▶</button>
-      <button id="last" title="last (End)">⏭</button>
-      <span class="muted" id="pos" style="margin-left:8px"></span>
-      <input id="brk" placeholder="⏹ break: tool:send_email · cap:network" title="conditional breakpoint" style="margin-left:12px;width:210px">
-      <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
-      <button id="branches" title="the branch tree">🌳</button>
-      <button id="assertbtn" title="check behavioural assertions against this run">✔ assert</button>
-      <button id="swim" title="swimlanes by agent/subagent depth">⇄</button>
-      <button id="export" title="download a shareable .loomdebug session">💾</button>
-      <button id="palettebtn" title="command palette (⌘K / Ctrl-K)">⌘K</button>
-      <button id="copilot" style="margin-left:auto">🤖 Copilot</button>
+      <div class="tgroup">
+        <button id="first" class="ico" title="first (Home)">⏮</button>
+        <button id="prev" class="ico" title="prev (←)">◀</button>
+        <button id="next" class="ico" title="next (→)">▶</button>
+        <button id="last" class="ico" title="last (End)">⏭</button>
+      </div>
+      <span class="muted" id="pos"></span>
+      <input id="brk" placeholder="⏹ breakpoint — tool:send_email · cap:network" title="conditional breakpoint">
+      <span class="tspring"></span>
+      <div class="tgroup">
+        <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
+        <button id="palettebtn" class="ico" title="command palette (⌘K)">⌘K</button>
+        <button id="swim" class="ico" title="swimlanes by agent/subagent depth">⇄</button>
+        <button id="export" class="ico" title="download a shareable .loomdebug session">💾</button>
+      </div>
+      <div class="tgroup">
+        <button id="agentsbtn" title="agents in this run (multi-agent map)">🕸 agents</button>
+        <button id="branches" title="branch tree · compare">🌳 branches</button>
+        <button id="assertbtn" title="check behavioural assertions">✔ assert</button>
+        <button id="copilot" class="accent" title="AI copilot">🤖 Copilot</button>
+      </div>
     </div>
-    <div id="copilotpanel" class="hidden"></div>
     <div id="detail"></div>
     <div id="tlbar"><button id="play" title="watch the run animate">▶</button>
       <span class="muted" id="tlinfo"></span><div id="timeline"></div></div>
   </div>
 </div>
+<aside id="drawer" class="hidden">
+  <div id="drawerhead"><span id="drawertitle">🤖 Copilot</span>
+    <button id="drawerx" title="close (Esc)">✕</button></div>
+  <div id="copilotpanel"></div>
+</aside>
 <div id="palette" class="hidden"><div id="palbox">
   <input id="palin" placeholder="jump to a step or run a command — type to filter, ↑↓ Enter, Esc">
   <div id="pallist"></div></div></div>
@@ -962,18 +1052,20 @@ async function load(){
 }
 function typeClass(t){return "b-"+t}
 const LANES=["main agent","subagent","sub-subagent","depth 3"];
+function agentTag(s){return s.agent?`<span class="atag c${s.agent_color||0}" title="agent: ${E(s.agent)}">${E(s.agent)}</span>`:"";}
 function renderSteps(){
   const el=document.getElementById("steps");
   el.innerHTML=steps.map((s,i)=>{
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
     const lbl=s.tool?E(s.tool):E(s.type);
     if(SWIM){
-      const lane=`<span class="lane l${Math.min(s.depth,3)}">${E(LANES[s.depth]||("depth "+s.depth))}</span>`;
+      const lane=s.agent?`<span class="lane c${s.agent_color||0}">${E(s.agent)}</span>`
+        :`<span class="lane l${Math.min(s.depth,3)}">${E(LANES[s.depth]||("depth "+s.depth))}</span>`;
       return `<div class="step swim d${Math.min(s.depth,3)}" data-i="${i}"><span class="muted">${s.step}</span>${lane}<span class="badge ${typeClass(s.type)}">${E(s.type)}</span> <span>${lbl}</span>${risky}</div>`;
     }
     const ind=s.depth?`<span class="depth">${"› ".repeat(s.depth)}</span>`:"";
     return `<div class="step" data-i="${i}"><span class="muted">${s.step}</span>`+
-      `<span class="badge ${typeClass(s.type)}">${E(s.type)}</span>${ind}<span>${lbl}</span>${risky}</div>`;
+      `<span class="badge ${typeClass(s.type)}">${E(s.type)}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
   }).join("");
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
@@ -1192,10 +1284,16 @@ async function doFork(){
 document.addEventListener("keydown",e=>{
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openPalette();return;}
   if(!document.getElementById("palette").classList.contains("hidden")){paletteKey(e);return;}
+  if(e.key==="Escape"&&!document.getElementById("drawer").classList.contains("hidden")){closeDrawer();return;}
   if(e.target.tagName==="TEXTAREA"||e.target.tagName==="INPUT")return;
   if(e.key==="ArrowLeft")select(cur-1); else if(e.key==="ArrowRight")select(cur+1);
   else if(e.key==="Home")select(0); else if(e.key==="End")select(steps.length-1);
 });
+// ---- floating right drawer (copilot / branches / assert) ----
+function drawerOpen(view){const d=document.getElementById("drawer");return !d.classList.contains("hidden")&&d.dataset.view===view;}
+function openDrawer(view,title){const d=document.getElementById("drawer");d.classList.remove("hidden");d.dataset.view=view;
+  document.getElementById("drawertitle").innerHTML=title;return document.getElementById("copilotpanel");}
+function closeDrawer(){document.getElementById("drawer").classList.add("hidden");}
 // ---- explain this step (copilot) ----
 async function explainStep(step){
   const out=document.getElementById("explainout"); if(!out)return;
@@ -1206,12 +1304,33 @@ async function explainStep(step){
     out.innerHTML=r.error?`<div class="muted">${E(r.error)}</div>`:`<div class="cop-sum">${md(r.reply||"")}</div>`;
   }catch(_){out.innerHTML='<div class="muted">explain failed</div>';}
 }
+// ---- agents overview (multi-agent map) ----
+async function showAgents(){
+  if(drawerOpen("agents")){closeDrawer();return;}
+  const p=openDrawer("agents","🕸 Agents");
+  const r=await (await fetch("/api/agents")).json();
+  if(!r.multi){p.innerHTML='<div class="muted">single-agent run — no sub-agents detected.</div>';return;}
+  const src={native:"recorded by Loom's harness (agent names known)",wire:"recovered from the wire (system-prompt fingerprint)",flat:"depth only"}[r.source]||r.source;
+  let h=`<div class="muted" style="font-size:11px;margin-bottom:10px">${r.agents.length} agents · ${E(src)}</div>`;
+  h+=r.agents.map(a=>`<div class="anode c${a.color}">
+      <div><span class="atag c${a.color}">${E(a.label)}</span>${a.is_root?' <span class="muted">root</span>':''}
+        <span class="bmeta">${a.calls} call${a.calls===1?'':'s'}</span></div>
+      ${a.model?`<div class="muted" style="font-size:11px">model: ${E(a.model)}</div>`:''}
+      ${a.tools&&a.tools.length?`<div style="font-size:11px;margin-top:3px">${a.tools.map(t=>`<span class="chip">${E(t)}</span>`).join("")}</div>`:''}
+    </div>`).join("");
+  if(r.edges.length){
+    const lab={}; r.agents.forEach(a=>lab[a.id]=a.label);
+    h+=`<div class="k">hand-offs</div>`+r.edges.map(e=>
+      `<div class="edge"><span class="chip jump" data-step="${e.seq}">→</span> <b>${E(lab[e.from]||e.from)}</b> delegates to <b>${E(lab[e.to]||e.to)}</b> <span class="muted">@${e.seq}</span></div>`).join("");
+  }
+  p.innerHTML=h;
+  p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{const i=steps.findIndex(s=>s.step===+c.dataset.step);if(i>=0){closeDrawer();select(i);}});
+}
 // ---- assertion bar ----
 async function showAssert(){
-  const p=document.getElementById("copilotpanel");
-  if(!p.classList.contains("hidden")&&p.dataset.view==="assert"){p.classList.add("hidden");return;}
-  p.classList.remove("hidden"); p.dataset.view="assert";
-  p.innerHTML=`<div class="k">✔ behavioural assertions <span class="muted">— one per line; turns your expectations into a repeatable check</span></div>
+  if(drawerOpen("assert")){closeDrawer();return;}
+  const p=openDrawer("assert","✔ Assertions");
+  p.innerHTML=`<div class="muted" style="font-size:11px;margin-bottom:8px">one per line — turns your expectations into a repeatable check</div>
     <div id="assertwrap"><textarea id="asrin" placeholder="output contains order 42
 never issue_refund*
 no blocked
@@ -1241,9 +1360,10 @@ function paletteItems(){
     meta:"call "+((s.replay||{}).turn??s.step)+(s.risk?" ⚠"+s.risk:""),run:()=>select(i)}));
   const cmds=[
     {kind:"cmd",label:"🎯 jump to root cause",meta:"first bad step",run:gotoRootCause},
+    {kind:"cmd",label:"🕸 agents",meta:"multi-agent map",run:showAgents},
     {kind:"cmd",label:"🌳 branch tree",meta:"compare / walk branches",run:showBranches},
     {kind:"cmd",label:"✔ assertions",meta:"check expectations",run:showAssert},
-    {kind:"cmd",label:"🤖 Copilot",meta:"chat",run:()=>{document.getElementById("copilotpanel").dataset.view="chat";loadCopilot();}},
+    {kind:"cmd",label:"🤖 Copilot",meta:"chat",run:loadCopilot},
     {kind:"cmd",label:"▶ play the run",meta:"animate",run:()=>{togglePlay();}},
     {kind:"cmd",label:"⇄ swimlanes",meta:"by agent depth",run:toggleSwim},
     {kind:"cmd",label:"💾 export session",meta:".loomdebug",run:exportSession},
@@ -1277,9 +1397,8 @@ function paletteKey(e){
 function runPalette(i){const x=PAL[i]; if(!x)return; closePalette(); x.run();}
 let CHAT=[];  // conversation history
 async function loadCopilot(){
-  const p=document.getElementById("copilotpanel");
-  if(!p.classList.contains("hidden")){p.classList.add("hidden");return;}
-  p.classList.remove("hidden");
+  if(drawerOpen("chat")){closeDrawer();return;}
+  const p=openDrawer("chat","🤖 Copilot");
   const r=await (await fetch("/api/copilot")).json();
   let h=`<div class="cop-sum">🤖 ${E(r.summary)}</div>`;
   if(r.suspicious.length){
@@ -1360,14 +1479,13 @@ async function gotoRootCause(){
   p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{const i=steps.findIndex(s=>s.step===+c.dataset.step);if(i>=0)select(i);});
 }
 async function showBranches(){
-  const p=document.getElementById("copilotpanel");
-  if(!p.classList.contains("hidden")&&p.dataset.view==="branches"){p.classList.add("hidden");return;}
-  p.classList.remove("hidden"); p.dataset.view="branches";
+  if(drawerOpen("branches")){closeDrawer();return;}
+  const p=openDrawer("branches","🌳 Branches");
   const r=await (await fetch("/api/branches")).json();
   if(!r.branches.length){p.innerHTML='<div class="muted">no branches yet — fork a step to start the tree</div>';return;}
   const opts=[`<option value="0">#0 original run</option>`].concat(
     r.branches.map(b=>`<option value="${b.id}">#${b.id} ${E(b.label).slice(0,30)}</option>`)).join("");
-  p.innerHTML=`<div class="k">🌳 branch tree (${r.branches.length}) <span class="muted">— click a node to walk it</span></div>`+r.branches.map(b=>
+  p.innerHTML=`<div class="muted" style="font-size:11px;margin-bottom:8px">${r.branches.length} branch(es) — click a node to walk it</div>`+r.branches.map(b=>
     `<div class="bnode" data-view="${b.id}"><b>#${b.id}</b> <span class="muted">@call ${b.at}</span> — ${E(b.label)}
       <span class="bmeta">score ${b.score} · ${b.tokens.toLocaleString()} tok</span>
       <div class="muted">${E(b.output)}</div></div>`).join("")+
@@ -1416,12 +1534,14 @@ async function exportSession(){
 }
 document.getElementById("rootcause").onclick=gotoRootCause;
 document.getElementById("branches").onclick=showBranches;
+document.getElementById("agentsbtn").onclick=showAgents;
 document.getElementById("assertbtn").onclick=showAssert;
 document.getElementById("palettebtn").onclick=openPalette;
 document.getElementById("palette").onclick=e=>{if(e.target.id==="palette")closePalette();};
 document.getElementById("swim").onclick=toggleSwim;
 document.getElementById("export").onclick=exportSession;
-document.getElementById("copilot").onclick=()=>{document.getElementById("copilotpanel").dataset.view="chat";loadCopilot();};
+document.getElementById("copilot").onclick=loadCopilot;
+document.getElementById("drawerx").onclick=closeDrawer;
 document.getElementById("prev").onclick=()=>select(cur-1);
 document.getElementById("next").onclick=()=>select(cur+1);
 document.getElementById("first").onclick=()=>select(0);

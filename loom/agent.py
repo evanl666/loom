@@ -405,6 +405,7 @@ class Agent:
                     self._compact(ctx, summary)
 
                 rec.depth = depth
+                rec.agent_name = self.name  # attribute this + its tool calls to this agent
                 messages = ctx.messages()
                 resp = rec.run(
                     "model",

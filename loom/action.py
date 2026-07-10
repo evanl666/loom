@@ -283,7 +283,8 @@ def actions(source: Any) -> list[Action]:
             intent = resp.text or ""
             if resp.tool_calls:
                 for tc in resp.tool_calls:
-                    pending.setdefault(e.depth, []).append((tc.name, intent, tc.input))
+                    pending.setdefault(e.depth, []).append(
+                        (tc.name, intent, tc.input, e.seq, max(cur_turn, 0)))
                 if intent.strip():  # a "thought" preceding the calls
                     out.append(Action(step=e.seq, depth=e.depth, type="reason",
                                        intent=intent, replay=replay,
@@ -295,11 +296,11 @@ def actions(source: Any) -> list[Action]:
         elif e.kind.startswith("tool:"):
             name = e.kind[5:]
             queue = pending.get(e.depth) or []
-            match = next((i for i, (n, _, _) in enumerate(queue) if n == name), None)
+            match = next((i for i, q in enumerate(queue) if q[0] == name), None)
             if match is None:
                 intent, tool_input = "", None
             else:
-                _, intent, tool_input = queue.pop(match)
+                _, intent, tool_input, _, _ = queue.pop(match)
             text = _result_text(e.result)
             err = isinstance(e.result, str) and e.result.startswith(("ERROR", "BLOCKED", "DRY-RUN"))
             out.append(Action(
@@ -318,6 +319,25 @@ def actions(source: Any) -> list[Action]:
             out.append(Action(step=e.seq, depth=e.depth, type="meta", tool=e.kind,
                                observation=Observation(text=_result_text(e.result)),
                                replay=replay))
+
+    # Delegation calls: a tool call with no matching tool: effect at its own
+    # depth is (almost always) a sub-agent hand-off -- the "effect" is the
+    # nested calls one level deeper, not a recorded tool result. Emit it as a
+    # call Action so the debugger SHOWS "lead delegated to researcher" instead
+    # of silently dropping it. Placed at the requesting model call's seq so it
+    # sorts right before the sub-agent's steps.
+    for depth, queue in pending.items():
+        for name, intent, tool_input, req_seq, req_turn in queue:
+            deleg = Action(
+                step=req_seq, depth=depth, type="call", tool=name, intent=intent,
+                input=tool_input,
+                capabilities=sorted(_caps(name, tool_input or {}, declared=_declared(name))),
+                risk=_classify(name, tool_input or {}),
+                observation=Observation(text="(delegated to sub-agent -- see the nested steps below)"),
+                replay=ReplayPoint(step=req_seq, turn=req_turn, forkable=False),
+            )
+            idx = next((i for i, a in enumerate(out) if a.step > req_seq), len(out))
+            out.insert(idx, deleg)
 
     # Calls the firewall blocked before they ran (no execution effect exists).
     for ev in denies:

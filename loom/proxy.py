@@ -66,23 +66,58 @@ class WireRecorder:
         self.output = ""
         self._tool_names: dict[str, str] = {}  # tool_use_id -> tool name
         self._seen_messages = 0
+        self._pending_fp: dict = {}  # agent fingerprint for the model call being recorded
         self.workspace: "dict | None" = None  # cwd/git/argv/os, set by the recorder
 
     def record(self, request: dict, response: dict) -> None:
         self.model = request.get("model", self.model)
         if "choices" in response:  # OpenAI chat-completions dialect
+            self._pending_fp = self._fingerprint(request, openai=True)
             self._absorb_request_openai(request)
             self._absorb_response_openai(response)
         else:  # Anthropic messages dialect
             system = _flatten(request.get("system", ""))
             self.system = system or self.system
+            self._pending_fp = self._fingerprint(request, openai=False)
             self._absorb_request(request)
             self._absorb_response(response)
         self.wire.append(response)
 
-    def _append(self, kind: str, payload, result) -> None:
+    def _fingerprint(self, request: dict, *, openai: bool) -> dict:
+        """A per-model-call agent fingerprint recovered from the wire request.
+
+        Parent/child agent structure lives in the application, invisible to a
+        recording proxy -- but each sub-agent almost always has a distinct
+        system prompt and tool set. Capturing (system hash + head, tool names,
+        model) per call lets ``infer_agents`` reconstruct which sub-agent made
+        each call for ANY framework, without the framework cooperating."""
+        import hashlib
+
+        if openai:
+            system = ""
+            for m in request.get("messages", []):
+                if m.get("role") == "system":
+                    system = _flatten(m.get("content", ""))
+                    break
+            tools = sorted(
+                (t.get("function", {}) or {}).get("name", "")
+                for t in (request.get("tools") or [])
+            )
+        else:
+            system = _flatten(request.get("system", ""))
+            tools = sorted(t.get("name", "") for t in (request.get("tools") or []))
+        system = system or ""
+        return {
+            "sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+            "sys_head": system[:160],
+            "tools": [t for t in tools if t],
+            "model": request.get("model", self.model),
+        }
+
+    def _append(self, kind: str, payload, result, meta: "dict | None" = None) -> None:
         self.log.append(
-            EffectEntry(seq=len(self.log), kind=kind, key=_key([kind, payload]), result=result)
+            EffectEntry(seq=len(self.log), kind=kind, key=_key([kind, payload]),
+                        result=result, meta=meta or {})
         )
 
     def _absorb_request(self, request: dict) -> None:
@@ -127,7 +162,7 @@ class WireRecorder:
                 "output_tokens": usage.get("output_tokens", 0),
             },
         }
-        self._append("model", {"n": len(self.wire)}, result)
+        self._append("model", {"n": len(self.wire)}, result, meta=self._pending_fp)
         if text:
             self.output = text
 
@@ -175,6 +210,7 @@ class WireRecorder:
                     "output_tokens": usage.get("completion_tokens", 0),
                 },
             },
+            meta=self._pending_fp,
         )
         if text:
             self.output = text
