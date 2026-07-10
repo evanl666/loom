@@ -17,7 +17,7 @@ def autopsy_html(data: dict, path: str = "trace.loom.json") -> str:
     """Assemble the full autopsy report for a trace dict."""
     from .diagnose import diagnose
     from .diff import score_badge_svg, score_breakdown
-    from .export import _data_flow, _impact_map
+    from .report_panels import _data_flow, _impact_map
     from .incident import build_report
     from .packs import install_builtin
     from .taint import dlp_report
