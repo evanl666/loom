@@ -509,3 +509,48 @@ def test_unreachable_upstream_is_a_502_not_a_crash(monkeypatch):
         c.close()
     finally:
         proxy.shutdown()
+
+
+def test_upstream_that_drops_the_connection_is_a_502_not_a_crash(monkeypatch):
+    """A real upstream can accept the socket then close it without a response
+    (http.client.RemoteDisconnected -- a ConnectionError/OSError, NOT a
+    urllib URLError). The handler must turn that into a 502, not crash."""
+    import http.client
+    import os
+    import socket
+    import threading
+
+    # Neutralize any system/env proxy so the loopback outbound really reaches
+    # our dead server (a local proxy would answer with its own error first).
+    for k in list(os.environ):
+        if k.lower().endswith("_proxy"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setenv("NO_PROXY", "*")
+
+    # A bare TCP server that accepts a connection and immediately closes it.
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    dead_port = srv.getsockname()[1]
+
+    def accept_and_drop():
+        while True:
+            try:
+                conn, _ = srv.accept()
+            except OSError:
+                return
+            conn.close()  # RemoteDisconnected on the client (loom proxy) side
+
+    threading.Thread(target=accept_and_drop, daemon=True).start()
+
+    proxy = _serve(ProxyServer(port=0, target=f"http://127.0.0.1:{dead_port}"))
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("POST", "/v1/messages", body=b'{"stream": false}')
+        assert c.getresponse().status == 502
+        c.close()
+    finally:
+        proxy.shutdown()
+        srv.close()

@@ -664,56 +664,68 @@ class _Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._send_json(e.code, {"error": body.decode("utf-8", "replace")})
             return
-        except (urllib.error.URLError, TimeoutError) as e:
-            # Upstream unreachable/timed out (network down, wrong target, DNS).
-            # A clean 502 beats crashing the handler and resetting the client.
+        except OSError as e:
+            # urlopen can fail with the whole OSError family, not just URLError:
+            # connection refused, DNS failure, TimeoutError, and -- seen against
+            # real upstreams -- http.client.RemoteDisconnected / ConnectionReset
+            # when the server drops the socket without a response. All become a
+            # clean 502 rather than crashing the handler and resetting the client.
             reason = getattr(e, "reason", e)
             self._send_json(502, {"error": f"cannot reach upstream {self.server.target}: {reason}"})
             return
 
         shield = self.server.shield
-        with upstream:
-            streamed = upstream.headers.get("content-type", "").startswith("text/event-stream")
-            if streamed and shield is None:
-                # Relay the stream as it arrives; reconstruct the message after.
-                self.send_response(200)
-                self.send_header("content-type", "text/event-stream")
-                self.send_header("cache-control", "no-cache")
-                self.end_headers()
-                chunks: list[bytes] = []
-                while True:
-                    chunk = upstream.read(1024)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    self.wfile.write(chunk)
-                    self.wfile.flush()
-                raw = b"".join(chunks).decode("utf-8", "replace")
-                if "chat/completions" in self.path:
-                    response = reconstruct_openai_sse(raw)
+        relayed = False  # once we start streaming to the client we can't 502
+        try:
+            with upstream:
+                streamed = upstream.headers.get("content-type", "").startswith("text/event-stream")
+                if streamed and shield is None:
+                    # Relay the stream as it arrives; reconstruct the message after.
+                    self.send_response(200)
+                    self.send_header("content-type", "text/event-stream")
+                    self.send_header("cache-control", "no-cache")
+                    self.end_headers()
+                    relayed = True
+                    chunks: list[bytes] = []
+                    while True:
+                        chunk = upstream.read(1024)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                        self.wfile.write(chunk)
+                        self.wfile.flush()
+                    raw = b"".join(chunks).decode("utf-8", "replace")
+                    if "chat/completions" in self.path:
+                        response = reconstruct_openai_sse(raw)
+                    else:
+                        response = reconstruct_sse(raw)
+                elif streamed:
+                    # A shield must see the whole response BEFORE the client does,
+                    # so buffer the upstream stream and synthesize one afterwards.
+                    raw = upstream.read().decode("utf-8", "replace")
+                    if "chat/completions" in self.path:
+                        response = reconstruct_openai_sse(raw)
+                    else:
+                        response = reconstruct_sse(raw)
                 else:
-                    response = reconstruct_sse(raw)
-            elif streamed:
-                # A shield must see the whole response BEFORE the client does,
-                # so buffer the upstream stream and synthesize one afterwards.
-                raw = upstream.read().decode("utf-8", "replace")
-                if "chat/completions" in self.path:
-                    response = reconstruct_openai_sse(raw)
-                else:
-                    response = reconstruct_sse(raw)
-            else:
-                raw_body = upstream.read()
-                try:
-                    response = json.loads(raw_body or b"{}")
-                except (json.JSONDecodeError, ValueError):
-                    # Upstream returned 200 with a non-JSON body (edge/CDN error
-                    # page, wrong endpoint). Surface it as a gateway error rather
-                    # than crashing the handler.
-                    self._send_json(502, {
-                        "error": "upstream returned a non-JSON response",
-                        "body": raw_body.decode("utf-8", "replace")[:2000],
-                    })
-                    return
+                    raw_body = upstream.read()
+                    try:
+                        response = json.loads(raw_body or b"{}")
+                    except (json.JSONDecodeError, ValueError):
+                        # Upstream returned 200 with a non-JSON body (edge/CDN
+                        # error page, wrong endpoint). Surface it as a gateway
+                        # error rather than crashing the handler.
+                        self._send_json(502, {
+                            "error": "upstream returned a non-JSON response",
+                            "body": raw_body.decode("utf-8", "replace")[:2000],
+                        })
+                        return
+        except OSError as e:
+            # The socket dropped mid-response. If we hadn't started relaying yet
+            # the client still gets a clean 502; a torn stream we can only stop.
+            if not relayed:
+                self._send_json(502, {"error": f"upstream connection dropped: {e}"})
+            return
 
         events: list = list(taint_events)
         if shield is not None:
@@ -798,6 +810,6 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
         except urllib.error.HTTPError as e:
             self._send_json(e.code, {"error": e.reason})
-        except (urllib.error.URLError, TimeoutError) as e:
+        except OSError as e:  # URLError/TimeoutError/RemoteDisconnected/ConnectionReset...
             reason = getattr(e, "reason", e)
             self._send_json(502, {"error": f"cannot reach upstream {self.server.target}: {reason}"})
