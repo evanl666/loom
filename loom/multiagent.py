@@ -167,10 +167,31 @@ def infer_agents(data: dict) -> dict:
             "is_root": i == 0, "color": i % 8,
         })
 
+    edge_pairs = [(id_of[e["from"]], id_of[e["to"]]) for e in edges
+                  if e["from"] in id_of and e["to"] in id_of]
+
+    # Delegation-tree depth of each agent: root = 0, an agent it delegates to = 1,
+    # etc. Lets the debugger indent each step by its agent's place in the tree.
+    level: dict[str, int] = {}
+    root_ids = [a["id"] for a in out_agents if a["is_root"]] or (
+        [out_agents[0]["id"]] if out_agents else [])
+    for rid in root_ids:
+        level[rid] = 0
+    changed = True
+    while changed:
+        changed = False
+        for frm, to in edge_pairs:
+            if frm in level and (to not in level or level[to] > level[frm] + 1):
+                level[to] = level[frm] + 1
+                changed = True
+    for a in out_agents:  # any agent never reached by an edge sits at the root
+        a["level"] = level.get(a["id"], 0)
+
     return {
         "multi": len(out_agents) > 1,
         "agents": out_agents,
         "step_agent": {seq: id_of[key] for seq, key in step_agent.items()},
+        "agent_level": {a["id"]: a["level"] for a in out_agents},
         "edges": [{"from": id_of[e["from"]], "to": id_of[e["to"]], "seq": e["seq"]}
                   for e in edges if e["from"] in id_of and e["to"] in id_of],
         "source": source,

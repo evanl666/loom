@@ -44,13 +44,25 @@ def steps_for(data: dict) -> list[dict]:
     label = {a["id"]: a["label"] for a in ia["agents"]}
     color = {a["id"]: a["color"] for a in ia["agents"]}
     step_agent = ia["step_agent"]
+    agent_level = ia["agent_level"]
+    # Show the user's request as the first node (the conversation's root), so the
+    # step list / tree reads as a real dialogue, not just the agent's moves.
     out = []
+    prompt = (data.get("episodes") or [data.get("prompt", "")])[0]
+    if prompt:
+        out.append({"step": -1, "depth": 0, "type": "user", "intent": str(prompt),
+                    "observation": {"text": str(prompt)}, "nest": 0,
+                    **({"agent": "you", "agent_id": "user", "agent_color": 3} if ia["multi"] else {})})
     for a in actions(data):
         d = a.to_dict()
         aid = step_agent.get(str(a.step))
         if aid and ia["multi"]:
             d["agent"] = label.get(aid, aid)
+            d["agent_id"] = aid
             d["agent_color"] = color.get(aid, 0)
+            # nesting for the tree view: the agent's delegation-tree depth, but a
+            # native trace's own recorded depth wins when it goes deeper.
+            d["nest"] = max(agent_level.get(aid, 0), a.depth)
         out.append(d)
     return out
 
@@ -970,6 +982,16 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
 .c6{background:#2e2e14;color:#dbe07f;border-left-color:#9d9d2f}
 .c7{background:#2a2333;color:#b8a4d0;border-left-color:#6f5a8c}
 .anode .chip{background:#0e0f11}
+/* tree view */
+.treehead{display:flex;gap:6px;align-items:center;cursor:pointer;padding:6px 8px;position:relative;
+  border-bottom:1px solid #17181b;background:#0e0f11;user-select:none;font-size:12px}
+.treehead:hover{background:#141518}
+.treehead .tw{color:#8b8d94;font-size:10px;width:10px}
+.tstep{position:relative}
+.tguide{position:absolute;top:0;bottom:0;width:1px;background:#2a2c33}
+.step.tstep{border-bottom:1px solid #141518}
+.b-user{background:#3a2a16;color:#ffcf8f}
+.step .b-user+*{color:#e8c98a}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -989,7 +1011,7 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
       <div class="tgroup">
         <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
         <button id="palettebtn" class="ico" title="command palette (⌘K)">⌘K</button>
-        <button id="swim" class="ico" title="swimlanes by agent/subagent depth">⇄</button>
+        <button id="swim" class="ico" title="tree view — nest steps by agent/sub-agent">🌲</button>
         <button id="export" class="ico" title="download a shareable .loomdebug session">💾</button>
       </div>
       <div class="tgroup">
@@ -1047,27 +1069,53 @@ async function load(){
   steps=RUN.steps; canFork=RUN.can_fork; CAN_CHAT=RUN.can_chat;
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
   document.getElementById("model").textContent=RUN.model||"";
+  // auto-enable the tree when there's an actual hierarchy (multiple agents)
+  const ags=new Set(steps.filter(s=>s.agent_id&&s.agent_id!=="user").map(s=>s.agent_id));
+  if(ags.size>1){TREE=true; document.getElementById("swim").classList.add("on");}
   renderSteps(); renderTimeline(); select(0);
   const pb=document.getElementById("play"); if(pb) pb.onclick=togglePlay;
 }
 function typeClass(t){return "b-"+t}
 const LANES=["main agent","subagent","sub-subagent","depth 3"];
 function agentTag(s){return s.agent?`<span class="atag c${s.agent_color||0}" title="agent: ${E(s.agent)}">${E(s.agent)}</span>`:"";}
+let COLLAPSED={};  // tree: collapsed agent segments, by segment index
 function renderSteps(){
   const el=document.getElementById("steps");
+  if(TREE){renderTree(el);return;}
   el.innerHTML=steps.map((s,i)=>{
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
     const lbl=s.tool?E(s.tool):E(s.type);
-    if(SWIM){
-      const lane=s.agent?`<span class="lane c${s.agent_color||0}">${E(s.agent)}</span>`
-        :`<span class="lane l${Math.min(s.depth,3)}">${E(LANES[s.depth]||("depth "+s.depth))}</span>`;
-      return `<div class="step swim d${Math.min(s.depth,3)}" data-i="${i}"><span class="muted">${s.step}</span>${lane}<span class="badge ${typeClass(s.type)}">${E(s.type)}</span> <span>${lbl}</span>${risky}</div>`;
-    }
     const ind=s.depth?`<span class="depth">${"› ".repeat(s.depth)}</span>`:"";
-    return `<div class="step" data-i="${i}"><span class="muted">${s.step}</span>`+
+    return `<div class="step${i===cur?' cur':''}" data-i="${i}"><span class="muted">${s.step}</span>`+
       `<span class="badge ${typeClass(s.type)}">${E(s.type)}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
   }).join("");
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
+}
+function renderTree(el){
+  // group consecutive same-agent steps into segments; indent by the agent's
+  // delegation-tree depth (s.nest) so parent -> sub-agent reads as a tree.
+  const segs=[];
+  steps.forEach((s,idx)=>{
+    const aid=s.agent_id||"main";
+    const last=segs[segs.length-1];
+    if(last&&last.aid===aid) last.items.push(idx);
+    else segs.push({aid,agent:s.agent||"main agent",color:s.agent_color||0,nest:s.nest||0,items:[idx]});
+  });
+  el.innerHTML=segs.map((seg,si)=>{
+    const pad=6+seg.nest*15, col=COLLAPSED[si];
+    const guide=seg.nest?`<span class="tguide" style="left:${pad-8}px"></span>`:"";
+    const head=`<div class="treehead" style="padding-left:${pad}px" data-seg="${si}">${guide}`+
+      `<span class="tw">${col?"▸":"▾"}</span><span class="atag c${seg.color}">${E(seg.agent)}</span>`+
+      `<span class="muted" style="font-size:10px">${seg.items.length}</span></div>`;
+    const kids=col?"":seg.items.map(idx=>{
+      const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", lbl=s.tool?E(s.tool):E(s.type);
+      return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad+18}px">`+
+        `<span class="muted">${s.step}</span><span class="badge ${typeClass(s.type)}">${E(s.type)}</span> <span>${lbl}</span>${risky}</div>`;
+    }).join("");
+    return head+kids;
+  }).join("");
+  el.querySelectorAll(".treehead").forEach(d=>d.onclick=()=>{const i=+d.dataset.seg;COLLAPSED[i]=!COLLAPSED[i];renderSteps();});
+  el.querySelectorAll(".tstep").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
 function stepTokens(s){
   const o=s.observation||{};
@@ -1095,7 +1143,7 @@ function togglePlay(){
 }
 function select(i){
   cur=Math.max(0,Math.min(steps.length-1,i));
-  document.querySelectorAll(".step").forEach((d,j)=>d.classList.toggle("cur",j===cur));
+  document.querySelectorAll(".step").forEach(d=>d.classList.toggle("cur",+d.dataset.i===cur));
   document.querySelectorAll("#timeline span").forEach((d,j)=>d.classList.toggle("cur",j===cur));
   const c=document.querySelector(".step.cur"); if(c)c.scrollIntoView({block:"nearest"});
   document.getElementById("pos").textContent=`step ${cur+1} / ${steps.length}`;
@@ -1365,7 +1413,7 @@ function paletteItems(){
     {kind:"cmd",label:"✔ assertions",meta:"check expectations",run:showAssert},
     {kind:"cmd",label:"🤖 Copilot",meta:"chat",run:loadCopilot},
     {kind:"cmd",label:"▶ play the run",meta:"animate",run:()=>{togglePlay();}},
-    {kind:"cmd",label:"⇄ swimlanes",meta:"by agent depth",run:toggleSwim},
+    {kind:"cmd",label:"🌲 tree view",meta:"nest by agent",run:toggleTree},
     {kind:"cmd",label:"💾 export session",meta:".loomdebug",run:exportSession},
     {kind:"cmd",label:"⏮ first step",meta:"",run:()=>select(0)},
     {kind:"cmd",label:"⏭ last step",meta:"",run:()=>select(steps.length-1)},
@@ -1525,8 +1573,8 @@ async function runCompare(){
     <div class="k">outputs</div>
     <div class="cmphead"><div class="cmpside">${md(c.a.output)}</div><div class="cmpside">${md(c.b.output)}</div></div>`;
 }
-let SWIM=false;
-function toggleSwim(){SWIM=!SWIM; document.getElementById("swim").classList.toggle("on",SWIM); renderSteps(); select(cur);}
+let TREE=false;
+function toggleTree(){TREE=!TREE; document.getElementById("swim").classList.toggle("on",TREE); renderSteps(); select(cur);}
 async function exportSession(){
   const r=await fetch("/api/export"); const blob=await r.blob();
   const u=URL.createObjectURL(blob), a=document.createElement("a");
@@ -1538,7 +1586,7 @@ document.getElementById("agentsbtn").onclick=showAgents;
 document.getElementById("assertbtn").onclick=showAssert;
 document.getElementById("palettebtn").onclick=openPalette;
 document.getElementById("palette").onclick=e=>{if(e.target.id==="palette")closePalette();};
-document.getElementById("swim").onclick=toggleSwim;
+document.getElementById("swim").onclick=toggleTree;
 document.getElementById("export").onclick=exportSession;
 document.getElementById("copilot").onclick=loadCopilot;
 document.getElementById("drawerx").onclick=closeDrawer;
