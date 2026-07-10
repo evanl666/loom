@@ -49,6 +49,11 @@ def steps_for(data: dict) -> list[dict]:
     # episode boundaries, so the step list / tree reads as a real dialogue --
     # not just the agent's moves.
     episodes = [e for e in (data.get("episodes") or [data.get("prompt", "")]) if e]
+    # A proxy trace's "episodes" also holds internal user-role turns (tool
+    # results, framework reminders), so only the first is a real user prompt --
+    # interleave follow-ups only for our own (native / live) multi-episode runs.
+    if data.get("recorded_via") == "proxy":
+        episodes = episodes[:1]
     acts = list(actions(data))
     ends_after = [i for i, a in enumerate(acts) if a.type == "answer" and a.depth == 0]
 

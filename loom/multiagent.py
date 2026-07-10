@@ -94,9 +94,18 @@ def infer_agents(data: dict) -> dict:
     agents: dict[tuple, dict] = {}   # identity key -> record
     order: list[tuple] = []
     step_agent: dict[str, str] = {}
-    active_by_depth: dict[int, tuple] = {}
     edges: list[dict] = []
+    depth_of: dict[tuple, int] = {}   # each agent's call-tree depth
     source = "flat"
+
+    # Reconstruct the call tree from the transcript: an agent that emits a final
+    # answer (no tool calls) has RETURNED; a new agent that appears is a child of
+    # whichever agent is still awaiting a delegation (the top of the stack). This
+    # works even for a flat wire trace where every call is depth 0 -- and handles
+    # a parent that fires several sub-agents from ONE turn (they're siblings, not
+    # a chain), which trace-order hand-offs got wrong.
+    stack: list[tuple] = []   # agents awaiting a delegation result, root-first
+    last_agent: "tuple | None" = None
 
     def _ident(meta: dict, depth: int) -> tuple:
         nonlocal source
@@ -108,6 +117,10 @@ def infer_agents(data: dict) -> dict:
                 source = "wire"
             return ("fp", meta["sys_hash"], tuple(meta.get("tools", [])))
         return ("depth", depth)
+
+    def _add_edge(frm: tuple, to: tuple, seq) -> None:
+        if not any(ed["_pk"] == (frm, to) for ed in edges):
+            edges.append({"_pk": (frm, to), "from": frm, "to": to, "seq": seq})
 
     for e in entries:
         seq = e.get("seq")
@@ -127,21 +140,27 @@ def infer_agents(data: dict) -> dict:
             elif meta.get("tools") and not rec["tools"]:
                 rec["tools"] = list(meta.get("tools", []))
             rec["calls"] += 1
-            prev = active_by_depth.get(depth)
-            active_by_depth[depth] = key
-            # a hand-off: the active agent at this depth changed, or we descended
-            parent = active_by_depth.get(depth - 1) if depth else None
-            if parent and parent != key and not any(
-                ed for ed in edges if ed["_pk"] == (parent, key)):
-                edges.append({"_pk": (parent, key), "from": parent, "to": key, "seq": seq})
-            elif prev and prev != key and depth == 0 and not any(
-                ed for ed in edges if ed["_pk"] == (prev, key)):
-                edges.append({"_pk": (prev, key), "from": prev, "to": key, "seq": seq})
+            has_tc = bool((e.get("result") or {}).get("tool_calls")) if isinstance(e.get("result"), dict) else False
+            if key in stack:                 # this agent is resuming: pop those it called
+                while stack and stack[-1] != key:
+                    stack.pop()
+            else:                            # first appearance: child of the awaiting top
+                parent = stack[-1] if stack else None
+                depth_of[key] = (depth_of[parent] + 1) if parent is not None else 0
+                if parent is not None:
+                    _add_edge(parent, key, seq)
+            if has_tc:                       # awaiting a delegation/tool result
+                if not stack or stack[-1] != key:
+                    stack.append(key)
+            else:                            # final answer: this agent returns
+                if stack and stack[-1] == key:
+                    stack.pop()
+            last_agent = key
             if seq is not None:
                 step_agent[str(seq)] = key
         else:
-            # a tool / other effect belongs to the agent active at its depth
-            key = active_by_depth.get(depth) or active_by_depth.get(0)
+            # a tool / other effect belongs to the agent that just requested it
+            key = last_agent or (stack[-1] if stack else None)
             if key is not None and seq is not None:
                 step_agent[str(seq)] = key
 
@@ -167,25 +186,10 @@ def infer_agents(data: dict) -> dict:
             "is_root": i == 0, "color": i % 8,
         })
 
-    edge_pairs = [(id_of[e["from"]], id_of[e["to"]]) for e in edges
-                  if e["from"] in id_of and e["to"] in id_of]
-
-    # Delegation-tree depth of each agent: root = 0, an agent it delegates to = 1,
-    # etc. Lets the debugger indent each step by its agent's place in the tree.
-    level: dict[str, int] = {}
-    root_ids = [a["id"] for a in out_agents if a["is_root"]] or (
-        [out_agents[0]["id"]] if out_agents else [])
-    for rid in root_ids:
-        level[rid] = 0
-    changed = True
-    while changed:
-        changed = False
-        for frm, to in edge_pairs:
-            if frm in level and (to not in level or level[to] > level[frm] + 1):
-                level[to] = level[frm] + 1
-                changed = True
-    for a in out_agents:  # any agent never reached by an edge sits at the root
-        a["level"] = level.get(a["id"], 0)
+    # Delegation-tree depth per agent comes straight from the call-stack
+    # reconstruction above (root = 0, a delegatee = parent + 1).
+    for a, key in zip(out_agents, order):
+        a["level"] = depth_of.get(key, 0)
 
     return {
         "multi": len(out_agents) > 1,
