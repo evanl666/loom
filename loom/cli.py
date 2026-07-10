@@ -1650,7 +1650,7 @@ def _cmd_memory(args: argparse.Namespace) -> int:
 
     from .memforensics import describe_memforensics, memory_forensics
 
-    r = memory_forensics(_load_trace_json(args.path))
+    r = memory_forensics(_load_trace_json(args.path), judge=(getattr(args, "judge", "") or None))
     if args.json:
         print(json.dumps(r, indent=2))
     else:
@@ -2709,7 +2709,8 @@ def _cmd_policy(args: argparse.Namespace) -> int:
     if args.policy_cmd == "synthesize":
         from .synth import describe_synth, synthesize_policy, to_yaml
 
-        doc = synthesize_policy(_expand_trace_paths(args.traces), goal=args.goal)
+        doc = synthesize_policy(_expand_trace_paths(args.traces), goal=args.goal,
+                                model=(getattr(args, "model", "") or None))
         if args.output:
             with open(args.output, "w") as f:
                 f.write(to_yaml(doc))
@@ -3341,6 +3342,8 @@ def build_parser() -> argparse.ArgumentParser:
     po_syn = posub.add_parser("synthesize", help="auto-generate a least-privilege policy from runs")
     po_syn.add_argument("traces", nargs="+", help="corpus of successful runs to learn from")
     po_syn.add_argument("--goal", default="least-privilege", choices=["least-privilege", "observed"])
+    po_syn.add_argument("--model", default="", metavar="MODEL",
+                        help="LLM-refine the policy (reason about tool purpose + attack paths, with rationale)")
     po_syn.add_argument("-o", "--output", default="", help="write the policy YAML")
     po_syn.set_defaults(func=_cmd_policy)
     po_roll = posub.add_parser("rollout", help="lifecycle status: stage + blast radius + gate")
@@ -3700,6 +3703,8 @@ def build_parser() -> argparse.ArgumentParser:
     mem_f = memsub.add_parser("forensics", help="detect memory poisoning across time")
     mem_f.add_argument("path")
     mem_f.add_argument("--gate", action="store_true", help="exit 1 on high/critical")
+    mem_f.add_argument("--judge", default="", metavar="MODEL",
+                       help="also LLM-scan memory the regex missed (paraphrased poisoning)")
     mem_f.add_argument("--json", action="store_true")
     mem_f.set_defaults(func=_cmd_memory)
     mem_a = memsub.add_parser("audit", help="provenance/trust of a memory store directory")

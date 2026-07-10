@@ -153,7 +153,8 @@ recorded as a replayable, taint-able trace.
 | `loom canary run --agent m:a` | **honeytokens**: bait the agent, catch exfiltration |
 | `loom taint` / `loom dlp --judge` | exfiltration lineage · **semantic DLP** |
 | `loom scan` / `loom sbom` | supply-chain posture · CycloneDX **bill of materials** |
-| `loom memory forensics/audit` | catch **memory poisoning** (+ `MemoryFirewall` at runtime) |
+| `loom memory forensics --judge` | catch **memory poisoning** — `--judge` catches paraphrased poison the regex misses |
+| `loom policy synthesize --model <m>` | **AI-refined least-privilege policy** — reasons about tool purpose + attack paths, with rationale |
 | `loom snapshot` / `loom world` | **world-state** time travel · git-style world branches |
 | `loom tools --verify` | **trust-but-verify**: declared vs observed capabilities |
 | `loom why --causal` | prove an action's cause by **counterfactual fork** |

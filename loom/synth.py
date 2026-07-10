@@ -24,15 +24,23 @@ _CONFIRM_CAPS = {"database_write", "browser_submit", "exec", "network",
                  "user_communication", "write"}
 
 
-def synthesize_policy(source: Any, goal: str = "least-privilege") -> dict:
+def synthesize_policy(source: Any, goal: str = "least-privilege", model: Any = None) -> dict:
     """A policy document (dict) proposed from the tool surface of a corpus.
 
     ``goal``: "least-privilege" (default deny/confirm unseen tools) or
     "observed" (default allow, only gate the risky tools that appeared).
-    """
+
+    With ``model`` set, an LLM refines the capability-based baseline: it can
+    reason about a tool's *purpose* (a ``send_email_external`` deserves confirm
+    even if its caps look benign) and attach a rationale, validated back against
+    the real tool set. Falls back to the deterministic policy on any failure."""
     from .scan import scan
 
     rep = scan(source)
+    if model is not None:
+        smart = _synthesize_with_llm(rep, goal, model)
+        if smart is not None:
+            return smart
     allow, confirm, deny = [], [], []
     for t in rep["tools"]:
         name = t["name"]
@@ -55,13 +63,75 @@ def synthesize_policy(source: Any, goal: str = "least-privilege") -> dict:
                              "tools_seen": len(rep["tools"])}}
 
 
+def _synthesize_with_llm(rep: dict, goal: str, model: Any) -> "dict | None":
+    """LLM-refined least-privilege policy. Every rule is validated to reference a
+    real tool; the default and structure are sanitized. None on any failure."""
+    import json
+    import re
+
+    from .judge import _resolve
+
+    tools = [{"name": t["name"], "capabilities": sorted(t["capabilities"])}
+             for t in rep["tools"] if t.get("name")]
+    if not tools:
+        return None
+    names = {t["name"] for t in tools}
+    try:
+        provider = _resolve(model)
+        system = (
+            "You are a security engineer writing a least-privilege firewall policy "
+            "for an AI agent. For each tool decide: allow (safe/needed), confirm "
+            "(gate on human approval), or deny (should never run unattended). "
+            "Reason about the tool's PURPOSE and how tools COMBINE into an exfil / "
+            "destruction / money-movement path, not just isolated capabilities. Use "
+            "glob rules like 'send_email*'. Prefer the tightest safe policy.\n"
+            f"Goal: {goal}. Reply with ONLY JSON: "
+            '{"default":"allow|confirm|deny","allow":[...],"confirm":[...],'
+            '"deny":[...],"rationale":{"<rule>":"<why>"}}'
+        )
+        user = "TOOLS:\n" + "\n".join(
+            f"- {t['name']} (caps: {', '.join(t['capabilities']) or 'none'})" for t in tools)
+        resp = provider.complete(system, [{"role": "user", "content": user}], [])
+        m = re.search(r"\{.*\}", resp.text or "", re.S)
+        doc = json.loads(m.group(0)) if m else None
+        if not isinstance(doc, dict):
+            return None
+    except Exception:  # noqa: BLE001 -- fall back to the deterministic policy
+        return None
+
+    def _clean(rules) -> list:
+        out = []
+        for r in rules if isinstance(rules, list) else []:
+            r = str(r)
+            base = r[:-1] if r.endswith("*") else r
+            if base in names or any(re.fullmatch(r.replace("*", ".*"), n) for n in names):
+                out.append(r)
+        return sorted(set(out))
+
+    default = doc.get("default")
+    if default not in ("allow", "confirm", "deny"):
+        default = "confirm" if goal == "least-privilege" else "allow"
+    rationale = {k: str(v)[:160] for k, v in (doc.get("rationale") or {}).items()
+                 if isinstance(v, (str, int))}
+    return {"default": default, "allow": _clean(doc.get("allow")),
+            "confirm": _clean(doc.get("confirm")), "deny": _clean(doc.get("deny")),
+            "rationale": rationale,
+            "_synthesized": {"goal": goal, "from_runs": rep["runs"],
+                             "tools_seen": len(rep["tools"]), "by": "llm"}}
+
+
 def to_yaml(doc: dict) -> str:
     """A hand-rolled YAML dump (no pyyaml dependency) for a policy document."""
     meta = doc.get("_synthesized", {})
-    lines = [f"# synthesized by loom ({meta.get('goal', '')}) from "
+    by = " · llm-refined" if meta.get("by") == "llm" else ""
+    lines = [f"# synthesized by loom ({meta.get('goal', '')}{by}) from "
              f"{meta.get('from_runs', '?')} run(s), {meta.get('tools_seen', '?')} tool(s)",
-             "# review before enforcing:  loom policy rollout <this> --traces runs/",
-             f"default: {doc['default']}"]
+             "# review before enforcing:  loom policy rollout <this> --traces runs/"]
+    rationale = doc.get("rationale") or {}
+    if rationale:
+        lines.append("# why:")
+        lines += [f"#   {rule}: {why}" for rule, why in rationale.items()]
+    lines.append(f"default: {doc['default']}")
     for section in ("allow", "confirm", "deny"):
         items = doc.get(section) or []
         if items:
