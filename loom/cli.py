@@ -96,6 +96,11 @@ def _cmd_timeline(args: argparse.Namespace) -> int:
 
 def _cmd_replay(args: argparse.Namespace) -> int:
     """Reconstruct the final output from the recorded trace -- deterministic, offline."""
+    if getattr(args, "brk", ""):
+        from .breakpoint import describe_break, find_break
+        r = find_break(_load_trace_json(args.path), args.brk)
+        print(describe_break(r))
+        return 1 if (args.gate and r["hit"]) else 0
     log, data = _load_log(args.path)
     model_entries = [e for e in log if e.kind == "model"]
     output = ModelResponse.from_dict(model_entries[-1].result).text if model_entries else ""
@@ -1727,6 +1732,15 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return 1 if (args.gate and report["high"]) else 0
 
 
+def _cmd_loops(args: argparse.Namespace) -> int:
+    """Detect repeated / oscillating tool-call loops."""
+    from .loops import describe_loops, detect_loops
+
+    r = detect_loops(_load_trace_json(args.path))
+    print(json.dumps(r, indent=2) if args.json else describe_loops(r))
+    return 1 if (args.gate and r["looping"]) else 0
+
+
 def _cmd_whatif(args: argparse.Namespace) -> int:
     """Fault injection: re-run a trace with a tool result overridden ('what if?')."""
     from .debugger import DebugSession
@@ -2891,7 +2905,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     rp = sub.add_parser("replay", help="replay a saved trace offline")
     rp.add_argument("path")
+    rp.add_argument("--break", dest="brk", default="", metavar="COND",
+                    help="stop at the first action matching a condition "
+                         "(e.g. tool:send_email, cap:network, 'cap:network after cap:secret')")
+    rp.add_argument("--gate", action="store_true", help="exit 1 if the breakpoint is hit")
     rp.set_defaults(func=_cmd_replay)
+
+    lp = sub.add_parser("loops", help="find where the agent got stuck repeating itself")
+    lp.add_argument("path")
+    lp.add_argument("--gate", action="store_true", help="exit 1 if a loop is found")
+    lp.add_argument("--json", action="store_true")
+    lp.set_defaults(func=_cmd_loops)
 
     df = sub.add_parser("diff", help="compare two saved traces at the effect level")
     df.add_argument("a")

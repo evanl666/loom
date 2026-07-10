@@ -337,6 +337,15 @@ class _Handler(BaseHTTPRequestHandler):
                            else sess.data.get("system", "")),
                 "all_tools": (sorted(sess.agent.tools) if sess.agent else []),
             })
+        elif self.path.startswith("/api/breaks"):
+            from urllib.parse import parse_qs, urlparse
+            from .breakpoint import find_all_breaks
+            cond = parse_qs(urlparse(self.path).query).get("cond", [""])[0]
+            try:
+                hits = find_all_breaks(sess.data, cond) if cond else []
+            except Exception:  # noqa: BLE001
+                hits = []
+            self._json(200, {"steps": hits})
         elif self.path == "/api/copilot":
             self._json(200, copilot_report(sess.data))
         elif self.path.startswith("/api/blame"):
@@ -439,6 +448,7 @@ header b{font-size:14px}.muted{color:#8a8a92}
 #steps{width:300px;border-right:1px solid #26262b;overflow:auto;flex:none}
 .step{padding:7px 12px;border-bottom:1px solid #1c1c20;cursor:pointer;display:flex;gap:8px;align-items:center}
 .step:hover{background:#161619}.step.cur{background:#1e2a3a;border-left:3px solid #4a9eff;padding-left:9px}
+.step.brk{box-shadow:inset 3px 0 0 #e5484d}.step.brk::after{content:"⏹";margin-left:auto;color:#e5484d;font-size:11px}
 .badge{font-size:10px;padding:1px 6px;border-radius:4px;background:#2a2a30;color:#bdbdc4;text-transform:uppercase;letter-spacing:.3px}
 .b-call{background:#2d2438;color:#c79bff}.b-answer{background:#1f3a2a;color:#7ee0a0}.b-reason{background:#25333f;color:#7fc3ff}
 .b-blocked,.b-ask-human{background:#3a2323;color:#ff9b9b}
@@ -510,6 +520,7 @@ button.fault:hover{background:#4a3c22}
       <button id="next" title="next (→)">step ▶</button>
       <button id="last" title="last (End)">⏭</button>
       <span class="muted" id="pos" style="margin-left:8px"></span>
+      <input id="brk" placeholder="⏹ break: tool:send_email · cap:network" title="conditional breakpoint" style="margin-left:12px;width:230px">
       <button id="copilot" style="margin-left:auto">🤖 Copilot</button>
     </div>
     <div id="copilotpanel" class="hidden"></div>
@@ -776,6 +787,20 @@ function adoptFork(turn,edit){
   select(hit[0]);
   setTimeout(()=>{const t=document.getElementById("append"); if(t){t.value=edit; document.getElementById("run").scrollIntoView({block:"center"});}},50);
 }
+let BREAKS=[];
+async function setBreak(){
+  const cond=document.getElementById("brk").value.trim();
+  document.querySelectorAll(".step").forEach(d=>d.classList.remove("brk"));
+  if(!cond){BREAKS=[];return;}
+  const r=await (await fetch("/api/breaks?cond="+encodeURIComponent(cond))).json();
+  BREAKS=r.steps||[];
+  document.querySelectorAll(".step").forEach((d,i)=>d.classList.toggle("brk",BREAKS.includes(steps[i].step)));
+  // jump to the next breakpoint at/after the current step
+  const nxt=BREAKS.find(st=>{const i=steps.findIndex(s=>s.step===st);return i>=cur;});
+  const tgt=nxt!=null?nxt:BREAKS[0];
+  if(tgt!=null){const i=steps.findIndex(s=>s.step===tgt); if(i>=0)select(i);}
+}
+document.getElementById("brk").onkeydown=e=>{if(e.key==="Enter")setBreak();};
 document.getElementById("copilot").onclick=loadCopilot;
 document.getElementById("prev").onclick=()=>select(cur-1);
 document.getElementById("next").onclick=()=>select(cur+1);
