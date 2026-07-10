@@ -140,6 +140,85 @@ def memory_blame(data: dict, step: int) -> dict:
     }
 
 
+def _run_summary(data: dict) -> str:
+    """A compact, model-readable view of the run for the chat copilot."""
+    from .action import actions
+
+    lines = []
+    for a in actions(data):
+        if a.type == "call":
+            import json as _json
+            obs = (a.observation.text[:120] if a.observation else "")
+            lines.append(f"[{a.step}] turn {a.replay.turn if a.replay else '?'} CALL {a.tool}"
+                         f"({_json.dumps(a.input, default=str)[:120]}) "
+                         f"caps={','.join(a.capabilities)}{' RISKY' if a.risky else ''} -> {obs}")
+        elif a.type in ("reason", "answer"):
+            lines.append(f"[{a.step}] {a.type.upper()}: {a.intent[:140]}")
+    return "\n".join(lines)
+
+
+def copilot_chat(data: dict, messages: "list[dict]", model: Any,
+                 step: "int | None" = None) -> dict:
+    """A conversational debug copilot backed by a real model.
+
+    ``messages`` is the chat history [{role, content}]. The model is given the
+    run's steps, diagnosis, and the currently-selected step, and asked to help
+    debug. When it proposes an experiment it emits a fenced ```fork block with
+    {"turn", "edit"} JSON (and ```policy for a rule) which the UI turns into a
+    one-click *Adopt* button. Returns {reply, suggestions}.
+    """
+    import json as _json
+    import re as _re
+
+    from .diagnose import describe_diagnosis, diagnose
+
+    if isinstance(model, str):
+        from .agent import _resolve_provider
+        model = _resolve_provider(model, None)
+
+    diag = describe_diagnosis(diagnose(data))
+    cur = ""
+    if step is not None:
+        from .action import actions
+        a = next((x for x in actions(data) if x.step == step), None)
+        if a:
+            cur = f"\nCurrently selected: step {a.step} ({a.type} {a.tool}), turn " \
+                  f"{a.replay.turn if a.replay else '?'}."
+    system = (
+        "You are a debugging copilot embedded in an interactive agent-run debugger, "
+        "like a senior engineer pairing with the user. Be concise and concrete.\n\n"
+        f"USER REQUEST: {str((data.get('episodes') or [data.get('prompt','')])[0])[:300]}\n"
+        f"FINAL OUTPUT: {str(data.get('output',''))[:300]}\n\n"
+        f"THE RUN, action by action:\n{_run_summary(data)}\n\n"
+        f"DIAGNOSIS:\n{diag}{cur}\n\n"
+        "When you propose an experiment to TEST a hypothesis, emit a fenced block:\n"
+        "```fork\n{\"turn\": <int>, \"edit\": \"<instruction to inject into the model's "
+        "context at that turn>\"}\n```\n"
+        "The user can adopt it with one click to re-run that turn live (this is how "
+        "they change behavior or code -- e.g. \"do NOT issue the refund\" or \"write the "
+        "function using binary search instead\"). For a firewall fix, emit:\n"
+        "```policy\n{\"deny\": [\"tool*\"], \"confirm\": [\"tool*\"]}\n```")
+
+    resp = model.complete(system, messages, [])
+    reply = getattr(resp, "text", "") or ""
+    suggestions = []
+    for m in _re.finditer(r"```fork\s*(\{.*?\})\s*```", reply, _re.S):
+        try:
+            d = _json.loads(m.group(1))
+            suggestions.append({"kind": "fork", "turn": int(d.get("turn", 0)),
+                                "edit": str(d.get("edit", ""))})
+        except (ValueError, TypeError):
+            pass
+    for m in _re.finditer(r"```policy\s*(\{.*?\})\s*```", reply, _re.S):
+        try:
+            suggestions.append({"kind": "policy", **_json.loads(m.group(1))})
+        except (ValueError, TypeError):
+            pass
+    # strip the raw fenced blocks from the human-facing reply
+    clean = _re.sub(r"```(?:fork|policy)\s*\{.*?\}\s*```", "", reply, flags=_re.S).strip()
+    return {"reply": clean, "suggestions": suggestions}
+
+
 def _branch_payload(base_data: dict, branch_data: dict, at: int) -> dict:
     """Original vs branch steps + the first step that differs."""
     a = steps_for(base_data)
@@ -160,9 +239,11 @@ def _branch_payload(base_data: dict, branch_data: dict, at: int) -> dict:
 class DebugSession:
     """Holds the trace + optional agent, and executes forks on demand."""
 
-    def __init__(self, trace_path: str, agent: Any = None):
+    def __init__(self, trace_path: str, agent: Any = None, copilot_model: str = ""):
         self.trace_path = trace_path
         self.agent = agent
+        # model the chat copilot talks to; falls back to the fork agent's model
+        self.copilot_model = copilot_model or (getattr(agent, "model", "") if agent else "")
         with open(trace_path) as f:
             self.data = json.load(f)
 
@@ -216,6 +297,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "model": sess.data.get("model", ""),
                 "steps": steps_for(sess.data),
                 "can_fork": sess.agent is not None,
+                "can_chat": bool(sess.copilot_model),
             })
         elif self.path == "/api/copilot":
             self._json(200, copilot_report(sess.data))
@@ -238,6 +320,25 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         sess: DebugSession = self.server.session  # type: ignore[attr-defined]
+        if self.path == "/api/chat":
+            try:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                assert isinstance(body, dict)
+            except (ValueError, AssertionError):
+                self._json(400, {"error": "bad json body"})
+                return
+            if not sess.copilot_model:
+                self._json(400, {"error": "no copilot model -- start with --copilot-model MODEL "
+                                          "or --agent (uses its model)"})
+                return
+            try:
+                out = copilot_chat(sess.data, body.get("messages") or [],
+                                   sess.copilot_model, step=body.get("step"))
+                self._json(200, out)
+            except Exception as e:  # noqa: BLE001
+                self._json(502, {"error": f"copilot error: {type(e).__name__}: {e}"})
+            return
         if self.path != "/api/fork":
             self._json(404, {"error": "not found"})
             return
@@ -266,8 +367,8 @@ class DebugServer:
     """Serves the step-debugger for one trace. Bind port 0 to pick a free port."""
 
     def __init__(self, trace_path: str, agent: Any = None,
-                 port: int = 8790, host: str = "127.0.0.1"):
-        self.session = DebugSession(trace_path, agent)
+                 port: int = 8790, host: str = "127.0.0.1", copilot_model: str = ""):
+        self.session = DebugSession(trace_path, agent, copilot_model=copilot_model)
         self.httpd = ThreadingHTTPServer((host, port), _Handler)
         self.httpd.session = self.session  # type: ignore[attr-defined]
         self.httpd.daemon_threads = True
@@ -326,6 +427,13 @@ pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:bl
 .chip.jump{cursor:pointer}.chip.jump:hover{border-color:#4a9eff}
 .cop-edit{font-size:12px;color:#c79bff;margin:4px 0}
 .frame.poison{border-color:#e5484d}.frame.poison .rl{color:#ff9b9b;background:#2a1518}
+#chatlog{max-height:280px;overflow:auto;margin:6px 0}
+.msg{padding:7px 11px;border-radius:10px;margin:5px 0;max-width:90%;white-space:pre-wrap}
+.msg.u{background:#1e2a3a;margin-left:auto;color:#dbeaff}
+.msg.a{background:#18181b;border:1px solid #26262b}
+.chatbar{display:flex;gap:6px}.chatbar input{flex:1}
+button.adopt{background:#2d2438;border-color:#4a3a5c;color:#e0c9ff;margin:4px 6px 4px 0;font-size:12px}
+button.adopt:hover{background:#3a2f4a}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -347,11 +455,11 @@ pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:bl
 <script>
 const E=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const J=x=>{try{return JSON.stringify(x,null,2)}catch(e){return String(x)}};
-let RUN=null, steps=[], cur=0, canFork=false;
+let RUN=null, steps=[], cur=0, canFork=false, CAN_CHAT=false;
 
 async function load(){
   RUN=await (await fetch("/api/run")).json();
-  steps=RUN.steps; canFork=RUN.can_fork;
+  steps=RUN.steps; canFork=RUN.can_fork; CAN_CHAT=RUN.can_chat;
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
   document.getElementById("model").textContent=RUN.model||"";
   renderSteps(); select(0);
@@ -472,25 +580,64 @@ document.addEventListener("keydown",e=>{
   if(e.key==="ArrowLeft")select(cur-1); else if(e.key==="ArrowRight")select(cur+1);
   else if(e.key==="Home")select(0); else if(e.key==="End")select(steps.length-1);
 });
+let CHAT=[];  // conversation history
 async function loadCopilot(){
   const p=document.getElementById("copilotpanel");
   if(!p.classList.contains("hidden")){p.classList.add("hidden");return;}
-  p.classList.remove("hidden"); p.innerHTML='<span class="muted">analyzing…</span>';
+  p.classList.remove("hidden");
   const r=await (await fetch("/api/copilot")).json();
   let h=`<div class="cop-sum">🤖 ${E(r.summary)}</div>`;
   if(r.suspicious.length){
     h+=`<div class="k">suspicious steps</div>`+r.suspicious.map(s=>
       `<span class="chip jump" data-step="${s.step}">step ${s.step} · ${E(s.tool)} <span class="muted">(${E(s.why)})</span></span>`).join("");
   }
-  if(r.fork_edits.length){
-    h+=`<div class="k">suggested experiments</div>`+r.fork_edits.map(f=>`<div class="cop-edit">🍴 ${E(f.suggestion)}</div>`).join("");
-  }
-  if(r.policy_suggestion.length){
-    h+=`<div class="k">policy patch</div><pre>deny/confirm: ${E(r.policy_suggestion.join(", "))}</pre>`;
-  }
+  h+=`<div class="k">💬 chat with the copilot ${CAN_CHAT?"":"<span class=muted>(start with --copilot-model or --agent)</span>"}</div>
+    <div id="chatlog"></div>
+    <div class="chatbar"><input id="chatin" placeholder="ask: why did it issue the refund? / suggest a fix…" ${CAN_CHAT?"":"disabled"}>
+      <button id="chatsend" ${CAN_CHAT?"":"disabled"}>send</button></div>
+    <div class="muted" style="font-size:11px">try: “explain the risky steps”, “suggest a fork that prevents the refund”, “write a policy to fix this”</div>`;
   p.innerHTML=h;
   p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{
     const i=steps.findIndex(s=>s.step===+c.dataset.step); if(i>=0)select(i);});
+  renderChat();
+  const send=document.getElementById("chatsend"), inp=document.getElementById("chatin");
+  if(send){send.onclick=sendChat; inp.onkeydown=e=>{if(e.key==="Enter")sendChat();};}
+}
+function renderChat(){
+  const log=document.getElementById("chatlog"); if(!log)return;
+  log.innerHTML=CHAT.map(m=>{
+    if(m.role==="user")return `<div class="msg u">${E(m.content)}</div>`;
+    let h=`<div class="msg a">${E(m.content).replace(/\n/g,"<br>")}</div>`;
+    (m.suggestions||[]).forEach((s,i)=>{
+      if(s.kind==="fork") h+=`<button class="adopt" data-turn="${s.turn}" data-edit="${E(s.edit)}">🍴 Adopt: fork turn ${s.turn}</button>`;
+      else if(s.kind==="policy") h+=`<div class="cop-edit">policy: deny ${E((s.deny||[]).join(", "))} · confirm ${E((s.confirm||[]).join(", "))}</div>`;
+    });
+    return h;
+  }).join("");
+  log.querySelectorAll(".adopt").forEach(b=>b.onclick=()=>adoptFork(+b.dataset.turn,b.dataset.edit));
+  log.scrollTop=log.scrollHeight;
+}
+async function sendChat(){
+  const inp=document.getElementById("chatin"), q=inp.value.trim(); if(!q)return;
+  inp.value=""; CHAT.push({role:"user",content:q}); renderChat();
+  CHAT.push({role:"assistant",content:"…thinking",suggestions:[]}); renderChat();
+  try{
+    const r=await fetch("/api/chat",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({messages:CHAT.filter(m=>m.content!=="…thinking"),step:steps[cur].step})});
+    const res=await r.json(); CHAT.pop();
+    if(!r.ok){CHAT.push({role:"assistant",content:"⚠ "+(res.error||"error"),suggestions:[]});}
+    else CHAT.push({role:"assistant",content:res.reply||"(no reply)",suggestions:res.suggestions||[]});
+  }catch(e){CHAT.pop();CHAT.push({role:"assistant",content:"⚠ "+e,suggestions:[]});}
+  renderChat();
+}
+function adoptFork(turn,edit){
+  // find the forkable step for this turn; if none, snap to the nearest earlier one
+  const forkable=steps.map((s,i)=>[i,(s.replay||{})]).filter(([i,r])=>r.forkable);
+  let hit=forkable.find(([i,r])=>r.turn===turn);
+  if(!hit) hit=forkable.filter(([i,r])=>r.turn<=turn).pop()||forkable[0];
+  if(!hit){alert("no forkable turn available");return;}
+  select(hit[0]);
+  setTimeout(()=>{const t=document.getElementById("append"); if(t){t.value=edit; document.getElementById("run").scrollIntoView({block:"center"});}},50);
 }
 document.getElementById("copilot").onclick=loadCopilot;
 document.getElementById("prev").onclick=()=>select(cur-1);

@@ -143,3 +143,25 @@ def test_memory_blame_points_at_poisoned_recall():
     assert "POISONED" in b["note"]
     # a step with no preceding memory recall has no influences
     assert memory_blame(data, 1)["influences"]  # recall@0 precedes step 1 too
+
+
+def test_copilot_chat_parses_fork_suggestion():
+    from loom.debugger import copilot_chat
+    from loom.providers import ModelResponse
+
+    class _Model:
+        model = "mock"
+        def complete(self, system, messages, tools):
+            return ModelResponse(text=(
+                "You should test removing the refund.\n"
+                '```fork\n{"turn": 1, "edit": "do NOT issue the refund"}\n```\n'
+                "That will show the divergence."))
+
+    data = {"log": [
+        {"seq": 0, "kind": "model", "result": {"tool_calls": [{"id": "1", "name": "refund", "input": {}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "tool:refund", "result": "ok"}],
+        "prompt": "p", "episodes": ["p"], "output": "done", "tools": {"refund": ["money_movement"]}}
+    out = copilot_chat(data, [{"role": "user", "content": "how do I fix this?"}], model=_Model())
+    assert "test removing the refund" in out["reply"]
+    assert "```fork" not in out["reply"]  # the fenced block is stripped from the human text
+    assert out["suggestions"] == [{"kind": "fork", "turn": 1, "edit": "do NOT issue the refund"}]

@@ -1738,9 +1738,12 @@ def _cmd_debug(args: argparse.Namespace) -> int:
         agent, err = _load_agent(args.agent)
         if agent is None:
             raise CLIError(err)
-    server = DebugServer(args.path, agent=agent, port=args.port, host=args.host)
+    server = DebugServer(args.path, agent=agent, port=args.port, host=args.host,
+                         copilot_model=args.copilot_model)
     url = f"http://{args.host}:{server.port}/"
     mode = "step + fork live" if agent else "read-only (pass --agent to fork live)"
+    if server.session.copilot_model:
+        mode += " + AI copilot"
     print(f"loom debugger [{mode}]: {url}", file=sys.stderr)
     if not args.no_open:
         webbrowser.open(url)
@@ -3571,6 +3574,8 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--agent", default="", help="module:attr for live re-forking (Agent or factory)")
     db.add_argument("--port", type=int, default=8790)
     db.add_argument("--host", default="127.0.0.1")
+    db.add_argument("--copilot-model", default="",
+                    help="model for the conversational Copilot (else the --agent model)")
     db.add_argument("--no-open", action="store_true", help="don't open a browser")
     db.set_defaults(func=_cmd_debug)
 
