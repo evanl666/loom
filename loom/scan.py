@@ -55,16 +55,27 @@ def scan(source: Any) -> dict:
     Returns {"tools": [...], "findings": [...], "grade": "A".."F", "runs": N}.
     """
     datas: list[dict] = []
-    if isinstance(source, str) and os.path.isdir(source):
-        for p in sorted(glob(os.path.join(source, "**", "*.loom.json"), recursive=True)):
+
+    def _add_path(p: str) -> None:
+        if os.path.isdir(p):
+            for f in sorted(glob(os.path.join(p, "**", "*.loom.json"), recursive=True)):
+                try:
+                    with open(f) as fh:
+                        datas.append(json.load(fh))
+                except (OSError, json.JSONDecodeError):
+                    pass
+        else:
             try:
-                with open(p) as f:
-                    datas.append(json.load(f))
+                with open(p) as fh:
+                    datas.append(json.load(fh))
             except (OSError, json.JSONDecodeError):
-                continue
-    elif isinstance(source, str):
-        with open(source) as f:
-            datas.append(json.load(f))
+                pass
+
+    if isinstance(source, str):
+        _add_path(source)
+    elif isinstance(source, (list, tuple)):
+        for item in source:
+            (_add_path(item) if isinstance(item, str) else datas.append(item))
     else:
         datas.append(source)
 

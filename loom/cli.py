@@ -1606,6 +1606,22 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_behavior(args: argparse.Namespace) -> int:
+    """Extract a behavior contract from a run and emit behavior unit tests."""
+    from .behavior import behavior_spec, describe_behavior, to_pytest
+
+    spec = behavior_spec(_load_trace_json(args.path))
+    if args.pytest:
+        with open(args.pytest, "w") as f:
+            f.write(to_pytest(spec, trace_path=args.path))
+        print(f"wrote behavior tests -> {args.pytest}", file=sys.stderr)
+    elif args.json:
+        print(json.dumps(spec, indent=2))
+    else:
+        print(describe_behavior(spec))
+    return 0
+
+
 def _cmd_sbom(args: argparse.Namespace) -> int:
     """A CycloneDX-flavored bill of materials for the agent in a trace/corpus."""
     from .sbom import build_sbom, describe_sbom
@@ -2449,6 +2465,18 @@ def _cmd_policy(args: argparse.Namespace) -> int:
             print(f"{mark} {action:8} {sig}" + (f"   (rule: {rule})" if rule else "   (default)"))
         return 0
 
+    if args.policy_cmd == "synthesize":
+        from .synth import describe_synth, synthesize_policy, to_yaml
+
+        doc = synthesize_policy(_expand_trace_paths(args.traces), goal=args.goal)
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(to_yaml(doc))
+            print(f"{describe_synth(doc)}\nwrote {args.output}", file=sys.stderr)
+        else:
+            print(to_yaml(doc))
+        return 0
+
     if args.policy_cmd in ("rollout", "promote", "rollback"):
         from . import rollout as _ro
 
@@ -3037,6 +3065,11 @@ def build_parser() -> argparse.ArgumentParser:
     po_sim.add_argument("--md", default="", metavar="FILE",
                         help="write a Markdown summary for a PR comment ('-' = stdout)")
     po_sim.set_defaults(func=_cmd_policy)
+    po_syn = posub.add_parser("synthesize", help="auto-generate a least-privilege policy from runs")
+    po_syn.add_argument("traces", nargs="+", help="corpus of successful runs to learn from")
+    po_syn.add_argument("--goal", default="least-privilege", choices=["least-privilege", "observed"])
+    po_syn.add_argument("-o", "--output", default="", help="write the policy YAML")
+    po_syn.set_defaults(func=_cmd_policy)
     po_roll = posub.add_parser("rollout", help="lifecycle status: stage + blast radius + gate")
     po_roll.add_argument("policy")
     po_roll.add_argument("--traces", nargs="+", required=True, help="corpus to assess against")
@@ -3381,6 +3414,12 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("--format", default="sft", choices=["sft", "trajectory", "eval", "dpo"])
     ds.add_argument("-o", "--output", default="", help="output .jsonl (default: stdout)")
     ds.set_defaults(func=_cmd_dataset)
+
+    bh = sub.add_parser("behavior", help="turn a good run into behavior unit tests")
+    bh.add_argument("path")
+    bh.add_argument("--pytest", default="", metavar="FILE", help="write a pytest contract")
+    bh.add_argument("--json", action="store_true")
+    bh.set_defaults(func=_cmd_behavior)
 
     sb = sub.add_parser("sbom", help="a CycloneDX-flavored bill of materials for the agent")
     sb.add_argument("path", help="a trace or a directory of traces")
