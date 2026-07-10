@@ -266,6 +266,8 @@ def reconstruct_sse(raw: str) -> dict:
             event = json.loads(line[5:].strip())
         except json.JSONDecodeError:
             continue
+        if not isinstance(event, dict):
+            continue  # "data: null" / a bare scalar is not an event: skip
         etype = event.get("type")
         if etype == "message_start":
             message = event.get("message", {}) or {}
@@ -373,14 +375,20 @@ def reconstruct_openai_sse(raw: str) -> dict:
             event = json.loads(payload)
         except json.JSONDecodeError:
             continue
+        if not isinstance(event, dict):
+            continue  # "data: null" / a bare scalar is not an event: skip
         model = event.get("model") or model
         if event.get("usage"):
             usage = event["usage"]
         for choice in event.get("choices") or []:
+            if not isinstance(choice, dict):
+                continue
             finish_reason = choice.get("finish_reason") or finish_reason
             delta = choice.get("delta", {}) or {}
             text += delta.get("content") or ""
             for tc in delta.get("tool_calls") or []:
+                if not isinstance(tc, dict):
+                    continue
                 slot = tool_calls.setdefault(
                     tc.get("index", 0), {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
                 )
@@ -656,6 +664,12 @@ class _Handler(BaseHTTPRequestHandler):
             except json.JSONDecodeError:
                 self._send_json(e.code, {"error": body.decode("utf-8", "replace")})
             return
+        except (urllib.error.URLError, TimeoutError) as e:
+            # Upstream unreachable/timed out (network down, wrong target, DNS).
+            # A clean 502 beats crashing the handler and resetting the client.
+            reason = getattr(e, "reason", e)
+            self._send_json(502, {"error": f"cannot reach upstream {self.server.target}: {reason}"})
+            return
 
         shield = self.server.shield
         with upstream:
@@ -784,3 +798,6 @@ class _Handler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
         except urllib.error.HTTPError as e:
             self._send_json(e.code, {"error": e.reason})
+        except (urllib.error.URLError, TimeoutError) as e:
+            reason = getattr(e, "reason", e)
+            self._send_json(502, {"error": f"cannot reach upstream {self.server.target}: {reason}"})

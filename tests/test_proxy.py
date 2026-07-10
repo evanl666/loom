@@ -462,3 +462,50 @@ def test_upstream_non_json_response_is_a_502_not_a_crash():
     finally:
         proxy.shutdown()
         upstream.shutdown()
+
+
+def test_sse_reconstruction_tolerates_non_dict_events():
+    """A stream carrying `data: null` or a bare scalar (or non-dict choices/tool
+    calls) must be skipped, not crash the reconstruction with AttributeError."""
+    from loom.proxy import reconstruct_openai_sse, reconstruct_sse
+
+    adversarial = [
+        "data: null",
+        "data: 123",
+        'data: "hi"',
+        "data: [1,2,3]",
+        'data: {"choices":[null,123]}',
+        'data: {"choices":[{"delta":{"tool_calls":[null,7]}}]}',
+    ]
+    for raw in adversarial:
+        reconstruct_sse(raw)  # must not raise
+        reconstruct_openai_sse(raw)  # must not raise
+
+
+def test_unreachable_upstream_is_a_502_not_a_crash(monkeypatch):
+    """When the upstream API can't be reached (network down / wrong target /
+    DNS failure), both POST and GET must return 502, not crash the handler and
+    reset the client connection."""
+    import http.client
+
+    # Neutralize any system/env proxy so urllib really hits the closed port
+    # (a local proxy would otherwise answer with its own error).
+    for k in list(__import__("os").environ):
+        if k.lower().endswith("_proxy"):
+            monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("no_proxy", "*")
+    monkeypatch.setenv("NO_PROXY", "*")
+
+    proxy = _serve(ProxyServer(port=0, target="http://127.0.0.1:1"))  # port 1: refused
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("POST", "/v1/messages", body=b'{"stream": false}')
+        assert c.getresponse().status == 502
+        c.close()
+
+        c = http.client.HTTPConnection("127.0.0.1", proxy.port, timeout=5)
+        c.request("GET", "/v1/models")
+        assert c.getresponse().status == 502
+        c.close()
+    finally:
+        proxy.shutdown()
