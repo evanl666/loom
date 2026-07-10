@@ -1606,6 +1606,18 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_memory(args: argparse.Namespace) -> int:
+    """Memory forensics: poisoned recalls, contamination chains, future-poison."""
+    from .memforensics import describe_memforensics, memory_forensics
+
+    r = memory_forensics(_load_trace_json(args.path))
+    if args.json:
+        print(json.dumps(r, indent=2))
+    else:
+        print(describe_memforensics(r))
+    return 1 if (args.gate and r["severity"] in ("critical", "high")) else 0
+
+
 def _cmd_autopilot(args: argparse.Namespace) -> int:
     """Turn an incident trace into a full fix bundle (autopsy/movie/diagnosis/patch/PR)."""
     from .autopilot import describe_autopilot, open_pr, run_autopilot
@@ -3426,6 +3438,14 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("--format", default="sft", choices=["sft", "trajectory", "eval", "dpo"])
     ds.add_argument("-o", "--output", default="", help="output .jsonl (default: stdout)")
     ds.set_defaults(func=_cmd_dataset)
+
+    mem = sub.add_parser("memory", help="memory forensics: poisoned recalls + contamination chains")
+    memsub = mem.add_subparsers(dest="memory_cmd", required=True)
+    mem_f = memsub.add_parser("forensics", help="detect memory poisoning across time")
+    mem_f.add_argument("path")
+    mem_f.add_argument("--gate", action="store_true", help="exit 1 on high/critical")
+    mem_f.add_argument("--json", action="store_true")
+    mem_f.set_defaults(func=_cmd_memory)
 
     ap = sub.add_parser("autopilot", help="incident → full fix bundle (autopsy/movie/diagnosis/patch/PR)")
     ap.add_argument("path")
