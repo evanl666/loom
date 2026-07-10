@@ -247,20 +247,32 @@ class DebugSession:
         with open(trace_path) as f:
             self.data = json.load(f)
 
-    def _agent_for(self, model: str):
+    def _agent_for(self, model: str, system: "str | None" = None,
+                   tools: "list[str] | None" = None):
         if self.agent is None:
             raise RuntimeError("no --agent given; the run cannot be re-forked live")
-        if not model or model == "keep":
+        change_model = bool(model) and model != "keep"
+        sys_p = self.agent.system if system is None else system
+        keep_tools = tools is None
+        # unchanged config -> reuse the exact agent (so the replayed prefix's
+        # keys still match under strict replay)
+        if not change_model and sys_p == self.agent.system and keep_tools:
             return self.agent
         from .agent import Agent
-        return Agent(model=model, tools=list(self.agent.tools.values()),
-                     system=self.agent.system, max_steps=self.agent.max_steps)
+        picked = (list(self.agent.tools.values()) if keep_tools
+                  else [t for n, t in self.agent.tools.items() if n in tools])
+        # new model -> a model-id string; otherwise reuse the existing provider
+        # object (so a scripted/local provider stays itself, not a live lookup)
+        model_arg = model if change_model else self.agent.provider
+        return Agent(model=model_arg, tools=picked, system=sys_p, max_steps=self.agent.max_steps)
 
-    def fork(self, at: int, append: str = "", model: str = "keep") -> dict:
-        """Replay 0..at-1 from the log, apply the edit, run the tail live."""
+    def fork(self, at: int, append: str = "", model: str = "keep",
+             system: "str | None" = None, tools: "list[str] | None" = None) -> dict:
+        """Replay 0..at-1 from the log, apply the edits (context / system / tools),
+        run the tail live."""
         from .trace import Run
 
-        agent = self._agent_for(model)
+        agent = self._agent_for(model, system, tools)
         base = Run.load(self.trace_path, agent=agent)
         edit = None
         if append.strip():
@@ -298,6 +310,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "steps": steps_for(sess.data),
                 "can_fork": sess.agent is not None,
                 "can_chat": bool(sess.copilot_model),
+                "system": (getattr(sess.agent, "system", "") if sess.agent
+                           else sess.data.get("system", "")),
+                "all_tools": (sorted(sess.agent.tools) if sess.agent else []),
             })
         elif self.path == "/api/copilot":
             self._json(200, copilot_report(sess.data))
@@ -354,8 +369,12 @@ class _Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             self._json(400, {"error": "'at' must be an integer turn"})
             return
+        system = body.get("system")
+        tools = body.get("tools")
         try:
-            result = sess.fork(at, str(body.get("append", "")), str(body.get("model", "keep")))
+            result = sess.fork(at, str(body.get("append", "")), str(body.get("model", "keep")),
+                               system=system if isinstance(system, str) else None,
+                               tools=tools if isinstance(tools, list) else None)
             self._json(200, result)
         except (IndexError, RuntimeError, ValueError) as e:
             self._json(400, {"error": str(e)})
@@ -433,8 +452,24 @@ pre.code{background:#0c0c0f;border-color:#2c2c34;color:#d7d7de;max-height:420px;
 .msg.u{background:#1e2a3a;margin-left:auto;color:#dbeaff}
 .msg.a{background:#18181b;border:1px solid #26262b}
 .chatbar{display:flex;gap:6px}.chatbar input{flex:1}
-button.adopt{background:#2d2438;border-color:#4a3a5c;color:#e0c9ff;margin:4px 6px 4px 0;font-size:12px}
+button.adopt{background:#2d2438;border-color:#4a3a5c;color:#e0c9ff;margin:6px 6px 2px 0;font-size:12px}
 button.adopt:hover{background:#3a2f4a}
+.msg.a code{background:#26262b;padding:1px 5px;border-radius:4px}
+pre.mdcode{background:#0c0c0f;border:1px solid #26262b;border-radius:8px;padding:9px 11px;margin:6px 0;white-space:pre-wrap;font-size:12px;overflow:auto}
+.msg.a ul{margin:4px 0 4px 2px;padding-left:16px}.msg.a li{margin:2px 0}
+/* fork panel */
+.forkhead{font-size:13px;font-weight:600;margin-bottom:10px}
+.fl{display:block;font-size:11px;color:#8a8a92;text-transform:uppercase;letter-spacing:.4px;margin:10px 0 4px}
+.forkrow{display:flex;gap:10px;align-items:flex-start;flex-wrap:wrap;margin-top:6px}
+.forkrow>label.fl{margin:8px 0 0}
+.fdet{flex:1;min-width:220px}.fdet summary{cursor:pointer;color:#8a8a92;font-size:12px;padding:6px 0;user-select:none}
+.fdet summary:hover{color:#e6e6e6}
+#toolbox{display:flex;flex-wrap:wrap;gap:4px 12px}
+label.tk{font-size:12px;color:#cfcfd6;display:flex;align-items:center;gap:5px;cursor:pointer}
+#run{margin-top:12px;background:#1d3a5c;border-color:#2c5a8c;color:#dbeaff;font-weight:600;padding:6px 14px}
+#run:hover{background:#244a72}
+.branchhead{color:#7ee0a0;font-weight:600;margin:14px 0 4px}
+#fork textarea,#fork select{margin-top:2px}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -455,6 +490,18 @@ button.adopt:hover{background:#3a2f4a}
 </div>
 <script>
 const E=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function md(t){ // minimal, XSS-safe markdown: escape first, protect code blocks
+  const blocks=[];
+  t=String(t||"").replace(/```(\w*)\n?([\s\S]*?)```/g,(m,l,c)=>{blocks.push(c.replace(/\n$/,"")); return "~CB~"+(blocks.length-1)+"~CB~";});
+  t=E(t);
+  t=t.replace(/`([^`]+)`/g,"<code>$1</code>");
+  t=t.replace(/^\s*#{1,4}\s+(.*)$/gm,"<b>$1</b>");
+  t=t.replace(/\*\*([^*]+)\*\*/g,"<b>$1</b>").replace(/(^|[^*])\*([^*\n]+)\*/g,"$1<i>$2</i>");
+  t=t.replace(/^\s*[-*]\s+(.*)$/gm,"<li>$1</li>").replace(/^\s*\d+\.\s+(.*)$/gm,"<li>$1</li>");
+  t=t.replace(/(?:<li>[\s\S]*?<\/li>\s*)+/g,m=>"<ul>"+m+"</ul>");
+  t=t.replace(/\n/g,"<br>");
+  return t.replace(/~CB~(\d+)~CB~/g,(m,i)=>'<pre class="mdcode">'+E(blocks[i])+"</pre>");
+}
 const J=x=>{try{return JSON.stringify(x,null,2)}catch(e){return String(x)}};
 function codeFields(inp){
   // pull the file path + code out of a write/edit tool input so it shows as
@@ -526,16 +573,25 @@ function renderDetail(){
   if(s.policy) h+=`<div class="k">firewall</div><span class="chip">${E(s.policy.action)} ${E(s.policy.rule||"")}</span>`;
   if(o.tokens&&(o.tokens.input_tokens||o.tokens.output_tokens)) h+=`<div class="k">tokens</div><span class="chip">in ${o.tokens.input_tokens||0}</span><span class="chip">out ${o.tokens.output_tokens||0}</span>`;
   const forkable=(s.replay||{}).forkable;
+  const mc=(s.replay||{}).turn;
   h+=`<div id="fork" class="${forkable&&canFork?"":"hidden"}">
-    <div class="k">🍴 fork from turn ${(s.replay||{}).turn} — edit context / model, run the tail live</div>
-    <textarea id="append" rows="3" placeholder="Inject a message into the model's context at this turn (optional) — e.g. 'Actually, do NOT issue the refund.'"></textarea>
-    <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-      <select id="model"><option value="keep">model: keep (${E(RUN.model||"recorded")})</option>
+    <div class="forkhead">🍴 Fork from model call #${mc} <span class="muted">— replay up to here, change something, run the rest live</span></div>
+    <label class="fl">inject into context</label>
+    <textarea id="append" rows="2" placeholder="a message for the model at this point — e.g. “handle n &lt; 2 correctly” or “do NOT issue the refund”"></textarea>
+    <div class="forkrow">
+      <label class="fl">model</label>
+      <select id="model"><option value="keep">keep (${E(RUN.model||"recorded")})</option>
         <option value="claude-haiku-4-5-20251001">claude-haiku-4-5</option>
         <option value="claude-sonnet-5">claude-sonnet-5</option>
         <option value="claude-opus-4-8">claude-opus-4-8</option></select>
-      <button id="run">▶ Fork &amp; Run live</button>
+      <details class="fdet"><summary>⚙ system + tools</summary>
+        <label class="fl">system prompt</label>
+        <textarea id="sysp" rows="3">${E(RUN.system||"")}</textarea>
+        <label class="fl">tools available to the fork</label>
+        <div id="toolbox">${(RUN.all_tools||[]).map(t=>`<label class="tk"><input type="checkbox" class="tchk" value="${E(t)}" checked> ${E(t)}</label>`).join("")}</div>
+      </details>
     </div>
+    <button id="run">▶ Fork &amp; Run live</button>
     <div id="branch"></div>
   </div>`;
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
@@ -581,8 +637,13 @@ async function doFork(){
   btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> running…';
   bx.innerHTML="";
   try{
-    const r=await fetch("/api/fork",{method:"POST",headers:{"content-type":"application/json"},
-      body:JSON.stringify({at,append:document.getElementById("append").value,model:document.getElementById("model").value})});
+    const sysEl=document.getElementById("sysp");
+    const payload={at,append:document.getElementById("append").value,model:document.getElementById("model").value};
+    if(sysEl && sysEl.value!==(RUN.system||"")) payload.system=sysEl.value;
+    const chks=[...document.querySelectorAll(".tchk")];
+    const on=chks.filter(c=>c.checked).map(c=>c.value);
+    if(chks.length && on.length!==chks.length) payload.tools=on;   // only send if a subset
+    const r=await fetch("/api/fork",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
     const res=await r.json();
     if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"fork failed")}</pre>`;return;}
     const div=res.diverge;
@@ -590,8 +651,9 @@ async function doFork(){
       const cls=(div!=null&&i>=div)?"branchstep div":(i>=(div??1e9)?"branchstep new":"branchstep");
       return `<div class="${cls}"><span class="muted">${b.step}</span> <b>${E(b.tool||b.type)}</b> ${E((b.intent||"").slice(0,60))}</div>`;
     }).join("");
-    bx.innerHTML=`<div class="k">new branch output</div><pre>${E(res.branch_output)}</pre>`+
-                 `<div class="k">branch steps ${div!=null?"(diverges at "+div+")":""}</div>${bs}`;
+    bx.innerHTML=`<div class="branchhead">✅ new branch${div!=null?` · diverges at step ${div}`:""}</div>`+
+                 `<div class="fl">output</div><pre>${E(res.branch_output)}</pre>`+
+                 `<div class="fl">branch steps</div>${bs}`;
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
   finally{btn.disabled=false; btn.innerHTML="▶ Fork &amp; Run live";}
 }
@@ -627,10 +689,10 @@ function renderChat(){
   const log=document.getElementById("chatlog"); if(!log)return;
   log.innerHTML=CHAT.map(m=>{
     if(m.role==="user")return `<div class="msg u">${E(m.content)}</div>`;
-    let h=`<div class="msg a">${E(m.content).replace(/\n/g,"<br>")}</div>`;
+    let h=`<div class="msg a">${m.content==="…thinking"?'<span class="spin">⟳</span> thinking…':md(m.content)}</div>`;
     (m.suggestions||[]).forEach((s,i)=>{
-      if(s.kind==="fork") h+=`<button class="adopt" data-turn="${s.turn}" data-edit="${E(s.edit)}">🍴 Adopt: fork turn ${s.turn}</button>`;
-      else if(s.kind==="policy") h+=`<div class="cop-edit">policy: deny ${E((s.deny||[]).join(", "))} · confirm ${E((s.confirm||[]).join(", "))}</div>`;
+      if(s.kind==="fork") h+=`<button class="adopt" data-turn="${s.turn}" data-edit="${E(s.edit)}">🍴 Adopt · fork model call #${s.turn}</button>`;
+      else if(s.kind==="policy") h+=`<div class="cop-edit">🛡 policy: deny ${E((s.deny||[]).join(", "))||"—"} · confirm ${E((s.confirm||[]).join(", "))||"—"}</div>`;
     });
     return h;
   }).join("");

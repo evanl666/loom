@@ -165,3 +165,39 @@ def test_copilot_chat_parses_fork_suggestion():
     assert "test removing the refund" in out["reply"]
     assert "```fork" not in out["reply"]  # the fenced block is stripped from the human text
     assert out["suggestions"] == [{"kind": "fork", "turn": 1, "edit": "do NOT issue the refund"}]
+
+
+def test_fork_can_override_system_and_tools(tmp_path):
+    from loom import Agent, tool
+    from loom.debugger import DebugSession
+    from loom.providers import ModelResponse, ScriptedProvider, ToolCall
+
+    @tool
+    def a() -> str:
+        "a"
+        return "A"
+
+    @tool
+    def b() -> str:
+        "b"
+        return "B"
+
+    prov = ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("1", "a", {})], stop_reason="tool_use"),
+        ModelResponse(text="done", stop_reason="end_turn"),
+        ModelResponse(text="forked", stop_reason="end_turn"),
+    ])
+    agent = Agent(model=prov, tools=[a, b], system="orig")
+    p = tmp_path / "t.loom.json"
+    agent.run("go").save(str(p))
+    sess = DebugSession(str(p), agent=agent)
+
+    # _agent_for builds a new agent with the overrides
+    forked_agent = sess._agent_for("keep", system="NEW SYSTEM", tools=["b"])
+    assert forked_agent.system == "NEW SYSTEM"
+    assert set(forked_agent.tools) == {"b"}  # only the enabled tool
+    # unchanged config reuses the exact agent
+    assert sess._agent_for("keep") is agent
+    # the fork endpoint path runs with overrides
+    res = sess.fork(at=1, system="terse", tools=["a", "b"])
+    assert "branch_steps" in res
