@@ -226,3 +226,30 @@ def test_sensitive_value_scan_is_linear_not_quadratic():
     assert len(found) == 20000
     assert all(k == "credit-card" for k, _ in found)
     assert elapsed < 1.0  # was ~4s before the fix
+
+
+def test_taint_detects_exfil_through_a_send_style_tool():
+    """A custom egress tool whose name isn't a hardcoded keyword (send_report,
+    upload_file, post_message...) used to get no capability, so taint_paths
+    skipped it and MISSED the exfiltration -- a security false-negative. Value
+    lineage must connect a read secret to a send-style sink."""
+    from loom.taint import taint_paths
+
+    secret = "sk-ant-api03-" + "A1b2C3d4" * 11
+    trace = {
+        "log": [
+            {"seq": 0, "kind": "model", "result": {"tool_calls": [
+                {"id": "t1", "name": "read_config", "input": {}}], "stop_reason": "tool_use"}},
+            {"seq": 1, "kind": "tool:read_config", "result": f"API_KEY={secret}"},
+            {"seq": 2, "kind": "model", "result": {"tool_calls": [
+                {"id": "t2", "name": "send_report", "input": {"body": f"leaking {secret}"}}],
+                "stop_reason": "tool_use"}},
+            {"seq": 3, "kind": "tool:send_report", "result": "sent"},
+        ],
+        "prompt": "x", "output": "done",
+    }
+    paths = taint_paths(trace)
+    assert len(paths) == 1
+    assert paths[0]["source"]["tool"] == "read_config"
+    assert paths[0]["sink"]["tool"] == "send_report"
+    assert paths[0]["severity"] == "critical"

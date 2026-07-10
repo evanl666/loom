@@ -116,3 +116,15 @@ def test_cli_tools_manifest(tmp_path, capsys, monkeypatch):
     assert "run" in out and "exec" in out and "declared" in out
     assert main(["tools", "--agent", "agentmod:agent", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["tool"] == "run"
+
+
+def test_egress_verbs_are_network_without_flagging_reads():
+    """Send/upload/publish-style names imply reaching off the box; get/list/
+    read/compute names must not be misclassified as network."""
+    from loom.capabilities import capabilities
+
+    for name in ["send_report", "upload_file", "post_message", "publish_event",
+                 "notify_user", "transmit_data", "submit_form", "push_alert"]:
+        assert "network" in capabilities(name), name
+    for name in ["get_report", "list_posts", "read_file", "compute_sum", "prune_logs"]:
+        assert "network" not in capabilities(name), name

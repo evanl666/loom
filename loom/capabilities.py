@@ -72,7 +72,16 @@ _WRITE_NAMES = ["write*", "edit*", "create_*", "*_create", "update_*", "*_update
 _EXEC_NAMES = ["sh", "bash*", "zsh", "shell*", "*shell*", "run", "run_*", "*_run",
                "exec*", "*_exec*", "*command*", "terminal*", "*execute*", "python*", "node*"]
 _NETWORK_NAMES = ["*http*", "*_url", "url_*", "*download*", "curl*", "wget*", "*request*",
-                  "api_*", "*_api", "fetch*", "*webhook*", "*email*", "*slack*"]
+                  "api_*", "*_api", "fetch*", "*webhook*", "*email*", "*slack*",
+                  # egress verbs: a tool that SENDS something reaches off the box.
+                  # These are the common exfiltration sinks that name-inference
+                  # used to miss entirely (e.g. send_report, upload_file,
+                  # post_message), silently defeating taint/DLP. Declared
+                  # capabilities remain the reliable path; this widens the fallback.
+                  "send*", "send_*", "*_send", "sendmail*", "post_*", "upload*",
+                  "*upload*", "publish*", "*publish", "notify*", "*notify",
+                  "transmit*", "deliver*", "dispatch*", "*sms*", "tweet*",
+                  "submit*", "push_*", "mail_*", "*_mail"]
 
 
 def capabilities(name: str, tool_input=None, declared: "set[str] | None" = None) -> "set[str]":
