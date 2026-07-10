@@ -56,11 +56,14 @@ class EffectEntry:
 
     @staticmethod
     def from_dict(d: dict) -> "EffectEntry":
+        # Tolerant of hand-edited / corrupted traces: a missing field degrades
+        # (breaks strict-replay matching at worst) rather than crashing every
+        # analyzer that loads the trace through this chokepoint.
         return EffectEntry(
-            seq=d["seq"],
-            kind=d["kind"],
-            key=d["key"],
-            result=d["result"],
+            seq=d.get("seq", 0),
+            kind=d.get("kind", ""),
+            key=d.get("key", ""),
+            result=d.get("result"),
             depth=d.get("depth", 0),
         )
 

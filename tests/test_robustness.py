@@ -52,3 +52,14 @@ def test_effect_dicts_normalizes_the_log():
     assert effect_dicts({"log": "oops"}) == []
     assert effect_dicts({"log": ["x", {"seq": 0, "kind": "model"}, 5]}) == [{"seq": 0, "kind": "model"}]
     assert effect_dicts({}) == []
+
+
+def test_effectentry_from_dict_tolerates_missing_keys():
+    """The trace/journal load chokepoint must not crash on a corrupted effect
+    entry missing seq/kind/key/result -- it should degrade, so analyzers can
+    still process the rest of the trace."""
+    from loom.effect import EffectEntry
+
+    for d in [{}, {"seq": 3}, {"kind": "model"}, {"result": {"text": "hi"}}]:
+        e = EffectEntry.from_dict(d)  # must not raise
+        assert isinstance(e.seq, int) and isinstance(e.kind, str)

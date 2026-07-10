@@ -47,8 +47,8 @@ class Item:
     @staticmethod
     def from_dict(d: dict) -> "Item":
         return Item(
-            role=d["role"],
-            content=d["content"],
+            role=d.get("role", "user"),
+            content=d.get("content", ""),
             source=d.get("source", ""),
             pinned=d.get("pinned", False),
             tokens=d.get("tokens", 0),
