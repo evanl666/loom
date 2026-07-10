@@ -51,6 +51,51 @@ def mcp_manifest(tools: "list[Tool]") -> "list[dict]":
     return out
 
 
+def mcp_trust(manifest: "list[dict]") -> dict:
+    """A 0-100 trust score for an MCP server's tool surface, from its manifest.
+
+    "Should I install this server?" -- before you let an agent reach it. Lower =
+    riskier: dangerous capabilities (money/destructive/db-write/browser-submit),
+    broad reach (exec/network), secret/PII access, and tools that didn't declare
+    their own capabilities (opaque). Returns {score, grade, factors, risky}.
+    """
+    weights = {
+        "money_movement": 16, "destructive": 16, "database_write": 12,
+        "browser_submit": 10, "exec": 12, "secret": 9, "pii_access": 8,
+        "network": 5, "user_communication": 6, "write": 3,
+    }
+    factors: dict[str, int] = {}
+    undeclared = 0
+    for m in manifest:
+        caps = set(m.get("capabilities") or [])
+        for cap, w in weights.items():
+            if cap in caps:
+                factors[cap] = factors.get(cap, 0) + w
+        # a tool with real reach that didn't declare its contract is opaque
+        if not m.get("declared") and (caps - {"idempotent"}):
+            undeclared += 1
+    if undeclared:
+        factors["undeclared-tools"] = min(20, undeclared * 4)
+    score = max(0, 100 - sum(factors.values()))
+    grade = ("A" if score >= 90 else "B" if score >= 75 else "C" if score >= 55
+             else "D" if score >= 35 else "F")
+    risky = sorted(m["tool"] for m in manifest
+                   if set(m.get("capabilities") or []) &
+                   {"money_movement", "destructive", "database_write", "browser_submit", "exec"})
+    return {"score": score, "grade": grade, "factors": factors,
+            "tools": len(manifest), "risky": risky}
+
+
+def describe_mcp_trust(trust: dict) -> str:
+    top = sorted(trust["factors"].items(), key=lambda kv: -kv[1])[:5]
+    reasons = ", ".join(f"{k} -{v}" for k, v in top) or "clean surface"
+    line = (f"trust score: {trust['score']}/100 (grade {trust['grade']}) "
+            f"over {trust['tools']} tool(s)\n  deductions: {reasons}")
+    if trust["risky"]:
+        line += f"\n  ⚠ high-reach tools: {', '.join(trust['risky'])}"
+    return line
+
+
 def guarded_tools(tools: "list[Tool]", shield) -> "list[Tool]":
     """Wrap tools so every call is screened by ``shield`` before it runs.
 

@@ -86,6 +86,51 @@ def analyze_cost(data: dict) -> dict:
     }
 
 
+def cost_patches(data: dict) -> "list[dict]":
+    """Concrete, copy-pasteable remedies derived from the burn analysis.
+
+    Turns the burn *findings* into specific config/CLI patches with computed
+    parameters -- the "cost surgeon": not "reduce context" but
+    ``Agent(compact_after=3)``, not "the result is big" but a threshold.
+    """
+    c = analyze_cost(data)
+    turns = c["per_turn"]
+    patches: list[dict] = []
+    for f in c["findings"]:
+        if f["pattern"] == "context bloat":
+            # compact once the growing history is a few turns deep
+            inputs = [t["input"] for t in turns if t["input"]]
+            after = max(2, next((i for i, v in enumerate(inputs) if v > 2 * inputs[0]),
+                                len(inputs) // 2) or 2)
+            patches.append({
+                "title": "cap context growth",
+                "patch": f"Agent(..., compact_after={after}, compact_keep=4)",
+                "why": f"{f['detail']}; compaction summarizes history so input stops climbing"})
+        elif f["pattern"] == "looping":
+            tool = c["top_tools"][0][0] if c["top_tools"] else "the tool"
+            patches.append({
+                "title": "stop the loop",
+                "patch": "Agent(..., cache=EffectCache('dev-cache.jsonl'), "
+                         "kinds=('model','tool:*'))  # if calls are identical",
+                "why": f"{f['detail']}; cache identical {tool} calls, or lower max_steps / "
+                       "add a stop condition"})
+        elif f["pattern"] == "tool-result explosion":
+            patches.append({
+                "title": "shrink the giant result",
+                "patch": "loom artifacts externalize <trace> --threshold 8kb",
+                "why": f"{f['detail']}; externalize big tool results out of the context window"})
+    return patches
+
+
+def describe_patches(patches: "list[dict]") -> str:
+    if not patches:
+        return "no cost patches -- nothing burning."
+    lines = [f"{len(patches)} cost patch(es):"]
+    for p in patches:
+        lines += [f"\n  ▸ {p['title']}", f"      {p['patch']}", f"      why: {p['why']}"]
+    return "\n".join(lines)
+
+
 def describe_cost(c: dict) -> str:
     lines = [f"cost: {c['total_tokens']:,} tokens "
              f"({c['input_tokens']:,} in / {c['output_tokens']:,} out) "

@@ -1284,7 +1284,7 @@ def _cmd_alert(args: argparse.Namespace) -> int:
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
     """MCP gateway: a capability manifest for an MCP server's tools."""
-    from .mcp import MCPServer, mcp_manifest
+    from .mcp import MCPServer, describe_mcp_trust, mcp_manifest, mcp_trust
 
     try:
         server = MCPServer(args.command, args=args.args or [])
@@ -1296,9 +1296,11 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         manifest = mcp_manifest(server.tools())
     finally:
         server.close()
+    trust = mcp_trust(manifest)
     if args.json:
-        print(json.dumps(manifest, indent=2))
+        print(json.dumps({"manifest": manifest, "trust": trust}, indent=2))
         return 0
+    print(describe_mcp_trust(trust) + "\n")
     print(f"MCP server exposes {len(manifest)} tool(s):")
     for m in manifest:
         risk = f"  ⚠ {m['risk']}" if m["risk"] else ""
@@ -1497,13 +1499,17 @@ def _cmd_harden(args: argparse.Namespace) -> int:
 
 def _cmd_cost(args: argparse.Namespace) -> int:
     """Token-burn root cause: bloat / looping / overfetch / result explosion."""
-    from .cost import analyze_cost, describe_cost
+    from .cost import analyze_cost, cost_patches, describe_cost, describe_patches
 
-    c = analyze_cost(_load_trace_json(args.path))
+    data = _load_trace_json(args.path)
+    c = analyze_cost(data)
     if args.json:
-        print(json.dumps(c, indent=2))
+        out = {**c, "patches": cost_patches(data)} if args.fix else c
+        print(json.dumps(out, indent=2))
     else:
         print(describe_cost(c))
+        if args.fix:
+            print("\n" + describe_patches(cost_patches(data)))
     return 1 if (args.gate and c["findings"]) else 0
 
 
@@ -3148,6 +3154,7 @@ def build_parser() -> argparse.ArgumentParser:
     ct = sub.add_parser("cost", help="token-burn RCA: bloat/looping/overfetch/result-explosion")
     ct.add_argument("path")
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
+    ct.add_argument("--fix", action="store_true", help="also emit concrete cost patches")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
 
