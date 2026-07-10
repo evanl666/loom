@@ -70,3 +70,18 @@ def test_cli_externalize_and_inline(tmp_path, capsys):
     assert "inlined artifacts" in capsys.readouterr().out
     data = json.load(open(trace))
     assert data["log"][1]["result"] == "X" * 50_000
+
+
+def test_inline_rejects_non_sha_pointers_no_path_traversal(tmp_path):
+    """A hostile trace pointer must not steer os.path.join out of the blob dir.
+    An absolute path, ../.. traversal, or a device/fifo name would let `inline`
+    open an arbitrary file (DoS via /dev/zero, escape the blob dir); only a real
+    64-char hex digest is allowed near the filesystem."""
+    from loom.artifacts import _MARK, inline
+
+    blobdir = str(tmp_path / "blobs")
+    for bad in ["../../../etc/passwd", "/etc/passwd", "/dev/zero", "not-hex", "", "a" * 63, "A" * 64]:
+        data = {"log": [{"kind": "tool:x", "result": {_MARK: {"sha": bad, "bytes": 10}}}]}
+        out, missing = inline(data, blobdir)
+        assert bad in missing
+        assert out["log"][0]["result"] == data["log"][0]["result"]  # left as a pointer

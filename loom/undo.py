@@ -38,6 +38,18 @@ def _in_scope(path: str, only: str) -> bool:
     return path == only or path.startswith(only + "/")
 
 
+def _contained(cwd: str, path: str) -> bool:
+    """Does ``path`` resolve to somewhere INSIDE ``cwd``? A recorded path is
+    always repo-relative, but a hostile/hand-crafted trace could carry an
+    absolute path or ``../..`` -- undo runs os.remove, so anything that escapes
+    the tree must never be touched."""
+    if not path or os.path.isabs(path):
+        return False
+    root = os.path.realpath(cwd)
+    target = os.path.realpath(os.path.join(root, path))
+    return target == root or target.startswith(root + os.sep)
+
+
 def plan_undo(data: dict, only: str = "") -> "list[dict]":
     """The files loom undo would touch (the agent's own, in scope)."""
     changes = (data.get("workspace") or {}).get("changes") or {}
@@ -54,8 +66,14 @@ def undo(data: dict, cwd: str, only: str = "", dry_run: bool = False,
     from .workspace import _file_sha
 
     files = plan_undo(data, only=only)
+    escaping = [f for f in files if not _contained(cwd, f.get("path", ""))]
+    files = [f for f in files if _contained(cwd, f.get("path", ""))]
     if not files:
-        return True, ["nothing to undo (no agent file changes recorded)"]
+        msg = "nothing to undo (no agent file changes recorded)"
+        if escaping:
+            return False, [f"refused: {len(escaping)} recorded path(s) resolve outside "
+                           f"the working tree and were skipped"]
+        return True, [msg]
 
     # A file that changed again since the recording no longer holds what the
     # agent left -- reverting it would clobber that newer work.
@@ -67,10 +85,11 @@ def undo(data: dict, cwd: str, only: str = "", dry_run: bool = False,
             *[f"  {f['path']}" for f in moved],
         ]
 
+    skipped = [f"  skipped (outside the tree): {f.get('path', '')}" for f in escaping]
     if dry_run:
-        return True, ["would undo:", *[f"  {f['status']} {f['path']}" for f in files]]
+        return True, ["would undo:", *[f"  {f['status']} {f['path']}" for f in files], *skipped]
 
-    ok, log = True, []
+    ok, log = True, list(skipped)
     for f in files:
         path, status = f["path"], f.get("status", "")[:1]
         if status == "A":  # the agent created it -> remove it

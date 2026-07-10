@@ -86,3 +86,23 @@ def test_only_is_segment_aware():
     assert _in_scope("src", "src")
     assert not _in_scope("src2/a.py", "src")    # the old startswith footgun
     assert _in_scope("src/a.py", "src/")
+
+
+def test_undo_refuses_paths_outside_the_working_tree(tmp_path):
+    """A hostile/hand-crafted trace could record an absolute or ../.. path;
+    undo runs os.remove, so anything escaping the tree must be refused."""
+    import os
+    import subprocess
+
+    from loom.undo import undo
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo)
+    victim = tmp_path / "victim.txt"
+    victim.write_text("precious")
+
+    data = {"workspace": {"changes": {"files": [{"path": str(victim), "status": "A"}]}}}
+    ok, log = undo(data, str(repo), force=True)
+    assert not ok
+    assert victim.exists() and victim.read_text() == "precious"

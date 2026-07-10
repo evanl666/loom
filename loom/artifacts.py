@@ -24,6 +24,13 @@ import os
 _MARK = "_loom_artifact"
 
 
+def _is_sha256(s: str) -> bool:
+    """A blob name is exactly a 64-char lowercase hex digest -- nothing else is
+    allowed near os.path.join, so an untrusted pointer can't traverse out of the
+    blob dir (../.., an absolute path, /dev/zero, a fifo...)."""
+    return isinstance(s, str) and len(s) == 64 and all(c in "0123456789abcdef" for c in s)
+
+
 def _blobdir_for(trace_path: str, blobdir: str) -> str:
     return blobdir or (trace_path[: -len(".loom.json")] if trace_path.endswith(".loom.json")
                        else trace_path) + ".artifacts"
@@ -71,6 +78,9 @@ def inline(data: dict, blobdir: str) -> "tuple[dict, list[str]]":
         if not _is_pointer(result):
             continue
         sha = result[_MARK].get("sha", "")
+        if not _is_sha256(sha):
+            missing.append(sha)  # malformed/hostile pointer: never touch the path
+            continue
         path = os.path.join(blobdir, sha)
         try:
             with open(path, "rb") as f:
