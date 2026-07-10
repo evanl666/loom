@@ -1507,6 +1507,30 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     return 1 if (args.gate and c["findings"]) else 0
 
 
+def _cmd_debug(args: argparse.Namespace) -> int:
+    """Open an interactive step-debugger for a trace (step through + fork live)."""
+    import webbrowser
+
+    from .debugger import DebugServer
+
+    agent = None
+    if args.agent:
+        agent, err = _load_agent(args.agent)
+        if agent is None:
+            raise CLIError(err)
+    server = DebugServer(args.path, agent=agent, port=args.port, host=args.host)
+    url = f"http://{args.host}:{server.port}/"
+    mode = "step + fork live" if agent else "read-only (pass --agent to fork live)"
+    print(f"loom debugger [{mode}]: {url}", file=sys.stderr)
+    if not args.no_open:
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        server.shutdown()
+    return 0
+
+
 def _cmd_fuzz(args: argparse.Namespace) -> int:
     """Prove the analyzers tolerate hostile / malformed traces (CI robustness)."""
     from .fuzz import describe_fuzz, fuzz_check
@@ -3100,6 +3124,14 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
+
+    db = sub.add_parser("debug", help="interactive step-debugger: step through a run + fork it live")
+    db.add_argument("path")
+    db.add_argument("--agent", default="", help="module:attr for live re-forking (Agent or factory)")
+    db.add_argument("--port", type=int, default=8790)
+    db.add_argument("--host", default="127.0.0.1")
+    db.add_argument("--no-open", action="store_true", help="don't open a browser")
+    db.set_defaults(func=_cmd_debug)
 
     fz = sub.add_parser("fuzz", help="stress analyzers with hostile/malformed traces (CI robustness)")
     fz.add_argument("path", nargs="?", default="",
