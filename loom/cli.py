@@ -1613,6 +1613,13 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
 
 def _cmd_memory(args: argparse.Namespace) -> int:
     """Memory forensics: poisoned recalls, contamination chains, future-poison."""
+    if args.memory_cmd == "audit":
+        from .memfirewall import audit_memory, describe_audit
+
+        a = audit_memory(args.directory)
+        print(json.dumps(a, indent=2) if args.json else describe_audit(a))
+        return 1 if (args.gate and a["untrusted"]) else 0
+
     from .memforensics import describe_memforensics, memory_forensics
 
     r = memory_forensics(_load_trace_json(args.path))
@@ -3499,6 +3506,11 @@ def build_parser() -> argparse.ArgumentParser:
     mem_f.add_argument("--gate", action="store_true", help="exit 1 on high/critical")
     mem_f.add_argument("--json", action="store_true")
     mem_f.set_defaults(func=_cmd_memory)
+    mem_a = memsub.add_parser("audit", help="provenance/trust of a memory store directory")
+    mem_a.add_argument("directory")
+    mem_a.add_argument("--gate", action="store_true", help="exit 1 if any poisoned memory")
+    mem_a.add_argument("--json", action="store_true")
+    mem_a.set_defaults(func=_cmd_memory)
 
     ap = sub.add_parser("autopilot", help="incident → full fix bundle (autopsy/movie/diagnosis/patch/PR)")
     ap.add_argument("path")
