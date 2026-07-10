@@ -1720,6 +1720,30 @@ def _cmd_intent(args: argparse.Namespace) -> int:
     return 1 if (args.gate and report["misaligned"]) else 0
 
 
+def _cmd_assert(args: argparse.Namespace) -> int:
+    """Check behavioural assertions against a run -- the debugger's assertion
+    bar as a CI gate. Pass -e per assertion, or -f a file (one per line)."""
+    from .assertions import check_assertions
+
+    exprs: list[str] = list(args.expr or [])
+    if args.file:
+        with open(args.file) as f:
+            exprs += f.read().splitlines()
+    if not exprs:
+        print("no assertions given -- pass -e '<assertion>' or -f <file>")
+        return 2
+    r = check_assertions(_load_trace_json(args.path), exprs)
+    if args.json:
+        print(json.dumps(r, indent=2))
+    else:
+        for x in r["results"]:
+            mark = "⚠" if "error" in x else ("✓" if x.get("ok") else "✗")
+            detail = x.get("detail") or x.get("error") or ""
+            print(f"  {mark} {x['expr']}" + (f"   ({detail})" if detail else ""))
+        print(f"\n{r['passed']}/{r['total']} passed" + (" 🎉" if r["all_pass"] else ""))
+    return 0 if r["all_pass"] else 1
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     """Security posture for an agent's tool surface (a run or a corpus)."""
     from .scan import describe_scan, scan
@@ -3648,6 +3672,14 @@ def build_parser() -> argparse.ArgumentParser:
     it.add_argument("--gate", action="store_true", help="exit 1 if any action is off-mission")
     it.add_argument("--json", action="store_true", help="machine-readable")
     it.set_defaults(func=_cmd_intent)
+
+    asrt = sub.add_parser("assert", help="check behavioural assertions against a run (CI gate)")
+    asrt.add_argument("path")
+    asrt.add_argument("-e", "--expr", action="append", metavar="ASSERTION",
+                      help="an assertion, e.g. 'never issue_refund*' (repeatable)")
+    asrt.add_argument("-f", "--file", help="read assertions from a file, one per line")
+    asrt.add_argument("--json", action="store_true", help="machine-readable")
+    asrt.set_defaults(func=_cmd_assert)
 
     sc = sub.add_parser("scan", help="agent supply-chain security posture (tool surface + gaps)")
     sc.add_argument("path", help="a trace or a directory of traces")

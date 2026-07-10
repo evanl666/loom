@@ -352,6 +352,7 @@ class DebugSession:
         from .diff import score_breakdown
         label = (append[:40] or (f"system: {system[:24]}" if system else "")
                  or (f"tools: {','.join(tools)}" if tools else "")
+                 or (f"fault@{','.join(map(str, sorted(set_results)))}" if set_results else "")
                  or (f"model: {model}" if model != "keep" else "re-run"))
         node = {"id": len(self.branches) + 1, "at": at, "label": label,
                 "model": model, "output": bdata.get("output", "")[:120],
@@ -699,6 +700,36 @@ class _Handler(BaseHTTPRequestHandler):
             except Exception as e:  # noqa: BLE001
                 self._json(502, {"error": f"copilot error: {type(e).__name__}: {e}"})
             return
+        if self.path == "/api/assert":
+            from .assertions import check_assertions
+            try:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                self._json(200, check_assertions(sess.data, str(body.get("q", ""))))
+            except (ValueError, TypeError) as e:
+                self._json(400, {"error": str(e)})
+            return
+        if self.path == "/api/explain":
+            try:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                step = int(body.get("step", 0))
+            except (ValueError, TypeError):
+                self._json(400, {"error": "bad json body"})
+                return
+            if not sess.copilot_model:
+                self._json(400, {"error": "no copilot model -- start with --copilot-model MODEL or --agent"})
+                return
+            q = ("In one short paragraph, explain what happened at this step and WHY "
+                 "the model did it -- what in the context led here. If it looks wrong "
+                 "or risky, say so plainly.")
+            try:
+                out = copilot_chat(sess.data, [{"role": "user", "content": q}],
+                                   sess.copilot_model, step=step)
+                self._json(200, out)
+            except Exception as e:  # noqa: BLE001
+                self._json(502, {"error": f"copilot error: {type(e).__name__}: {e}"})
+            return
         if self.path != "/api/fork":
             self._json(404, {"error": "not found"})
             return
@@ -846,6 +877,21 @@ button.on{background:#1d3a5c;color:#dbeaff}
 .lane{font-size:9px;padding:0 5px;border-radius:8px;margin-right:5px;text-transform:uppercase;letter-spacing:.3px}
 .lane.l0{background:#25333f;color:#7fc3ff}.lane.l1{background:#2d2438;color:#c79bff}.lane.l2{background:#1f3a2a;color:#7ee0a0}.lane.l3{background:#3a2323;color:#ff9b9b}
 .step.swim.d1{margin-left:16px}.step.swim.d2{margin-left:32px}.step.swim.d3{margin-left:48px}
+#palette{position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;justify-content:center;align-items:flex-start;z-index:50}
+#palette.hidden{display:none}
+#palbox{margin-top:11vh;width:min(560px,90vw);background:#17171b;border:1px solid #3a3a44;border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.6);overflow:hidden}
+#palin{width:100%;box-sizing:border-box;background:#17171b;border:0;border-bottom:1px solid #2a2a30;color:#e6e6e6;font:inherit;font-size:15px;padding:13px 16px;outline:none}
+#pallist{max-height:52vh;overflow:auto}
+.palitem{padding:8px 16px;cursor:pointer;display:flex;gap:10px;align-items:center;font-size:13px;border-bottom:1px solid #1c1c20}
+.palitem .pk{font-size:10px;color:#8a8a92;text-transform:uppercase;letter-spacing:.3px;min-width:52px}
+.palitem.sel{background:#1d3a5c}.palitem:hover{background:#22222a}
+.palitem .pm{color:#8a8a92;font-size:11px;margin-left:auto}
+#assertwrap textarea{width:100%;box-sizing:border-box;background:#161619;color:#e6e6e6;border:1px solid #33333c;border-radius:8px;padding:9px 11px;font:12px ui-monospace,Menlo,monospace;min-height:92px}
+.asr{display:flex;gap:8px;align-items:baseline;padding:4px 8px;border-radius:6px;font-size:12.5px;margin:3px 0}
+.asr.ok{background:#152a1c}.asr.fail{background:#2c1a1a}.asr.err{background:#2a2418}
+.asr .ai{font-weight:600;min-width:18px}.asr .ad{color:#8a8a92;font-size:11px;margin-left:auto}
+#explainbtn{background:#25203a;border-color:#443a66;color:#c9b8ff;margin-top:8px}
+#explainbtn:hover{background:#2e2748}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -861,8 +907,10 @@ button.on{background:#1d3a5c;color:#dbeaff}
       <input id="brk" placeholder="⏹ break: tool:send_email · cap:network" title="conditional breakpoint" style="margin-left:12px;width:210px">
       <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
       <button id="branches" title="the branch tree">🌳</button>
+      <button id="assertbtn" title="check behavioural assertions against this run">✔ assert</button>
       <button id="swim" title="swimlanes by agent/subagent depth">⇄</button>
       <button id="export" title="download a shareable .loomdebug session">💾</button>
+      <button id="palettebtn" title="command palette (⌘K / Ctrl-K)">⌘K</button>
       <button id="copilot" style="margin-left:auto">🤖 Copilot</button>
     </div>
     <div id="copilotpanel" class="hidden"></div>
@@ -871,6 +919,9 @@ button.on{background:#1d3a5c;color:#dbeaff}
       <span class="muted" id="tlinfo"></span><div id="timeline"></div></div>
   </div>
 </div>
+<div id="palette" class="hidden"><div id="palbox">
+  <input id="palin" placeholder="jump to a step or run a command — type to filter, ↑↓ Enter, Esc">
+  <div id="pallist"></div></div></div>
 <script>
 const E=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 function md(t){ // minimal, XSS-safe markdown: escape first, protect code blocks
@@ -986,6 +1037,7 @@ function renderDetail(){
     if(s.state_diff.detail) h+=`<pre class="diff">${diffHtml(typeof s.state_diff.detail==="string"?s.state_diff.detail:J(s.state_diff.detail))}</pre>`;
   }
   h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
+  if(CAN_CHAT) h+=`<button id="explainbtn" title="ask the copilot to explain this step">🔎 Explain this step</button><div id="explainout"></div>`;
   if(s.type==="call") h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
   h+=`<div id="dynpanels"></div>`;  // pack-contributed panels (SQL plan, file, screenshot…)
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
@@ -1022,6 +1074,7 @@ function renderDetail(){
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
   const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
   const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
+  const eb=document.getElementById("explainbtn"); if(eb) eb.onclick=()=>explainStep(s.step);
   loadPanels(s.step);
   if(s.type==="call"&&canFork){const dp=document.getElementById("dryrunbtn"); if(dp)dp.onclick=doDryRun;}
 }
@@ -1137,10 +1190,91 @@ async function doFork(){
   finally{btn.disabled=false; btn.innerHTML="▶ Fork &amp; Run live";}
 }
 document.addEventListener("keydown",e=>{
-  if(e.target.tagName==="TEXTAREA")return;
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openPalette();return;}
+  if(!document.getElementById("palette").classList.contains("hidden")){paletteKey(e);return;}
+  if(e.target.tagName==="TEXTAREA"||e.target.tagName==="INPUT")return;
   if(e.key==="ArrowLeft")select(cur-1); else if(e.key==="ArrowRight")select(cur+1);
   else if(e.key==="Home")select(0); else if(e.key==="End")select(steps.length-1);
 });
+// ---- explain this step (copilot) ----
+async function explainStep(step){
+  const out=document.getElementById("explainout"); if(!out)return;
+  out.innerHTML='<div class="muted">asking the copilot…</div>';
+  try{
+    const r=await (await fetch("/api/explain",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({step})})).json();
+    out.innerHTML=r.error?`<div class="muted">${E(r.error)}</div>`:`<div class="cop-sum">${md(r.reply||"")}</div>`;
+  }catch(_){out.innerHTML='<div class="muted">explain failed</div>';}
+}
+// ---- assertion bar ----
+async function showAssert(){
+  const p=document.getElementById("copilotpanel");
+  if(!p.classList.contains("hidden")&&p.dataset.view==="assert"){p.classList.add("hidden");return;}
+  p.classList.remove("hidden"); p.dataset.view="assert";
+  p.innerHTML=`<div class="k">✔ behavioural assertions <span class="muted">— one per line; turns your expectations into a repeatable check</span></div>
+    <div id="assertwrap"><textarea id="asrin" placeholder="output contains order 42
+never issue_refund*
+no blocked
+calls get_*
+steps < 20
+tokens < 50000"></textarea>
+    <button id="asrgo" style="margin-top:6px">▶ check</button></div><div id="asrout"></div>`;
+  document.getElementById("asrgo").onclick=runAssert;
+}
+async function runAssert(){
+  const q=document.getElementById("asrin").value;
+  const out=document.getElementById("asrout"); out.innerHTML='<div class="muted">checking…</div>';
+  const r=await (await fetch("/api/assert",{method:"POST",headers:{"content-type":"application/json"},
+    body:JSON.stringify({q})})).json();
+  if(r.error){out.innerHTML=`<div class="muted">${E(r.error)}</div>`;return;}
+  const rows=r.results.map(x=>{
+    const cls=x.error?"err":(x.ok?"ok":"fail"), icon=x.error?"⚠":(x.ok?"✓":"✗");
+    return `<div class="asr ${cls}"><span class="ai">${icon}</span><span>${E(x.expr)}</span><span class="ad">${E(x.detail||x.error||"")}</span></div>`;
+  }).join("");
+  const banner=r.total?`<div class="k">${r.passed}/${r.total} passed ${r.all_pass?"🎉":""}</div>`:"";
+  out.innerHTML=banner+rows;
+}
+// ---- command palette (⌘K) ----
+let PAL=[], PALSEL=0;
+function paletteItems(){
+  const items=steps.map((s,i)=>({kind:s.type,label:(s.type==="call"?"🔧 "+s.tool:s.type==="answer"?"✅ final answer":"💭 reasoning"),
+    meta:"call "+((s.replay||{}).turn??s.step)+(s.risk?" ⚠"+s.risk:""),run:()=>select(i)}));
+  const cmds=[
+    {kind:"cmd",label:"🎯 jump to root cause",meta:"first bad step",run:gotoRootCause},
+    {kind:"cmd",label:"🌳 branch tree",meta:"compare / walk branches",run:showBranches},
+    {kind:"cmd",label:"✔ assertions",meta:"check expectations",run:showAssert},
+    {kind:"cmd",label:"🤖 Copilot",meta:"chat",run:()=>{document.getElementById("copilotpanel").dataset.view="chat";loadCopilot();}},
+    {kind:"cmd",label:"▶ play the run",meta:"animate",run:()=>{togglePlay();}},
+    {kind:"cmd",label:"⇄ swimlanes",meta:"by agent depth",run:toggleSwim},
+    {kind:"cmd",label:"💾 export session",meta:".loomdebug",run:exportSession},
+    {kind:"cmd",label:"⏮ first step",meta:"",run:()=>select(0)},
+    {kind:"cmd",label:"⏭ last step",meta:"",run:()=>select(steps.length-1)},
+  ];
+  return items.concat(cmds);
+}
+function openPalette(){
+  const p=document.getElementById("palette"); p.classList.remove("hidden");
+  const inp=document.getElementById("palin"); inp.value=""; PALSEL=0;
+  renderPalette(""); inp.focus();
+  inp.oninput=()=>{PALSEL=0;renderPalette(inp.value);};
+}
+function closePalette(){document.getElementById("palette").classList.add("hidden");}
+function renderPalette(q){
+  const all=paletteItems(); q=q.toLowerCase().trim();
+  PAL=q?all.filter(x=>(x.label+" "+x.meta).toLowerCase().includes(q)):all;
+  const list=document.getElementById("pallist");
+  list.innerHTML=PAL.slice(0,60).map((x,i)=>
+    `<div class="palitem ${i===PALSEL?"sel":""}" data-i="${i}"><span class="pk">${E(x.kind)}</span><span>${E(x.label)}</span><span class="pm">${E(x.meta)}</span></div>`).join("")
+    ||'<div class="palitem"><span class="muted">no matches</span></div>';
+  list.querySelectorAll(".palitem[data-i]").forEach(d=>d.onclick=()=>runPalette(+d.dataset.i));
+}
+function paletteKey(e){
+  if(e.key==="Escape"){e.preventDefault();closePalette();}
+  else if(e.key==="ArrowDown"){e.preventDefault();PALSEL=Math.min(PAL.length-1,PALSEL+1);renderPalette(document.getElementById("palin").value);}
+  else if(e.key==="ArrowUp"){e.preventDefault();PALSEL=Math.max(0,PALSEL-1);renderPalette(document.getElementById("palin").value);}
+  else if(e.key==="Enter"){e.preventDefault();runPalette(PALSEL);}
+}
+function runPalette(i){const x=PAL[i]; if(!x)return; closePalette(); x.run();}
 let CHAT=[];  // conversation history
 async function loadCopilot(){
   const p=document.getElementById("copilotpanel");
@@ -1282,6 +1416,9 @@ async function exportSession(){
 }
 document.getElementById("rootcause").onclick=gotoRootCause;
 document.getElementById("branches").onclick=showBranches;
+document.getElementById("assertbtn").onclick=showAssert;
+document.getElementById("palettebtn").onclick=openPalette;
+document.getElementById("palette").onclick=e=>{if(e.target.id==="palette")closePalette();};
 document.getElementById("swim").onclick=toggleSwim;
 document.getElementById("export").onclick=exportSession;
 document.getElementById("copilot").onclick=()=>{document.getElementById("copilotpanel").dataset.view="chat";loadCopilot();};

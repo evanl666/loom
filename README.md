@@ -101,6 +101,13 @@ and journaled crash-recovery all fall out of the same primitive.
 - **Edit & re-run live:** at any turn, inject a message into the model's context
   or switch the model, hit **Fork & Run** — only the divergent tail costs a call,
   and the new branch appears beside the original with the first divergence marked.
+- **Timeline & play:** a scrubber colored by risk and sized by token cost —
+  click to jump, or hit ▶ to watch the run animate.
+- **Branch compare & walk:** fork three ways, then **diff any two branches**
+  side-by-side (winner called on score/tokens) and step through each one.
+- **Assert & explain:** check plain-English expectations (`never issue_refund`,
+  `output contains …`) against the run, ask the copilot to **explain any step**,
+  and drive it all from a **⌘K command palette**.
 
 ---
 
@@ -134,6 +141,7 @@ recorded as a replayable, taint-able trace.
 | `loom whatif --step N --result X` | **fault injection**: re-run with a tool result overridden |
 | `loom experiment "task" --system … --model …` | **A/B** prompts + models, scored & ranked |
 | `loom intent <trace> --judge` | **intent firewall**: flag actions that don't serve the request |
+| `loom assert <trace> -e "never issue_refund*"` | **behavioural assertions** as a CI gate (the debugger's assert bar) |
 | `loom canary run --agent m:a` | **honeytokens**: bait the agent, catch exfiltration |
 | `loom taint` / `loom dlp --judge` | exfiltration lineage · **semantic DLP** |
 | `loom scan` / `loom sbom` | supply-chain posture · CycloneDX **bill of materials** |
