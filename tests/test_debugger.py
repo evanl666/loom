@@ -62,3 +62,33 @@ def test_debug_server_serves_page_and_api(tmp_path):
         assert run["can_fork"] is False and len(run["steps"]) >= 2
     finally:
         server.shutdown()
+
+
+def test_context_at_reconstructs_the_frame(tmp_path):
+    from loom.debugger import context_at
+
+    path = _make_trace(tmp_path)
+    import json
+    data = json.load(open(path))
+    frame = context_at(data, 99)  # whole run
+    roles = [m["role"] for m in frame]
+    assert roles[0] == "user"  # the prompt
+    assert "assistant" in roles and "tool" in roles  # the add call + its result
+    # a mid-step frame is a prefix (never shows later steps)
+    early = context_at(data, 0)
+    assert len(early) <= len(frame)
+
+
+def test_context_endpoint(tmp_path):
+    import json
+    import threading
+    import urllib.request
+
+    server = DebugServer(_make_trace(tmp_path), agent=None, port=0)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        r = json.load(urllib.request.urlopen(
+            f"http://127.0.0.1:{server.port}/api/context?step=0", timeout=5))
+        assert r["frame"] and r["frame"][0]["role"] == "user"
+    finally:
+        server.shutdown()

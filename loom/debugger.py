@@ -27,10 +27,44 @@ from typing import Any
 
 
 def steps_for(data: dict) -> list[dict]:
-    """The run as an ordered list of inspectable Action dicts."""
+    """The run as an ordered list of inspectable Action dicts.
+
+    Builtin packs are installed first so each step carries its domain StateDiff
+    -- the file diff for a coding agent, the row diff for SQL, the DOM diff for a
+    browser agent -- i.e. the actual *code/world change* behind the step.
+    """
+    from .action import actions
+    from .packs import install_builtin
+
+    install_builtin()
+    return [a.to_dict() for a in actions(data)]
+
+
+def context_at(data: dict, step: int) -> list[dict]:
+    """The conversation the model had seen up to (and including) ``step`` --
+    the debugger's "current frame": the prompt, prior reasoning, tool calls, and
+    tool results that were in context when this step ran."""
     from .action import actions
 
-    return [a.to_dict() for a in actions(data)]
+    prompt = (data.get("episodes") or [data.get("prompt", "")])[0]
+    frame: list[dict] = [{"role": "user", "content": str(prompt), "step": -1}]
+    for a in actions(data):
+        if a.step > step:
+            break
+        if a.type in ("reason", "answer") and a.intent:
+            frame.append({"role": "assistant", "content": a.intent, "step": a.step})
+        elif a.type == "call":
+            import json as _json
+            frame.append({"role": "assistant",
+                          "content": f"→ call {a.tool}({_json.dumps(a.input, default=str)})",
+                          "step": a.step})
+            if a.observation is not None and a.observation.text:
+                frame.append({"role": "tool", "content": a.observation.text[:2000],
+                              "step": a.step, "tool": a.tool})
+        elif a.type == "ask-human":
+            frame.append({"role": "human", "content": (a.observation.text if a.observation else ""),
+                          "step": a.step})
+    return frame
 
 
 def _branch_payload(base_data: dict, branch_data: dict, at: int) -> dict:
@@ -110,6 +144,13 @@ class _Handler(BaseHTTPRequestHandler):
                 "steps": steps_for(sess.data),
                 "can_fork": sess.agent is not None,
             })
+        elif self.path.startswith("/api/context"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                step = int(parse_qs(urlparse(self.path).query).get("step", ["0"])[0])
+            except (TypeError, ValueError):
+                step = 0
+            self._json(200, {"frame": context_at(sess.data, step)})
         else:
             self._send(404, b"not found", "text/plain")
 
@@ -191,6 +232,13 @@ textarea,select{font:inherit;width:100%;background:#161619;color:#e6e6e6;border:
 .branchstep.new{background:#12261a}.branchstep.div{background:#2a2233;border-left:3px solid #c79bff;padding-left:6px}
 kbd{background:#22222a;border:1px solid #33333c;border-radius:4px;padding:0 5px;font-size:11px}
 .spin{display:inline-block;animation:s 1s linear infinite}@keyframes s{to{transform:rotate(360deg)}}
+.sub2{color:#b7b7bf;margin-bottom:6px}
+button.mini{padding:1px 8px;font-size:11px;margin-left:6px}
+pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:block}pre.diff .hunk{color:#7fc3ff;display:block}
+.frame{border:1px solid #24242a;border-radius:8px;margin:6px 0;overflow:hidden}
+.frame .rl{display:block;font-size:11px;color:#8a8a92;padding:4px 10px;background:#161619;border-bottom:1px solid #22222a}
+.frame.curframe{border-color:#4a9eff}.frame.curframe .rl{color:#4a9eff;background:#12202f}
+.frame pre{border:0;border-radius:0;max-height:180px;background:#0f0f12}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -250,6 +298,12 @@ function renderDetail(){
   if(s.intent) h+=`<div class="k">model reasoning</div><pre>${E(s.intent)}</pre>`;
   if(s.input!=null) h+=`<div class="k">${s.tool?"tool input / code":"input"}</div><pre>${E(J(s.input))}</pre>`;
   if(o.text) h+=`<div class="k">result</div><pre>${E(o.text.length>4000?o.text.slice(0,4000)+"\n… (truncated)":o.text)}</pre>`;
+  if(s.state_diff&&s.state_diff.kind&&s.state_diff.kind!=="none"){
+    h+=`<div class="k">🌍 world change · ${E(s.state_diff.kind)}</div>`;
+    if(s.state_diff.summary) h+=`<div class="sub2">${E(s.state_diff.summary)}</div>`;
+    if(s.state_diff.detail) h+=`<pre class="diff">${diffHtml(typeof s.state_diff.detail==="string"?s.state_diff.detail:J(s.state_diff.detail))}</pre>`;
+  }
+  h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
   if(s.risk) h+=`<div class="k">risk</div><span class="chip risk">⚠ ${E(s.risk)}</span>`;
   if(s.policy) h+=`<div class="k">firewall</div><span class="chip">${E(s.policy.action)} ${E(s.policy.rule||"")}</span>`;
@@ -270,6 +324,26 @@ function renderDetail(){
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
   d.innerHTML=h;
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
+  const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
+}
+function diffHtml(t){
+  return E(t).split("\n").map(l=>{
+    if(l.startsWith("+")&&!l.startsWith("+++")) return `<span class="add">${l}</span>`;
+    if(l.startsWith("-")&&!l.startsWith("---")) return `<span class="del">${l}</span>`;
+    if(l.startsWith("@@")) return `<span class="hunk">${l}</span>`;
+    return l;
+  }).join("\n");
+}
+async function loadContext(){
+  const s=steps[cur], box=document.getElementById("ctx");
+  document.getElementById("ctxbtn").remove();
+  box.innerHTML='<span class="muted">loading…</span>';
+  const r=await (await fetch("/api/context?step="+s.step)).json();
+  box.innerHTML=r.frame.map(m=>{
+    const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human"}[m.role]||m.role;
+    const cur=m.step===s.step?" curframe":"";
+    return `<div class="frame${cur}"><span class="rl">${role}</span><pre>${E((m.content||"").slice(0,1500))}</pre></div>`;
+  }).join("");
 }
 async function doFork(){
   const s=steps[cur], at=(s.replay||{}).turn;
