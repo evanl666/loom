@@ -67,6 +67,49 @@ def context_at(data: dict, step: int) -> list[dict]:
     return frame
 
 
+def context_delta(data: dict, step: int) -> dict:
+    """What CHANGED in the model's context at this step vs the previous model call.
+
+    Flags what agent bugs usually come from: newly-added messages, a tool result
+    that dominates the token budget, untrusted text entering context, and
+    repeated content (context rot)."""
+    from .action import actions
+    from .inject import _INJECTION, _is_untrusted
+
+    acts = actions(data)
+    prev_texts: set[str] = set()
+    added: list[dict] = []
+    seen_before = True
+    for a in acts:
+        if a.type == "call" and a.observation is not None:
+            txt = a.observation.text or ""
+            tokens = max(1, len(txt) // 4)
+            item = {"step": a.step, "tool": a.tool, "tokens": tokens,
+                    "untrusted": _is_untrusted(a),
+                    "poisoned": bool(_INJECTION.search(txt)),
+                    "repeated": txt in prev_texts and len(txt) > 40}
+            if a.step <= step:
+                if a.step == step or not seen_before:
+                    pass
+            added.append(item)
+            prev_texts.add(txt)
+    # items up to this step; the "new" ones are those at this step's turn
+    upto = [x for x in added if x["step"] <= step]
+    total = sum(x["tokens"] for x in upto) or 1
+    for x in upto:
+        x["share"] = round(100 * x["tokens"] / total)
+    biggest = max(upto, key=lambda x: x["tokens"], default=None)
+    return {
+        "step": step,
+        "items": upto[-8:],  # the recent context
+        "dominant": biggest,
+        "untrusted_in_context": [x for x in upto if x["untrusted"]],
+        "poisoned_in_context": [x for x in upto if x["poisoned"]],
+        "repeated": [x for x in upto if x["repeated"]],
+        "total_tokens": total,
+    }
+
+
 def copilot_report(data: dict) -> dict:
     """The Debug Copilot: point at the suspicious steps, suggest fork edits and a
     policy patch, and summarize the run -- so you don't have to read the trace."""
@@ -244,6 +287,7 @@ class DebugSession:
         self.agent = agent
         # model the chat copilot talks to; falls back to the fork agent's model
         self.copilot_model = copilot_model or (getattr(agent, "model", "") if agent else "")
+        self.branches: list[dict] = []  # a tree of experiments (Git-branch-style)
         with open(trace_path) as f:
             self.data = json.load(f)
 
@@ -291,7 +335,57 @@ class DebugSession:
             text = append  # captured for the callback
             edit = lambda ctx: ctx.add_user(text, source="debugger")  # noqa: E731
         branch = base.fork(at=at, edit=edit)
-        return _branch_payload(self.data, branch.to_dict(), at)
+        bdata = branch.to_dict()
+        payload = _branch_payload(self.data, bdata, at)
+        # record the branch in the tree (Git-branch-style experiment history)
+        from .cost import analyze_cost
+        from .diff import score_breakdown
+        label = (append[:40] or (f"system: {system[:24]}" if system else "")
+                 or (f"tools: {','.join(tools)}" if tools else "")
+                 or (f"model: {model}" if model != "keep" else "re-run"))
+        node = {"id": len(self.branches) + 1, "at": at, "label": label,
+                "model": model, "output": bdata.get("output", "")[:120],
+                "score": score_breakdown(bdata)["overall"],
+                "tokens": analyze_cost(bdata)["total_tokens"],
+                "diverge": payload["diverge"]}
+        self.branches.append(node)
+        payload["branch_id"] = node["id"]
+        return payload
+
+    _FIXES = [
+        ("add a stop instruction", {"append": "You have enough information. Give the final "
+                                              "answer now; do not call any more tools."}),
+        ("forbid the risky tool", {"tools_drop_risky": True}),
+        ("switch to a stronger model", {"model": "claude-sonnet-5"}),
+    ]
+
+    def auto_fix(self, at: int) -> "list[dict]":
+        """Try several canned fixes at ``at`` in parallel-ish and compare them."""
+        from .action import actions
+
+        risky = sorted({a.tool for a in actions(self.data)
+                        if a.type == "call" and (a.risky or set(a.capabilities)
+                        & {"money_movement", "destructive", "database_write"})})
+        keep = sorted(set(self.agent.tools) - set(risky)) if self.agent else []
+        out = []
+        for name, spec in self._FIXES:
+            kw: dict = {}
+            if "append" in spec:
+                kw["append"] = spec["append"]
+            if spec.get("tools_drop_risky") and keep:
+                kw["tools"] = keep
+            if "model" in spec:
+                kw["model"] = spec["model"]
+            try:
+                r = self.fork(at=at, **kw)
+                out.append({"fix": name, "output": r["branch_output"][:120],
+                            "branch_id": r.get("branch_id"),
+                            "score": self.branches[-1]["score"],
+                            "tokens": self.branches[-1]["tokens"]})
+            except Exception as e:  # noqa: BLE001
+                out.append({"fix": name, "error": f"{type(e).__name__}: {e}"[:80]})
+        out.sort(key=lambda x: (x.get("score", -1), -x.get("tokens", 1e9)), reverse=True)
+        return out
 
     def next_model_turn_after(self, step: int) -> "int | None":
         """The turn index of the first top-level model call after ``step`` --
@@ -348,6 +442,28 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, {"steps": hits})
         elif self.path == "/api/copilot":
             self._json(200, copilot_report(sess.data))
+        elif self.path == "/api/branches":
+            self._json(200, {"branches": sess.branches})
+        elif self.path == "/api/rootcause":
+            from .rootcause import first_bad_step
+            self._json(200, first_bad_step(sess.data))
+        elif self.path.startswith("/api/delta"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                step = int(parse_qs(urlparse(self.path).query).get("step", ["0"])[0])
+            except (TypeError, ValueError):
+                step = 0
+            self._json(200, context_delta(sess.data, step))
+        elif self.path.startswith("/api/autofix"):
+            from urllib.parse import parse_qs, urlparse
+            if sess.agent is None:
+                self._json(400, {"error": "auto-fix needs --agent"})
+                return
+            try:
+                at = int(parse_qs(urlparse(self.path).query).get("at", ["0"])[0])
+                self._json(200, {"fixes": sess.auto_fix(at)})
+            except Exception as e:  # noqa: BLE001
+                self._json(502, {"error": f"auto-fix failed: {e}"})
         elif self.path.startswith("/api/blame"):
             from urllib.parse import parse_qs, urlparse
             try:
@@ -508,6 +624,8 @@ label.tk{font-size:12px;color:#cfcfd6;display:flex;align-items:center;gap:5px;cu
 button.fault{background:#3a2f1a;border-color:#5c4a2c;color:#ffe0a0;margin-top:8px}
 button.fault:hover{background:#4a3c22}
 #faultval{background:#161311;border-color:#3a2f1a}
+.bnode{border:1px solid #24242a;border-radius:8px;padding:8px 11px;margin:6px 0;font-size:12.5px}
+.bmeta{color:#7fc3ff;font-size:11px;margin-left:6px}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -520,7 +638,9 @@ button.fault:hover{background:#4a3c22}
       <button id="next" title="next (→)">step ▶</button>
       <button id="last" title="last (End)">⏭</button>
       <span class="muted" id="pos" style="margin-left:8px"></span>
-      <input id="brk" placeholder="⏹ break: tool:send_email · cap:network" title="conditional breakpoint" style="margin-left:12px;width:230px">
+      <input id="brk" placeholder="⏹ break: tool:send_email · cap:network" title="conditional breakpoint" style="margin-left:12px;width:210px">
+      <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
+      <button id="branches" title="the branch tree">🌳</button>
       <button id="copilot" style="margin-left:auto">🤖 Copilot</button>
     </div>
     <div id="copilotpanel" class="hidden"></div>
@@ -636,11 +756,13 @@ function renderDetail(){
       </details>
     </div>
     <button id="run">▶ Fork &amp; Run live</button>
+    <button id="autofix" class="fault" title="try several canned fixes and compare">🔧 Auto-fix (try several)</button>
     <div id="branch"></div>
   </div>`;
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
   d.innerHTML=h;
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
+  const af=document.getElementById("autofix"); if(af) af.onclick=doAutoFix;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
   const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
   const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
@@ -696,6 +818,20 @@ async function faultInject(){
     }
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
   finally{btn.disabled=false; btn.innerHTML="🧪 Inject &amp; re-run from here";}
+}
+async function doAutoFix(){
+  const s=steps[cur], at=(s.replay||{}).turn;
+  const btn=document.getElementById("autofix"), bx=document.getElementById("branch");
+  btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> trying fixes…'; bx.innerHTML="";
+  try{
+    const r=await fetch("/api/autofix?at="+at); const res=await r.json();
+    if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
+    else{
+      bx.innerHTML=`<div class="branchhead">🔧 auto-fix results (best first)</div>`+res.fixes.map((f,i)=>
+        `<div class="bnode">${i===0?"🏆 ":""}<b>${E(f.fix)}</b> ${f.error?`<span class="risky">${E(f.error)}</span>`:`<span class="bmeta">score ${f.score} · ${(f.tokens||0).toLocaleString()} tok</span><div class="muted">${E(f.output||"")}</div>`}</div>`).join("");
+    }
+  }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
+  finally{btn.disabled=false; btn.innerHTML="🔧 Auto-fix (try several)";}
 }
 async function doFork(){
   const s=steps[cur], at=(s.replay||{}).turn;
@@ -801,7 +937,31 @@ async function setBreak(){
   if(tgt!=null){const i=steps.findIndex(s=>s.step===tgt); if(i>=0)select(i);}
 }
 document.getElementById("brk").onkeydown=e=>{if(e.key==="Enter")setBreak();};
-document.getElementById("copilot").onclick=loadCopilot;
+async function gotoRootCause(){
+  const r=await (await fetch("/api/rootcause")).json();
+  if(!r.found){alert("no root-cause signal — the run looks clean");return;}
+  const i=steps.findIndex(s=>s.step===r.step);
+  if(i>=0)select(i);
+  const p=document.getElementById("copilotpanel"); p.classList.remove("hidden");
+  p.innerHTML=`<div class="cop-sum">🎯 first bad step: <b>${r.step} ${E(r.tool)}</b></div>`+
+    `<div class="k">why</div><div>${r.signals.map(E).join("<br>")}</div>`+
+    `<div class="k">cascade</div>${r.cascade.map(c=>`<span class="chip jump" data-step="${c.step}">[${c.step}] ${E(c.tool)}</span>`).join("")}`;
+  p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{const i=steps.findIndex(s=>s.step===+c.dataset.step);if(i>=0)select(i);});
+}
+async function showBranches(){
+  const p=document.getElementById("copilotpanel");
+  if(!p.classList.contains("hidden")&&p.dataset.view==="branches"){p.classList.add("hidden");return;}
+  p.classList.remove("hidden"); p.dataset.view="branches";
+  const r=await (await fetch("/api/branches")).json();
+  if(!r.branches.length){p.innerHTML='<div class="muted">no branches yet — fork a step to start the tree</div>';return;}
+  p.innerHTML=`<div class="k">🌳 branch tree (${r.branches.length})</div>`+r.branches.map(b=>
+    `<div class="bnode"><b>#${b.id}</b> <span class="muted">@call ${b.at}</span> — ${E(b.label)}
+      <span class="bmeta">score ${b.score} · ${b.tokens.toLocaleString()} tok</span>
+      <div class="muted">${E(b.output)}</div></div>`).join("");
+}
+document.getElementById("rootcause").onclick=gotoRootCause;
+document.getElementById("branches").onclick=showBranches;
+document.getElementById("copilot").onclick=()=>{document.getElementById("copilotpanel").dataset.view="chat";loadCopilot();};
 document.getElementById("prev").onclick=()=>select(cur-1);
 document.getElementById("next").onclick=()=>select(cur+1);
 document.getElementById("first").onclick=()=>select(0);

@@ -1751,6 +1751,15 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rootcause(args: argparse.Namespace) -> int:
+    """Find the first step that went wrong and the cascade it set off."""
+    from .rootcause import describe_rootcause, first_bad_step
+
+    r = first_bad_step(_load_trace_json(args.path))
+    print(json.dumps(r, indent=2) if args.json else describe_rootcause(r))
+    return 1 if (args.gate and r["found"]) else 0
+
+
 def _cmd_loops(args: argparse.Namespace) -> int:
     """Detect repeated / oscillating tool-call loops."""
     from .loops import describe_loops, detect_loops
@@ -2940,6 +2949,12 @@ def build_parser() -> argparse.ArgumentParser:
     xp.add_argument("--save", default="", help="save each variant's trace to this dir")
     xp.add_argument("--json", action="store_true")
     xp.set_defaults(func=_cmd_experiment)
+
+    rc = sub.add_parser("rootcause", help="find the FIRST bad step + the cascade it caused")
+    rc.add_argument("path")
+    rc.add_argument("--gate", action="store_true", help="exit 1 if a root cause is found")
+    rc.add_argument("--json", action="store_true")
+    rc.set_defaults(func=_cmd_rootcause)
 
     lp = sub.add_parser("loops", help="find where the agent got stuck repeating itself")
     lp.add_argument("path")
