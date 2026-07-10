@@ -35,8 +35,9 @@ def _clip(s: str, n: int = _SNIP) -> str:
 
 def _analyze(data: dict) -> dict:
     """Everything the report needs, mined from the trace dict."""
-    from .action import effect_dicts
+    from .action import effect_dicts, require_trace
 
+    data = require_trace(data)
     log = effect_dicts(data)
     facts: dict = {
         "episodes": data.get("episodes") or [data.get("prompt", "")],
@@ -46,7 +47,8 @@ def _analyze(data: dict) -> dict:
         "paused": data.get("paused", False),
         "model_calls": 0, "input_tokens": 0, "output_tokens": 0,
         "tool_counts": {}, "suspects": [], "final_words": "",
-        "shield_events": data.get("shield_events") or [],
+        # entries can be non-dict junk in a hand-edited / third-party trace
+        "shield_events": [ev for ev in (data.get("shield_events") or []) if isinstance(ev, dict)],
     }
 
     from .risk import classify_all
@@ -60,7 +62,9 @@ def _analyze(data: dict) -> dict:
             facts["input_tokens"] += usage.get("input_tokens", 0) or 0
             facts["output_tokens"] += usage.get("output_tokens", 0) or 0
             for tc in result.get("tool_calls") or []:
-                name = tc.get("name", "?")
+                if not isinstance(tc, dict):
+                    continue
+                name = tc.get("name") or "?"  # explicit null name -> placeholder
                 facts["tool_counts"][name] = facts["tool_counts"].get(name, 0) + 1
                 cats = classify_all(name, tc.get("input", {}))
                 if cats:

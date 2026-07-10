@@ -30,7 +30,12 @@ class ToolCall:
 
     @staticmethod
     def from_dict(d: dict) -> "ToolCall":
-        return ToolCall(id=d["id"], name=d["name"], input=d.get("input", {}))
+        # Tolerant of hand-edited / third-party traces: a tool_call missing id or
+        # name (or with a null one) degrades to "" rather than crashing every
+        # analyzer that reads the call. input coerces to {} when not a dict.
+        inp = d.get("input")
+        return ToolCall(id=d.get("id") or "", name=d.get("name") or "",
+                        input=inp if isinstance(inp, dict) else {})
 
 
 @dataclass

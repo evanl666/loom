@@ -1507,6 +1507,19 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     return 1 if (args.gate and c["findings"]) else 0
 
 
+def _cmd_fuzz(args: argparse.Namespace) -> int:
+    """Prove the analyzers tolerate hostile / malformed traces (CI robustness)."""
+    from .fuzz import describe_fuzz, fuzz_check
+
+    seed = _load_trace_json(args.path) if args.path else None
+    report = fuzz_check(seed)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(describe_fuzz(report))
+    return 0 if report["ok"] else 1
+
+
 def _cmd_score(args: argparse.Namespace) -> int:
     """The behavior scorecard: security / side-effect / reversibility / ..."""
     from .diff import describe_score, score_badge_svg, score_breakdown, score_markdown
@@ -3087,6 +3100,12 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
+
+    fz = sub.add_parser("fuzz", help="stress analyzers with hostile/malformed traces (CI robustness)")
+    fz.add_argument("path", nargs="?", default="",
+                    help="a seed trace to mutate (default: a built-in seed)")
+    fz.add_argument("--json", action="store_true", help="machine-readable")
+    fz.set_defaults(func=_cmd_fuzz)
 
     sc = sub.add_parser("score", help="behavior scorecard: security/side-effect/reversibility/...")
     sc.add_argument("path")

@@ -803,8 +803,9 @@ def _data_flow(data: dict) -> str:
 
 def trace_to_html(data: dict, path: str = "session.loom.json") -> str:
     """Render a saved trace dict (``Run.to_dict`` / a ``.loom.json`` file) to HTML."""
-    from .action import effect_dicts
+    from .action import effect_dicts, require_trace
 
+    data = require_trace(data)
     log = effect_dicts(data)
     episodes = data.get("episodes") or [data.get("prompt", "")]
 

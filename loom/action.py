@@ -149,8 +149,26 @@ def effect_dicts(data: dict) -> "list[dict]":
     """The trace's log as a clean list of effect dicts, tolerant of a log that
     isn't a list or holds non-dict junk. The shared guard for every module that
     iterates ``data['log']`` directly (cost, score, incident, kpi, Studio...)."""
+    if not isinstance(data, dict):
+        return []  # a non-dict document has no log
     raw = data.get("log")
     return [e for e in raw if isinstance(e, dict)] if isinstance(raw, list) else []
+
+
+def require_trace(data: Any) -> dict:
+    """A trace dict, or a clear ValueError -- for analyzers that take a raw dict.
+
+    A non-dict document (a JSON array/scalar/null loaded from a corrupted or
+    third-party file) is refused with a message, never an opaque
+    ``'list' object has no attribute 'get'`` traceback deep inside an analyzer.
+    """
+    if isinstance(data, dict):
+        return data
+    if hasattr(data, "to_dict"):
+        return _as_trace(data)
+    raise ValueError(
+        f"not a loom trace: expected an object with a 'log', got {type(data).__name__}"
+    )
 
 
 def _as_trace(source: Any) -> dict:
@@ -168,7 +186,7 @@ def _as_trace(source: Any) -> dict:
                 if extra:
                     data[k] = extra
     else:
-        raise TypeError(f"cannot read a trace from {type(source).__name__}")
+        raise ValueError(f"not a loom trace: cannot read one from {type(source).__name__}")
     return data
 
 
