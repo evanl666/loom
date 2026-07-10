@@ -1293,6 +1293,19 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
     except Exception as e:
         raise CLIError(f"could not start MCP server: {e}")
 
+    if getattr(args, "mcp_cmd", "") == "audit":
+        from .mcp import describe_mcp_audit, mcp_audit
+        try:
+            manifest = mcp_manifest(server.tools())
+        finally:
+            server.close()
+        audit = mcp_audit(manifest)
+        if args.json:
+            print(json.dumps(audit, indent=2))
+        else:
+            print(describe_mcp_audit(audit))
+        return 1 if (args.gate and audit["trust"]["score"] < 45) else 0
+
     if getattr(args, "mcp_cmd", "") == "gateway":
         from .shield import Shield
         from .policy_file import load_document, to_shield_kwargs
@@ -1571,6 +1584,20 @@ def _cmd_dataset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_sbom(args: argparse.Namespace) -> int:
+    """A CycloneDX-flavored bill of materials for the agent in a trace/corpus."""
+    from .sbom import build_sbom, describe_sbom
+
+    sbom = build_sbom(args.path)
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(sbom, f, indent=2)
+        print(f"wrote SBOM -> {args.output}", file=sys.stderr)
+    else:
+        print(describe_sbom(sbom) if not args.json else json.dumps(sbom, indent=2))
+    return 0
+
+
 def _cmd_intent(args: argparse.Namespace) -> int:
     """Intent firewall: flag actions that don't serve the user's request."""
     from .intent import describe_intent, intent_report
@@ -1685,6 +1712,13 @@ def _cmd_dlp(args: argparse.Namespace) -> int:
     from .taint import dlp_evidence, dlp_report
 
     _import_builtin_packs()
+    if getattr(args, "html", ""):
+        from .taint import dlp_evidence_html
+        with open(args.html, "w") as f:
+            f.write(dlp_evidence_html(_load_trace_json(args.path),
+                                      judge=args.judge or None, sink_allowlist=args.allow_sink))
+        print(f"wrote DLP evidence room -> {args.html}")
+        return 0
     if getattr(args, "judge", ""):
         report = dlp_evidence(_load_trace_json(args.path), judge=args.judge,
                               sink_allowlist=args.allow_sink)
@@ -3196,6 +3230,12 @@ def build_parser() -> argparse.ArgumentParser:
     mc_man.add_argument("args", nargs="*", help="arguments to the server command")
     mc_man.add_argument("--json", action="store_true", help="machine-readable")
     mc_man.set_defaults(func=_cmd_mcp)
+    mc_aud = mcsub.add_parser("audit", help="npm-audit for an MCP server: risks + policy template")
+    mc_aud.add_argument("command")
+    mc_aud.add_argument("args", nargs="*")
+    mc_aud.add_argument("--gate", action="store_true", help="exit 1 if trust < 45")
+    mc_aud.add_argument("--json", action="store_true")
+    mc_aud.set_defaults(func=_cmd_mcp)
     mc_gw = mcsub.add_parser("gateway",
                              help="firewall + record an MCP server, re-served on stdio")
     mc_gw.add_argument("command", help="the upstream MCP server command, e.g. npx")
@@ -3302,6 +3342,12 @@ def build_parser() -> argparse.ArgumentParser:
     ds.add_argument("-o", "--output", default="", help="output .jsonl (default: stdout)")
     ds.set_defaults(func=_cmd_dataset)
 
+    sb = sub.add_parser("sbom", help="a CycloneDX-flavored bill of materials for the agent")
+    sb.add_argument("path", help="a trace or a directory of traces")
+    sb.add_argument("-o", "--output", default="", help="write SBOM JSON to a file")
+    sb.add_argument("--json", action="store_true", help="print JSON to stdout")
+    sb.set_defaults(func=_cmd_sbom)
+
     it = sub.add_parser("intent", help="intent firewall: flag actions that don't serve the request")
     it.add_argument("path")
     it.add_argument("--judge", required=True, metavar="MODEL", help="the judge model")
@@ -3357,6 +3403,8 @@ def build_parser() -> argparse.ArgumentParser:
     dl.add_argument("--gate", action="store_true", help="exit 1 on any violation (CI gate)")
     dl.add_argument("--judge", default="", metavar="MODEL",
                     help="also detect encoded/paraphrased leaks with an LLM judge")
+    dl.add_argument("--html", default="", metavar="FILE",
+                    help="write a shareable DLP Evidence Room (source→method→sink→rule)")
     dl.add_argument("--json", action="store_true", help="machine-readable")
     dl.set_defaults(func=_cmd_dlp)
 

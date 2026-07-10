@@ -86,6 +86,66 @@ def mcp_trust(manifest: "list[dict]") -> dict:
             "tools": len(manifest), "risky": risky}
 
 
+def mcp_audit(manifest: "list[dict]") -> dict:
+    """`npm audit` for an MCP server: trust score + the specific reasons.
+
+    Flags dangerous tools (money/destructive/db-write/exec), DECEPTIVELY NAMED
+    tools (a read-sounding name whose capabilities say it writes/deletes -- the
+    classic 'get_user that deletes data'), and undeclared-capability tools, then
+    emits a ready-to-use deny/confirm policy template. The 'should I install
+    this?' verdict.
+    """
+    trust = mcp_trust(manifest)
+    dangerous = {"money_movement", "destructive", "database_write", "browser_submit", "exec"}
+    read_words = ("get", "read", "list", "fetch", "search", "find", "view", "show", "lookup")
+    findings: list[dict] = []
+    deny: list[str] = []
+    confirm: list[str] = []
+    for m in manifest:
+        name = m["tool"]
+        caps = set(m.get("capabilities") or [])
+        hits = caps & dangerous
+        # deceptive naming: sounds read-only, actually mutates
+        looks_read = any(name.lower().startswith(w) or f"_{w}" in name.lower() for w in read_words)
+        mutates = caps & {"write", "destructive", "database_write", "money_movement"}
+        if looks_read and mutates:
+            findings.append({"severity": "high", "tool": name,
+                             "issue": f"deceptive name: reads-like '{name}' but has "
+                                      f"{', '.join(sorted(mutates))}"})
+            deny.append(f"{name}*")
+        elif hits:
+            findings.append({"severity": "high" if hits & {"money_movement", "destructive"} else "medium",
+                             "tool": name, "issue": f"dangerous capability: {', '.join(sorted(hits))}"})
+            (deny if hits & {"destructive", "money_movement"} else confirm).append(f"{name}*")
+        elif not m.get("declared") and (caps - {"idempotent", "read"}):
+            findings.append({"severity": "low", "tool": name,
+                             "issue": "undeclared capabilities (opaque -- trust unverified)"})
+    verdict = ("avoid -- high-risk tools, write a policy first" if trust["score"] < 45
+               else "review -- gate the flagged tools before use" if findings
+               else "ok -- no dangerous tools found")
+    return {"trust": trust, "findings": findings, "verdict": verdict,
+            "policy_template": {"default": "allow", "deny": deny, "confirm": confirm}}
+
+
+def describe_mcp_audit(audit: dict) -> str:
+    t = audit["trust"]
+    lines = [f"MCP audit — trust {t['score']}/100 ({t['grade']}) — {audit['verdict']}", ""]
+    icon = {"high": "🔴", "medium": "🟠", "low": "🟡"}
+    for f in audit["findings"]:
+        lines.append(f"  {icon.get(f['severity'], '·')} {f['tool']}: {f['issue']}")
+    if not audit["findings"]:
+        lines.append("  ✓ no findings")
+    pt = audit["policy_template"]
+    if pt["deny"] or pt["confirm"]:
+        lines += ["", "  suggested policy:"]
+        if pt["deny"]:
+            lines.append(f"    deny:    {', '.join(pt['deny'])}")
+        if pt["confirm"]:
+            lines.append(f"    confirm: {', '.join(pt['confirm'])}")
+        lines.append(f"    → loom mcp gateway {' '.join('--deny ' + g for g in pt['deny'])} -- <server>")
+    return "\n".join(lines)
+
+
 def describe_mcp_trust(trust: dict) -> str:
     top = sorted(trust["factors"].items(), key=lambda kv: -kv[1])[:5]
     reasons = ", ".join(f"{k} -{v}" for k, v in top) or "clean surface"

@@ -327,6 +327,65 @@ def dlp_evidence(source: Any, judge: Any = None,
             "methods": sorted({v.get("method", "verbatim") for v in base["violations"]})}
 
 
+def dlp_evidence_html(source: Any, judge: Any = None,
+                      sink_allowlist: "list[str] | None" = None) -> str:
+    """A shareable DLP Evidence Room: one auditable case per leak (source →
+    method → sink → recommended block rule), for a security review."""
+    from .lake import _esc
+
+    ev = dlp_evidence(source, judge=judge, sink_allowlist=sink_allowlist)
+    _suggest = {
+        "secret": "taint sk-*: deny cap:network",
+        "pii": "confirm cap:user_communication; deny cap:network after pii_access",
+        "payment": "confirm cap:money_movement",
+        "data": "confirm cap:network",
+    }
+    cases = []
+    for i, p in enumerate(ev["violations"], 1):
+        method = p.get("method", "verbatim")
+        how = p.get("how", method)
+        rule = _suggest.get(p["sensitivity"], _suggest["data"])
+        cases.append(f"""<div class="case sev-{_esc(p['severity'])}">
+  <div class="ch"><span class="num">CASE {i}</span>
+    <span class="sens">{_esc(p['sensitivity'])}</span>
+    <span class="sev">{_esc(p['severity'])}</span>
+    <span class="method">{_esc(method)}{f' · {_esc(how)}' if how != method else ''}</span></div>
+  <div class="chain">
+    <div class="node src">🔑 source<br><b>[{p['source']['step']}] {_esc(p['source']['tool'])}</b><br>
+      <span class="muted">{_esc(p['kind'])} · {_esc(p.get('value_preview',''))}</span></div>
+    <div class="arrow">──{_esc(how)}──▶</div>
+    <div class="node sink">↗ egress<br><b>[{p['sink']['step']}] {_esc(p['sink']['tool'])}</b><br>
+      <span class="muted">via {_esc(', '.join(p['sink'].get('via', [])))}</span></div>
+  </div>
+  <div class="fix">recommended block rule: <code>{_esc(rule)}</code></div>
+</div>""")
+    body = "\n".join(cases) or '<div class="ok">✓ no data-loss paths found</div>'
+    css = """body{font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;max-width:900px;
+    margin:0 auto;padding:28px;color:#111;background:#f7f7f5}
+    @media(prefers-color-scheme:dark){body{color:#eee;background:#0e0e10}.case{background:#18181b!important;border-color:#2a2a2e!important}.node{background:#111!important}}
+    h1{font-size:22px}.sub{color:#888;margin-bottom:20px}
+    .case{background:#fff;border:1px solid #e3e3dd;border-radius:12px;padding:16px 18px;margin:14px 0}
+    .case.sev-critical{border-left:4px solid #e5484d}.case.sev-high{border-left:4px solid #f76808}
+    .case.sev-medium{border-left:4px solid #f5a524}.case.sev-low{border-left:4px solid #8a8a92}
+    .ch{display:flex;gap:8px;align-items:center;margin-bottom:12px;font-size:12px}
+    .num{font-weight:700}.sens,.sev,.method{padding:1px 8px;border-radius:10px;background:#eee;text-transform:uppercase;font-size:10px;letter-spacing:.4px}
+    @media(prefers-color-scheme:dark){.sens,.sev,.method{background:#26262b}}
+    .chain{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .node{background:#fafafa;border:1px solid #e3e3dd;border-radius:8px;padding:8px 12px;flex:1;min-width:180px}
+    @media(prefers-color-scheme:dark){.node{border-color:#2a2a2e}}
+    .arrow{color:#e5484d;font-weight:700;white-space:nowrap}.muted{color:#999;font-size:12px}
+    .fix{margin-top:12px;font-size:13px}code{background:#eee;padding:2px 6px;border-radius:5px}
+    @media(prefers-color-scheme:dark){code{background:#26262b}}.ok{color:#2e7d32;font-size:16px}"""
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Loom DLP Evidence Room</title><style>{css}</style></head><body>
+<h1>🕵️ Data-Loss Evidence Room</h1>
+<p class="sub">{len(ev['violations'])} leak path(s) · worst severity {_esc(ev['worst_severity'])} ·
+methods: {_esc(', '.join(ev.get('methods', []) or ['none']))}</p>
+{body}
+</body></html>"""
+
+
 def _preview(value: str) -> str:
     """A safe, non-leaking preview of a tainted value."""
     if len(value) <= 10:
