@@ -81,14 +81,22 @@ def steps_for(data: dict) -> list[dict]:
         # its user message opens the next turn.
         if idx in ends_after and ep_i < len(episodes) and idx != ends_after[-1]:
             out.append(_user_node(episodes[ep_i])); ep_i += 1
-    # A tool call is a DELEGATION (labelled "subagent") when the next step goes a
-    # level deeper -- i.e. the call handed off to a sub-agent.
+    # A tool call is a DELEGATION (labelled "subagent") when it handed off to a
+    # sub-agent. The reliable signal is the drain marker actions() leaves on an
+    # unpaired delegation call (catches ALL of several parallel hand-offs); the
+    # next-step-goes-deeper heuristic is a fallback for framework delegate tools
+    # that DO return a result.
     for i, d in enumerate(out):
         if d.get("type") != "call":
             continue
+        obs = (d.get("observation") or {}).get("text") or ""
+        if obs.startswith("(delegated to sub-agent"):
+            d["is_delegation"] = True
+            continue
         for nxt in out[i + 1:]:
-            if nxt.get("type") == "user":
-                continue
+            if nxt.get("type") == "user" or (nxt.get("type") == "call"
+                    and nxt.get("nest", 0) == d.get("nest", 0)):
+                continue  # skip a user node or a sibling delegation at this level
             if nxt.get("nest", 0) > d.get("nest", 0):
                 d["is_delegation"] = True
             break
