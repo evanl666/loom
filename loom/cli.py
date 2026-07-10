@@ -1507,6 +1507,18 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     return 1 if (args.gate and c["findings"]) else 0
 
 
+def _cmd_scan(args: argparse.Namespace) -> int:
+    """Security posture for an agent's tool surface (a run or a corpus)."""
+    from .scan import describe_scan, scan
+
+    report = scan(args.path)
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(describe_scan(report))
+    return 1 if (args.gate and report["high"]) else 0
+
+
 def _cmd_debug(args: argparse.Namespace) -> int:
     """Open an interactive step-debugger for a trace (step through + fork live)."""
     import webbrowser
@@ -3124,6 +3136,12 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
+
+    sc = sub.add_parser("scan", help="agent supply-chain security posture (tool surface + gaps)")
+    sc.add_argument("path", help="a trace or a directory of traces")
+    sc.add_argument("--gate", action="store_true", help="exit 1 if any high finding")
+    sc.add_argument("--json", action="store_true", help="machine-readable")
+    sc.set_defaults(func=_cmd_scan)
 
     db = sub.add_parser("debug", help="interactive step-debugger: step through a run + fork it live")
     db.add_argument("path")

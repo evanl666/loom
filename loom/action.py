@@ -232,6 +232,14 @@ def actions(source: Any) -> list[Action]:
     shield_events = ([ev for ev in raw_events if isinstance(ev, dict)]
                      if isinstance(raw_events, list) else [])
 
+    # Declared @tool(capabilities=...) persisted in the trace: trust the contract
+    # over name inference (a tool named 'wire' whose declared caps say money).
+    tool_caps = data.get("tools") if isinstance(data.get("tools"), dict) else {}
+
+    def _declared(name: str) -> "set[str] | None":
+        c = tool_caps.get(name)
+        return set(c) if isinstance(c, list) and c else None
+
     # Turn boundaries: top-level model calls are the fork points.
     turn_of_seq: dict[int, int] = {}
     turn = 0
@@ -297,7 +305,7 @@ def actions(source: Any) -> list[Action]:
             out.append(Action(
                 step=e.seq, depth=e.depth, type="call", tool=name, intent=intent,
                 input=tool_input,
-                capabilities=sorted(_caps(name, tool_input or {})),
+                capabilities=sorted(_caps(name, tool_input or {}, declared=_declared(name))),
                 risk=_classify(name, tool_input or {}),
                 observation=Observation(text=text, error=err, raw=e.result),
                 policy=_policy_for(name), replay=replay,
@@ -317,7 +325,7 @@ def actions(source: Any) -> list[Action]:
         tool_input = ev.get("input", {})
         out.append(Action(
             step=-1, depth=0, type="call", tool=name, input=tool_input,
-            capabilities=sorted(_caps(name, tool_input or {})),
+            capabilities=sorted(_caps(name, tool_input or {}, declared=_declared(name))),
             risk=_classify(name, tool_input or {}),
             observation=Observation(text="(blocked -- not executed)", error=True),
             policy=PolicyDecision("deny", ev.get("rule", ""), ev.get("via", "rule"),

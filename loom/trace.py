@@ -253,7 +253,21 @@ class Run:
             "stop_reason": self.stop_reason,
             "log": [e.to_dict() for e in self.log],
             **({"healed_by": self.healed_by} if self.healed_by else {}),
+            # Declared tool capabilities, so post-hoc analysis (actions / scan /
+            # taint / risk) trusts the @tool(capabilities=...) contract instead
+            # of re-guessing from the tool name. Preserved across load/save.
+            **({"tools": self._tool_manifest()} if self._tool_manifest() else {}),
         }
+
+    def _tool_manifest(self) -> dict:
+        """{tool -> declared capabilities} from the live agent, or a loaded trace."""
+        agent = self.agent
+        if agent is not None and getattr(agent, "tools", None):
+            m = {n: sorted(t.capabilities) for n, t in agent.tools.items()
+                 if getattr(t, "capabilities", None)}
+            if m:
+                return m
+        return getattr(self, "_loaded_tools", None) or {}
 
     def save(self, path: str) -> None:
         """Write the trace to a git-friendly JSON file (content-checksummed)."""
@@ -291,6 +305,7 @@ class Run:
             pending_depth=data.get("pending_depth", 0),
             stop_reason=data.get("stop_reason", ""),
         )
+        run._loaded_tools = data.get("tools")
         run._loaded_model = data.get("model")
         run._loaded_system = data.get("system", "")
         run.healed_by = data.get("healed_by")
