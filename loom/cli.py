@@ -1710,9 +1710,12 @@ def _load_yaml_or_json(path: str) -> dict:
 
     try:
         with open(path) as f:
-            return _parse(f.read(), path) or {}
+            doc = _parse(f.read(), path) or {}
     except OSError as e:
         raise CLIError(f"cannot read {path}: {e}")
+    if not isinstance(doc, dict):
+        raise CLIError(f"{path} must be a mapping of settings (got {type(doc).__name__})")
+    return doc
 
 
 _PACK_TEMPLATE = '''"""The {title} Pack -- teach Loom about {name} agents.

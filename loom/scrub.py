@@ -82,6 +82,8 @@ def load_scrub_config(path: str) -> ScrubConfig:
 
     with open(path) as f:
         doc = _parse(f.read(), path) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(f"{path} is not a valid scrub config (expected a mapping)")
     detectors = list((doc.get("detectors") or {}).items())
     return ScrubConfig(detectors=detectors, allow=doc.get("allow") or [])
 

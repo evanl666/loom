@@ -46,7 +46,13 @@ def load_retention(path: str) -> dict:
     from .policy_file import _parse
 
     with open(path) as f:
-        return _parse(f.read(), path) or {}
+        doc = _parse(f.read(), path) or {}
+    if not isinstance(doc, dict):
+        raise ValueError(
+            f"{path} is not a valid retention config (expected a mapping of "
+            f"settings like scrub_after/delete_after, got {type(doc).__name__})"
+        )
+    return doc
 
 
 def plan_retention(directory: str, config: dict, now: "float | None" = None) -> "list[dict]":

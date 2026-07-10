@@ -112,3 +112,15 @@ def test_dsar_rejects_short_identifiers(tmp_path):
 
     with _pytest.raises(ValueError):
         dsar(str(tmp_path), "ab", mode="plan")
+
+
+def test_load_retention_rejects_non_mapping(tmp_path):
+    import pytest
+
+    from loom.retention import load_retention
+
+    for content in ["- a\n- b", "42"]:
+        p = tmp_path / "r.yml"
+        p.write_text(content)
+        with pytest.raises(ValueError):
+            load_retention(str(p))

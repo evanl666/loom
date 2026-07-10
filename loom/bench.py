@@ -31,6 +31,8 @@ def load_task(path: str) -> dict:
 
     with open(path) as f:
         task = _parse(f.read(), path)
+    if not isinstance(task, dict):
+        raise ValueError(f"{path}: a bench task must be a mapping (got {type(task).__name__})")
     if not task.get("prompt"):
         raise ValueError(f"{path}: a bench task needs a 'prompt'")
     return task
