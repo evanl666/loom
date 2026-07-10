@@ -56,6 +56,18 @@ class CodingPack(Pack):
             return True
         return any(fnmatch(action.tool, g) for g in _CODING_NAMES)
 
+    def debugger_panels(self, action: Action, trace: dict) -> "list[dict]":
+        if action.type != "call":
+            return []
+        path = _path_of(action.input)
+        content = (action.input or {}).get("content") or (action.input or {}).get("new_str")
+        if path and content is not None:
+            return [{"title": f"📄 file · {path}", "code": str(content)[:6000]}]
+        cmd = self._command(action)
+        if cmd:
+            return [{"title": "▶ shell command", "code": cmd}]
+        return []
+
     def state_diff(self, action: Action, trace: dict) -> "StateDiff | None":
         # Only actions that WRITE change the world; derive the file from the
         # action's own input, so the diff is per-step, not run-level.

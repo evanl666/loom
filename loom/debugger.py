@@ -288,8 +288,18 @@ class DebugSession:
         # model the chat copilot talks to; falls back to the fork agent's model
         self.copilot_model = copilot_model or (getattr(agent, "model", "") if agent else "")
         self.branches: list[dict] = []  # a tree of experiments (Git-branch-style)
+        self.comments: list[dict] = []  # step annotations / root-cause labels
+        self.macro: list[dict] = []     # recorded human debug actions -> a recipe
         with open(trace_path) as f:
-            self.data = json.load(f)
+            loaded = json.load(f)
+        if isinstance(loaded, dict) and loaded.get("loomdebug"):
+            # a .loomdebug session artifact: restore base + branches + comments
+            self.data = loaded.get("base", {})
+            self.branches = loaded.get("branches", [])
+            self.comments = loaded.get("comments", [])
+            self.macro = loaded.get("macro", [])
+        else:
+            self.data = loaded
 
     def _agent_for(self, model: str, system: "str | None" = None,
                    tools: "list[str] | None" = None):
@@ -387,6 +397,86 @@ class DebugSession:
         out.sort(key=lambda x: (x.get("score", -1), -x.get("tokens", 1e9)), reverse=True)
         return out
 
+    def dry_run(self, step: int, args: "dict | None" = None) -> dict:
+        """Run ONLY the tool at ``step`` with (possibly edited) args -- no model
+        calls, no full re-run. See the result + world diff before you commit to a
+        fork. Runs the real tool, so it has the tool's side effects."""
+        import time
+
+        from .action import actions
+
+        if self.agent is None:
+            raise RuntimeError("dry-run needs --agent (the tool functions)")
+        a = next((x for x in actions(self.data) if x.step == step and x.type == "call"), None)
+        if a is None:
+            raise ValueError(f"step {step} is not a tool call")
+        tool = self.agent.tools.get(a.tool)
+        if tool is None:
+            raise ValueError(f"no tool named {a.tool!r} on this agent")
+        use = args if args is not None else (a.input or {})
+        t0 = time.time()
+        try:
+            result = tool.fn(**use)
+            err = ""
+        except Exception as e:  # noqa: BLE001 -- surface the tool's own failure
+            result, err = "", f"{type(e).__name__}: {e}"
+        return {"tool": a.tool, "args": use, "result": str(result)[:3000], "error": err,
+                "ms": round((time.time() - t0) * 1000),
+                "orig_result": (a.observation.text[:3000] if a.observation else "")}
+
+    def policy_preview(self, deny: "list[str] | None" = None,
+                       confirm: "list[str] | None" = None, corpus: str = "") -> dict:
+        """What a candidate policy would do to THIS run (and optionally a corpus)."""
+        from .action import actions
+        from .shield import Shield
+
+        sh = Shield(deny=deny or [], confirm=confirm or [])
+        this_run = []
+        for a in actions(self.data):
+            if a.type != "call":
+                continue
+            act, rule = sh.classify(a.tool, a.input or {})
+            if act in ("deny", "confirm"):
+                this_run.append({"step": a.step, "tool": a.tool, "action": act, "rule": rule})
+        out = {"this_run": this_run}
+        if corpus:
+            import os
+            from glob import glob
+
+            from .policy_file import simulate
+            paths = sorted(glob(os.path.join(corpus, "**", "*.loom.json"), recursive=True))
+            sim = simulate(sh, paths)
+            out["corpus"] = {"runs": sim["runs"], "would_deny": len(sim["denied"]),
+                             "breakages": [d["name"] for d in sim["false_positives"]]}
+        return out
+
+    def panels_for(self, step: int) -> "list[dict]":
+        """Domain panels contributed by packs for the action at ``step``."""
+        from .action import actions
+        from .packs import install_builtin, packs
+
+        install_builtin()
+        a = next((x for x in actions(self.data) if x.step == step), None)
+        if a is None:
+            return []
+        out = []
+        for pack in packs():
+            hook = getattr(pack, "debugger_panels", None)
+            if hook is None:
+                continue
+            try:
+                for p in (hook(a, self.data) or []):
+                    out.append(p)
+            except Exception:  # noqa: BLE001 -- a bad pack panel never breaks the debugger
+                continue
+        return out
+
+    def export_session(self) -> dict:
+        """A .loomdebug artifact: base trace + branches + comments + macro."""
+        return {"loomdebug": 1, "base": self.data, "branches": self.branches,
+                "comments": self.comments, "macro": self.macro,
+                "model": getattr(self.agent, "model", "") if self.agent else ""}
+
     def next_model_turn_after(self, step: int) -> "int | None":
         """The turn index of the first top-level model call after ``step`` --
         the fork point where a tool-result override at ``step`` takes effect."""
@@ -444,6 +534,16 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, copilot_report(sess.data))
         elif self.path == "/api/branches":
             self._json(200, {"branches": sess.branches})
+        elif self.path == "/api/export":
+            self._send(200, json.dumps(sess.export_session(), indent=2).encode(),
+                       "application/json")
+        elif self.path.startswith("/api/panels"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                step = int(parse_qs(urlparse(self.path).query).get("step", ["0"])[0])
+            except (TypeError, ValueError):
+                step = 0
+            self._json(200, {"panels": sess.panels_for(step)})
         elif self.path == "/api/rootcause":
             from .rootcause import first_bad_step
             self._json(200, first_bad_step(sess.data))
@@ -483,6 +583,33 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         sess: DebugSession = self.server.session  # type: ignore[attr-defined]
+        if self.path in ("/api/dryrun", "/api/policypreview", "/api/comment", "/api/macro"):
+            try:
+                length = int(self.headers.get("content-length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                assert isinstance(body, dict)
+            except (ValueError, AssertionError):
+                self._json(400, {"error": "bad json body"})
+                return
+            if self.path == "/api/dryrun":
+                try:
+                    self._json(200, sess.dry_run(int(body.get("step", 0)), body.get("args")))
+                except (ValueError, RuntimeError) as e:
+                    self._json(400, {"error": str(e)})
+                except Exception as e:  # noqa: BLE001
+                    self._json(502, {"error": f"dry-run failed: {e}"})
+            elif self.path == "/api/policypreview":
+                self._json(200, sess.policy_preview(body.get("deny"), body.get("confirm"),
+                                                    str(body.get("corpus", ""))))
+            elif self.path == "/api/comment":
+                sess.comments.append({"step": body.get("step"), "text": str(body.get("text", ""))[:2000],
+                                      "label": str(body.get("label", ""))[:40]})
+                self._json(200, {"ok": True, "comments": len(sess.comments)})
+            else:  # /api/macro
+                sess.macro.append({"action": str(body.get("action", ""))[:40],
+                                   "detail": str(body.get("detail", ""))[:200]})
+                self._json(200, {"ok": True})
+            return
         if self.path == "/api/chat":
             try:
                 length = int(self.headers.get("content-length") or 0)
@@ -626,6 +753,10 @@ button.fault:hover{background:#4a3c22}
 #faultval{background:#161311;border-color:#3a2f1a}
 .bnode{border:1px solid #24242a;border-radius:8px;padding:8px 11px;margin:6px 0;font-size:12.5px}
 .bmeta{color:#7fc3ff;font-size:11px;margin-left:6px}
+button.on{background:#1d3a5c;color:#dbeaff}
+.lane{font-size:9px;padding:0 5px;border-radius:8px;margin-right:5px;text-transform:uppercase;letter-spacing:.3px}
+.lane.l0{background:#25333f;color:#7fc3ff}.lane.l1{background:#2d2438;color:#c79bff}.lane.l2{background:#1f3a2a;color:#7ee0a0}.lane.l3{background:#3a2323;color:#ff9b9b}
+.step.swim.d1{margin-left:16px}.step.swim.d2{margin-left:32px}.step.swim.d3{margin-left:48px}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -641,6 +772,8 @@ button.fault:hover{background:#4a3c22}
       <input id="brk" placeholder="⏹ break: tool:send_email · cap:network" title="conditional breakpoint" style="margin-left:12px;width:210px">
       <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
       <button id="branches" title="the branch tree">🌳</button>
+      <button id="swim" title="swimlanes by agent/subagent depth">⇄</button>
+      <button id="export" title="download a shareable .loomdebug session">💾</button>
       <button id="copilot" style="margin-left:auto">🤖 Copilot</button>
     </div>
     <div id="copilotpanel" class="hidden"></div>
@@ -685,11 +818,16 @@ async function load(){
   renderSteps(); select(0);
 }
 function typeClass(t){return "b-"+t}
+const LANES=["main agent","subagent","sub-subagent","depth 3"];
 function renderSteps(){
   const el=document.getElementById("steps");
   el.innerHTML=steps.map((s,i)=>{
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
     const lbl=s.tool?E(s.tool):E(s.type);
+    if(SWIM){
+      const lane=`<span class="lane l${Math.min(s.depth,3)}">${E(LANES[s.depth]||("depth "+s.depth))}</span>`;
+      return `<div class="step swim d${Math.min(s.depth,3)}" data-i="${i}"><span class="muted">${s.step}</span>${lane}<span class="badge ${typeClass(s.type)}">${E(s.type)}</span> <span>${lbl}</span>${risky}</div>`;
+    }
     const ind=s.depth?`<span class="depth">${"› ".repeat(s.depth)}</span>`:"";
     return `<div class="step" data-i="${i}"><span class="muted">${s.step}</span>`+
       `<span class="badge ${typeClass(s.type)}">${E(s.type)}</span>${ind}<span>${lbl}</span>${risky}</div>`;
@@ -732,6 +870,7 @@ function renderDetail(){
   }
   h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
   if(s.type==="call") h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
+  h+=`<div id="dynpanels"></div>`;  // pack-contributed panels (SQL plan, file, screenshot…)
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
   if(s.risk) h+=`<div class="k">risk</div><span class="chip risk">⚠ ${E(s.risk)}</span>`;
   if(s.policy) h+=`<div class="k">firewall</div><span class="chip">${E(s.policy.action)} ${E(s.policy.rule||"")}</span>`;
@@ -766,6 +905,27 @@ function renderDetail(){
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
   const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
   const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
+  loadPanels(s.step);
+  if(s.type==="call"&&canFork){const dp=document.getElementById("dryrunbtn"); if(dp)dp.onclick=doDryRun;}
+}
+async function loadPanels(step){
+  const box=document.getElementById("dynpanels"); if(!box)return;
+  const r=await (await fetch("/api/panels?step="+step)).json();
+  let h=r.panels.map(p=>`<div class="k">🧩 ${E(p.title)}</div>`+(p.code!=null?`<pre class="code">${E(p.code)}</pre>`:`<div>${E(p.text||"")}</div>`)).join("");
+  const s=steps[cur];
+  if(s.type==="call"&&canFork) h+=`<div class="k">▷ dry-run <span class="muted">— run just this tool with edited args (no model call)</span></div>
+    <textarea id="dryargs" rows="2">${E(J(s.input||{}))}</textarea><button id="dryrunbtn" class="mini">▷ run tool</button><div id="dryout"></div>`;
+  box.innerHTML=h;
+  const dp=document.getElementById("dryrunbtn"); if(dp)dp.onclick=doDryRun;
+}
+async function doDryRun(){
+  const s=steps[cur], out=document.getElementById("dryout");
+  let args; try{args=JSON.parse(document.getElementById("dryargs").value);}catch(e){out.innerHTML='<pre class="risky">args must be JSON</pre>';return;}
+  out.innerHTML='<span class="muted">running…</span>';
+  const r=await fetch("/api/dryrun",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({step:s.step,args})});
+  const res=await r.json();
+  if(!r.ok){out.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
+  else out.innerHTML=`<div class="fl">result (${res.ms}ms)${res.error?" · ERROR":""}</div><pre class="code">${E(res.error||res.result)}</pre>`;
 }
 async function loadBlame(){
   const s=steps[cur], box=document.getElementById("blame");
@@ -959,8 +1119,17 @@ async function showBranches(){
       <span class="bmeta">score ${b.score} · ${b.tokens.toLocaleString()} tok</span>
       <div class="muted">${E(b.output)}</div></div>`).join("");
 }
+let SWIM=false;
+function toggleSwim(){SWIM=!SWIM; document.getElementById("swim").classList.toggle("on",SWIM); renderSteps(); select(cur);}
+async function exportSession(){
+  const r=await fetch("/api/export"); const blob=await r.blob();
+  const u=URL.createObjectURL(blob), a=document.createElement("a");
+  a.href=u; a.download="session.loomdebug"; a.click(); URL.revokeObjectURL(u);
+}
 document.getElementById("rootcause").onclick=gotoRootCause;
 document.getElementById("branches").onclick=showBranches;
+document.getElementById("swim").onclick=toggleSwim;
+document.getElementById("export").onclick=exportSession;
 document.getElementById("copilot").onclick=()=>{document.getElementById("copilotpanel").dataset.view="chat";loadCopilot();};
 document.getElementById("prev").onclick=()=>select(cur-1);
 document.getElementById("next").onclick=()=>select(cur+1);

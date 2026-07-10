@@ -134,6 +134,14 @@ class Pack:
         """How to restore this domain's state before replaying (advisory)."""
         return ""
 
+    def debugger_panels(self, action: Action, trace: dict) -> "list[dict]":
+        """Extra panels this domain contributes to the `loom debug` UI for
+        ``action`` -- e.g. a SQL pack's query plan, a browser pack's screenshot,
+        a support pack's customer-impact card. Each panel is
+        {"title": str, "text"|"code": str}. Default: none, so the debugger is a
+        platform packs can extend, not a fixed UI."""
+        return []
+
     def safe_runtime(self) -> str:
         """How to run this domain SAFELY while debugging -- a sandboxed world
         where the agent's actions can't cause real harm (a dry-run DB, a

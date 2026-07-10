@@ -71,6 +71,13 @@ class SqlPack(Pack):
         return bool(_statement(action.input)) or any(
             fnmatch(action.tool.lower(), g) for g in _TOOL_NAMES)
 
+    def debugger_panels(self, action: Action, trace: dict) -> "list[dict]":
+        stmt = _statement(action.input)
+        if not stmt:
+            return []
+        op, table = _op_and_table(stmt)
+        return [{"title": f"🗄 SQL · {op} on {table or '?'}", "code": stmt[:4000]}]
+
     def capabilities(self, name: str, tool_input) -> "set[str]":
         stmt = _statement(tool_input)
         if not stmt:
