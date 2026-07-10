@@ -201,3 +201,43 @@ def test_fork_can_override_system_and_tools(tmp_path):
     # the fork endpoint path runs with overrides
     res = sess.fork(at=1, system="terse", tools=["a", "b"])
     assert "branch_steps" in res
+
+
+def test_fork_fault_injects_a_tool_result(tmp_path):
+    """set_results overrides a tool result in the replayed prefix, so the live
+    tail reacts to 'what if the tool returned X?'. A context-sensitive provider
+    echoes the last tool result, so the branch output reflects the injected one."""
+    import json as _json
+
+    from loom import Agent, tool
+    from loom.debugger import DebugSession
+    from loom.providers import ModelResponse, ToolCall
+
+    @tool
+    def get_data(q: str) -> str:
+        "Get data."
+        return "REAL_DATA"
+
+    class _Echo:
+        model = "echo"
+        def complete(self, system, messages, tools):
+            n = sum(1 for m in messages if m.get("role") == "assistant")
+            if n == 0:
+                return ModelResponse(tool_calls=[ToolCall("1", "get_data", {"q": "x"})], stop_reason="tool_use")
+            last_tool = ""
+            for m in messages:
+                if m.get("role") == "tool":
+                    last_tool = str(m.get("content", ""))
+            return ModelResponse(text=f"the data was: {last_tool}", stop_reason="end_turn")
+
+    agent = Agent(model=_Echo(), tools=[get_data])
+    p = tmp_path / "t.loom.json"
+    run = agent.run("get it")
+    run.save(str(p))
+    assert "REAL_DATA" in run.output  # baseline
+
+    sess = DebugSession(str(p), agent=agent)
+    tool_step = next(e["seq"] for e in _json.load(open(p))["log"] if e["kind"].startswith("tool:get_data"))
+    at = sess.next_model_turn_after(tool_step)
+    res = sess.fork(at=at, set_results={tool_step: "INJECTED_ERROR"})
+    assert "INJECTED_ERROR" in res["branch_output"]  # the tail reacted to the fake result

@@ -267,19 +267,42 @@ class DebugSession:
         return Agent(model=model_arg, tools=picked, system=sys_p, max_steps=self.agent.max_steps)
 
     def fork(self, at: int, append: str = "", model: str = "keep",
-             system: "str | None" = None, tools: "list[str] | None" = None) -> dict:
-        """Replay 0..at-1 from the log, apply the edits (context / system / tools),
-        run the tail live."""
+             system: "str | None" = None, tools: "list[str] | None" = None,
+             set_results: "dict | None" = None) -> dict:
+        """Replay 0..at-1 from the log, apply the edits (context / system / tools /
+        injected tool results), run the tail live.
+
+        ``set_results`` = {step: fake_result} FAULT-INJECTS a tool result: the
+        replayed prefix serves the fake value, so the live tail reacts to "what
+        if this tool had returned X?" -- an error, empty, or hostile output --
+        without touching the agent's code.
+        """
         from .trace import Run
 
         agent = self._agent_for(model, system, tools)
         base = Run.load(self.trace_path, agent=agent)
+        if set_results:
+            want = {int(k): v for k, v in set_results.items()}
+            for e in base.log:
+                if e.seq in want:
+                    e.result = want[e.seq]
         edit = None
         if append.strip():
             text = append  # captured for the callback
             edit = lambda ctx: ctx.add_user(text, source="debugger")  # noqa: E731
         branch = base.fork(at=at, edit=edit)
         return _branch_payload(self.data, branch.to_dict(), at)
+
+    def next_model_turn_after(self, step: int) -> "int | None":
+        """The turn index of the first top-level model call after ``step`` --
+        the fork point where a tool-result override at ``step`` takes effect."""
+        from .action import actions
+
+        for a in actions(self.data):
+            if a.step > step and a.type in ("reason", "answer") and a.replay \
+                    and a.replay.forkable:
+                return a.replay.turn
+        return None
 
 
 # -- HTTP layer -------------------------------------------------------------
@@ -371,10 +394,12 @@ class _Handler(BaseHTTPRequestHandler):
             return
         system = body.get("system")
         tools = body.get("tools")
+        sr = body.get("set_results")
         try:
             result = sess.fork(at, str(body.get("append", "")), str(body.get("model", "keep")),
                                system=system if isinstance(system, str) else None,
-                               tools=tools if isinstance(tools, list) else None)
+                               tools=tools if isinstance(tools, list) else None,
+                               set_results=sr if isinstance(sr, dict) else None)
             self._json(200, result)
         except (IndexError, RuntimeError, ValueError) as e:
             self._json(400, {"error": str(e)})
@@ -470,6 +495,9 @@ label.tk{font-size:12px;color:#cfcfd6;display:flex;align-items:center;gap:5px;cu
 #run:hover{background:#244a72}
 .branchhead{color:#7ee0a0;font-weight:600;margin:14px 0 4px}
 #fork textarea,#fork select{margin-top:2px}
+button.fault{background:#3a2f1a;border-color:#5c4a2c;color:#ffe0a0;margin-top:8px}
+button.fault:hover{background:#4a3c22}
+#faultval{background:#161311;border-color:#3a2f1a}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -561,6 +589,11 @@ function renderDetail(){
     h+=`<div class="k">${s.tool?"tool input":"input"}</div><pre>${E(J(s.input))}</pre>`;
   }
   if(o.text) h+=`<div class="k">result</div><pre>${E(o.text.length>4000?o.text.slice(0,4000)+"\n… (truncated)":o.text)}</pre>`;
+  if(s.type==="call"&&o.text!=null&&canFork&&steps.some(x=>x.step>s.step&&(x.replay||{}).forkable)){
+    h+=`<div class="k">🧪 fault injection <span class="muted">— what if this tool had returned something else?</span></div>
+      <textarea id="faultval" rows="2" placeholder="a different tool result to test error handling / edge cases / hostile output">${E((o.text||"").slice(0,2000))}</textarea>
+      <button id="faultrun" class="fault">🧪 Inject &amp; re-run from here</button><div id="faultbranch"></div>`;
+  }
   if(s.state_diff&&s.state_diff.kind&&s.state_diff.kind!=="none"){
     h+=`<div class="k">🌍 world change · ${E(s.state_diff.kind)}</div>`;
     if(s.state_diff.summary) h+=`<div class="sub2">${E(s.state_diff.summary)}</div>`;
@@ -599,6 +632,7 @@ function renderDetail(){
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
   const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
+  const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
 }
 async function loadBlame(){
   const s=steps[cur], box=document.getElementById("blame");
@@ -630,6 +664,27 @@ async function loadContext(){
     const cur=m.step===s.step?" curframe":"";
     return `<div class="frame${cur}"><span class="rl">${role}</span><pre>${E((m.content||"").slice(0,1500))}</pre></div>`;
   }).join("");
+}
+async function faultInject(){
+  const s=steps[cur];
+  const after=steps.find(x=>x.step>s.step&&(x.replay||{}).forkable);
+  if(!after){alert("no model call after this step to re-run");return;}
+  const at=(after.replay||{}).turn;
+  const btn=document.getElementById("faultrun"), bx=document.getElementById("faultbranch");
+  btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> re-running…'; bx.innerHTML="";
+  try{
+    const val=document.getElementById("faultval").value, sr={}; sr[s.step]=val;
+    const r=await fetch("/api/fork",{method:"POST",headers:{"content-type":"application/json"},
+      body:JSON.stringify({at,set_results:sr})});
+    const res=await r.json();
+    if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
+    else{
+      const div=res.diverge;
+      const bs=res.branch_steps.map((b,i)=>`<div class="branchstep${div!=null&&i>=div?' div':''}"><span class="muted">${b.step}</span> <b>${E(b.tool||b.type)}</b> ${E((b.intent||"").slice(0,60))}</div>`).join("");
+      bx.innerHTML=`<div class="branchhead">✅ how the agent reacts to the injected result</div><div class="fl">output</div><pre>${E(res.branch_output)}</pre>${bs}`;
+    }
+  }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
+  finally{btn.disabled=false; btn.innerHTML="🧪 Inject &amp; re-run from here";}
 }
 async function doFork(){
   const s=steps[cur], at=(s.replay||{}).turn;

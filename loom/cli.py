@@ -1727,6 +1727,23 @@ def _cmd_scan(args: argparse.Namespace) -> int:
     return 1 if (args.gate and report["high"]) else 0
 
 
+def _cmd_whatif(args: argparse.Namespace) -> int:
+    """Fault injection: re-run a trace with a tool result overridden ('what if?')."""
+    from .debugger import DebugSession
+
+    agent, err = _load_agent(args.agent)
+    if agent is None:
+        raise CLIError(err)
+    sess = DebugSession(args.path, agent=agent)
+    at = sess.next_model_turn_after(args.step)
+    if at is None:
+        raise CLIError(f"no model call after step {args.step} to re-run")
+    res = sess.fork(at=at, set_results={args.step: args.result})
+    print(f"↯ injected step {args.step} = {args.result!r}, re-ran from model call #{at}\n")
+    print("branch output:\n  " + res["branch_output"].strip().replace("\n", "\n  ")[:800])
+    return 0
+
+
 def _cmd_debug(args: argparse.Namespace) -> int:
     """Open an interactive step-debugger for a trace (step through + fork live)."""
     import webbrowser
@@ -3568,6 +3585,13 @@ def build_parser() -> argparse.ArgumentParser:
     sc.add_argument("--gate", action="store_true", help="exit 1 if any high finding")
     sc.add_argument("--json", action="store_true", help="machine-readable")
     sc.set_defaults(func=_cmd_scan)
+
+    wi = sub.add_parser("whatif", help="fault injection: re-run with a tool result overridden")
+    wi.add_argument("path")
+    wi.add_argument("--step", type=int, required=True, help="the tool step to override")
+    wi.add_argument("--result", required=True, help="the fake result to inject")
+    wi.add_argument("--agent", required=True, help="module:attr for the live re-run")
+    wi.set_defaults(func=_cmd_whatif)
 
     db = sub.add_parser("debug", help="interactive step-debugger: step through a run + fork it live")
     db.add_argument("path")
