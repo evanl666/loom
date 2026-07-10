@@ -84,15 +84,16 @@ def steps_for(data: dict) -> list[dict]:
     return out
 
 
-def context_at(data: dict, step: int) -> list[dict]:
+def context_at(data: dict, step: int, acts=None) -> list[dict]:
     """The conversation the model had seen up to (and including) ``step`` --
     the debugger's "current frame": the prompt, prior reasoning, tool calls, and
-    tool results that were in context when this step ran."""
+    tool results that were in context when this step ran. ``acts`` may be a
+    precomputed ``actions(data)`` to avoid re-parsing (see static_data)."""
     from .action import actions
 
     prompt = (data.get("episodes") or [data.get("prompt", "")])[0]
     frame: list[dict] = [{"role": "user", "content": str(prompt), "step": -1}]
-    for a in actions(data):
+    for a in (actions(data) if acts is None else acts):
         if a.step > step:
             break
         if a.type in ("reason", "answer") and a.intent:
@@ -1408,7 +1409,8 @@ async function loadContext(){
   const s=steps[cur], box=document.getElementById("ctx");
   document.getElementById("ctxbtn").remove();
   box.innerHTML='<span class="muted">loading…</span>';
-  const r = STATIC ? {frame: SD.context[s.step]||[]} : await (await fetch("/api/context?step="+s.step)).json();
+  const r = STATIC ? {frame:(SD.context_all||[]).filter(m=>m.step<=s.step)}
+                   : await (await fetch("/api/context?step="+s.step)).json();
   box.innerHTML=r.frame.map(m=>{
     const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human"}[m.role]||m.role;
     const cur=m.step===s.step?" curframe":"";
@@ -1747,14 +1749,15 @@ load();
 </script></body></html>"""
 
 
-def _panels_for(data: dict, step: int) -> "list[dict]":
+def _panels_for(data: dict, step: int, acts=None) -> "list[dict]":
     """Domain panels contributed by packs for the action at ``step`` (module-level
-    twin of DebugSession.panels_for, for the static export)."""
+    twin of DebugSession.panels_for, for the static export). ``acts`` may be a
+    precomputed ``actions(data)`` to avoid re-parsing."""
     from .action import actions
     from .packs import install_builtin, packs
 
     install_builtin()
-    a = next((x for x in actions(data) if x.step == step), None)
+    a = next((x for x in (actions(data) if acts is None else acts) if x.step == step), None)
     if a is None:
         return []
     out: list[dict] = []
@@ -1788,6 +1791,10 @@ def static_data(data: dict) -> dict:
             return default
 
     steps = _safe(lambda: steps_for(data), [])
+    # Parse the log ONCE and reuse it for every step's context + panels, instead
+    # of re-parsing per step (which made a 300-step trace O(n^2) / seconds).
+    from .action import actions
+    acts = _safe(lambda: actions(data), [])
     d = data if isinstance(data, dict) else {}
     run = {
         "prompt": d.get("prompt", ""), "output": d.get("output", ""),
@@ -1795,18 +1802,22 @@ def static_data(data: dict) -> dict:
         "can_fork": False, "can_chat": False, "live": False, "running": False,
         "system": d.get("system", ""), "all_tools": [],
     }
-    ctx: dict = {}
+    # The conversation frame is CUMULATIVE (frame N contains all messages 0..N),
+    # so inlining one per step is O(n^2) data -- a 300-step run ballooned the
+    # HTML to ~23 MB. Inline the full message list ONCE; the page reconstructs
+    # "the frame at step N" by filtering messages with step <= N client-side.
+    mx = max((s.get("step", -1) for s in steps if isinstance(s, dict)), default=-1)
+    context_all = _safe(lambda: context_at(data, mx, acts=acts), [])
     panels: dict = {}
     for s in steps:
         st = s.get("step") if isinstance(s, dict) else None
-        if not isinstance(st, int) or st < 0 or str(st) in ctx:
+        if not isinstance(st, int) or st < 0 or str(st) in panels:
             continue
-        ctx[str(st)] = _safe(lambda st=st: context_at(data, st), [])
-        p = _safe(lambda st=st: _panels_for(data, st), [])
+        p = _safe(lambda st=st: _panels_for(data, st, acts=acts), [])
         if p:
             panels[str(st)] = p
     return {"run": run, "agents": _safe(lambda: infer_agents(data), {"multi": False, "agents": []}),
-            "context": ctx, "panels": panels,
+            "context_all": context_all, "panels": panels,
             "rootcause": _safe(lambda: first_bad_step(data), {"found": False}),
             "branches": []}
 

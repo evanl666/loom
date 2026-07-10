@@ -29,10 +29,8 @@ def test_static_data_inlines_what_the_page_fetches():
     assert sd["run"]["steps"] and sd["run"]["can_fork"] is False and sd["run"]["live"] is False
     # multi-agent recovery is inlined
     assert sd["agents"]["multi"] and {a["label"] for a in sd["agents"]["agents"]} == {"lead", "researcher"}
-    # per-step context frames are precomputed for every real step
-    for s in sd["run"]["steps"]:
-        if s.get("step", -1) >= 0:
-            assert str(s["step"]) in sd["context"]
+    # the full conversation is inlined ONCE (the page filters by step client-side)
+    assert sd["context_all"] and all("step" in m for m in sd["context_all"])
 
 
 def test_static_page_is_self_contained_and_is_the_debugger():
@@ -54,3 +52,59 @@ def test_static_page_survives_a_hostile_trace():
             "prompt": "</script>", "output": "</script>", "tools": {}}
     html = static_page(data)
     assert "</script><b>x" not in html  # escaped as <\/script>
+
+
+def test_static_data_parses_the_log_a_bounded_number_of_times():
+    """Regression: static_data used to call actions() once PER STEP (O(n^2), a
+    300-step trace took seconds). It must parse the log a constant number of
+    times regardless of trace length."""
+    import loom.action as A
+    from loom.debugger import static_data
+
+    log = []
+    for i in range(80):
+        log.append({"seq": len(log), "kind": "model", "result": {"tool_calls": [
+            {"id": str(i), "name": "search", "input": {"q": str(i)}}], "stop_reason": "tool_use"}})
+        log.append({"seq": len(log), "kind": "tool:search", "result": "r" * 40})
+    data = {"log": log, "prompt": "go", "output": "d", "tools": {"search": ["network"]}}
+
+    orig = A.actions
+    calls = {"n": 0}
+    A.actions = lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1), orig(*a, **k))[1]
+    try:
+        sd = static_data(data)
+    finally:
+        A.actions = orig
+    assert len(sd["run"]["steps"]) > 80
+    assert calls["n"] <= 6, f"static_data re-parsed the log {calls['n']}x (should be O(1))"
+    # correctness preserved: the conversation is inlined once, filterable by step
+    assert sd["context_all"] and all("step" in m for m in sd["context_all"])
+
+
+def test_static_html_size_is_linear_not_quadratic():
+    """Regression: cumulative context frames inlined per step made the HTML
+    O(n^2) in size (a 300-step run was ~23 MB). Inlining the conversation once
+    keeps a 200-step run well under a couple MB."""
+    from loom.debugger import static_page
+
+    log = []
+    for i in range(200):
+        log.append({"seq": len(log), "kind": "model", "result": {"tool_calls": [
+            {"id": str(i), "name": "search", "input": {"q": str(i)}}], "stop_reason": "tool_use"}})
+        log.append({"seq": len(log), "kind": "tool:search", "result": "result data " * 30})
+    data = {"log": log, "prompt": "go", "output": "d", "tools": {"search": ["network"]}}
+    assert len(static_page(data)) < 2_000_000    # < 2 MB (was tens of MB)
+
+
+def test_static_context_filter_matches_server_frame():
+    from loom.debugger import context_at, static_data
+
+    steps = []
+    for i in range(6):
+        steps.append({"seq": len(steps), "kind": "model", "result": {"tool_calls": [
+            {"id": str(i), "name": "get", "input": {"i": i}}], "stop_reason": "tool_use"}})
+        steps.append({"seq": len(steps), "kind": "tool:get", "result": f"r{i}"})
+    data = {"log": steps, "prompt": "go", "output": "d", "tools": {"get": ["read"]}}
+    allc = static_data(data)["context_all"]
+    for st in (0, 3, 11):
+        assert [m for m in allc if m["step"] <= st] == context_at(data, st)
