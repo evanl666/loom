@@ -1507,6 +1507,20 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     return 1 if (args.gate and c["findings"]) else 0
 
 
+def _cmd_dataset(args: argparse.Namespace) -> int:
+    """Compile a corpus of runs into training / eval data (sft/trajectory/eval/dpo)."""
+    from .dataset import compile_dataset, write_jsonl
+
+    records = compile_dataset(args.directory, args.format)
+    if args.output:
+        n = write_jsonl(records, args.output)
+        print(f"wrote {n} {args.format} record(s) -> {args.output}", file=sys.stderr)
+    else:
+        for r in records:
+            print(json.dumps(r))
+    return 0
+
+
 def _cmd_scan(args: argparse.Namespace) -> int:
     """Security posture for an agent's tool surface (a run or a corpus)."""
     from .scan import describe_scan, scan
@@ -3136,6 +3150,13 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
+
+    ds = sub.add_parser("dataset", help="compile a corpus of runs into training/eval data")
+    ds.add_argument("_from", metavar="from", choices=["from"], help="literal: dataset from <dir>")
+    ds.add_argument("directory")
+    ds.add_argument("--format", default="sft", choices=["sft", "trajectory", "eval", "dpo"])
+    ds.add_argument("-o", "--output", default="", help="output .jsonl (default: stdout)")
+    ds.set_defaults(func=_cmd_dataset)
 
     sc = sub.add_parser("scan", help="agent supply-chain security posture (tool surface + gaps)")
     sc.add_argument("path", help="a trace or a directory of traces")
