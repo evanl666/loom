@@ -25,24 +25,53 @@ import re
 
 # Role phrases we can lift from a system prompt to name an anonymous wire agent.
 _ROLE_PATTERNS = [
-    re.compile(r"you are (?:the |a |an )?([\w][\w -]{1,28}?)(?:[.,:;]| that | who | which | agent| assistant| whose)", re.I),
-    re.compile(r"\b([\w-]+)[ -](?:agent|worker|subagent|specialist)\b", re.I),
+    re.compile(r"you are (?:the |a |an )?([\w][\w -]{1,34}?)(?:[.,:;\n]| that | who | which | whose | designed| responsible)", re.I),
+    re.compile(r"\b([\w][\w -]{1,28}?)[ -](?:agent|worker|subagent|specialist|assistant|analyst|reviewer|planner|orchestrator|supervisor)\b", re.I),
 ]
-_STOP = {"you", "a", "an", "the", "helpful", "an", "ai", "assistant"}
+_STOP = {"you", "a", "an", "the", "helpful", "ai", "are", "is", "was", "be",
+         "your", "this", "that", "our", "my", "an"}
+# Generic identities that don't distinguish a sub-agent (a framework preamble
+# like Claude Code's "You are Claude Code..."). Skip these and keep scanning
+# for the specific role a sub-agent was given.
+_GENERIC = {
+    "", "claude", "claude code", "assistant", "an assistant", "ai assistant",
+    "helpful assistant", "chatbot", "agent", "an agent", "language model",
+}
+# Role keywords that mark a *specific* role -- preferred over a bare noun.
+_SPECIFIC = re.compile(
+    r"specialist|researcher|writer|worker|analyst|reviewer|planner|orchestrator|"
+    r"supervisor|coder|engineer|manager|expert|assistant\b", re.I)
+
+
+def _clean_role(phrase: str) -> str:
+    phrase = re.sub(r"\s+", " ", phrase or "").strip(" -.,'\"")
+    words = [w for w in phrase.split(" ") if w.lower() not in _STOP]
+    return " ".join(words[:3])[:26]
+
+
+def best_role(system: str) -> "str | None":
+    """The most specific role phrase in a (possibly long) system prompt.
+
+    A sub-agent framework often prepends a generic identity ("You are Claude
+    Code...") and only later states the sub-agent's real role ("You are a
+    Landmark Researcher"). We scan the WHOLE prompt, drop generic identities,
+    and prefer a phrase carrying a role keyword."""
+    if not system:
+        return None
+    cands: list[str] = []
+    for pat in _ROLE_PATTERNS:
+        for m in pat.finditer(system):
+            role = _clean_role(m.group(1))
+            if role and role.lower() not in _GENERIC:
+                cands.append(role)
+    if not cands:
+        return None
+    specific = [c for c in cands if _SPECIFIC.search(c)]
+    return (specific or cands)[0]
 
 
 def _label_from_system(head: str) -> "str | None":
-    head = (head or "").strip()
-    if not head:
-        return None
-    for pat in _ROLE_PATTERNS:
-        m = pat.search(head)
-        if m:
-            phrase = re.sub(r"\s+", " ", m.group(1)).strip(" -.,")
-            words = [w for w in phrase.split(" ") if w.lower() not in _STOP]
-            if words:
-                return " ".join(words[:3])[:24]
-    return None
+    return best_role(head)
 
 
 def _entries(data: dict) -> list:
@@ -90,6 +119,7 @@ def infer_agents(data: dict) -> dict:
             rec = agents.get(key)
             if rec is None:
                 rec = {"key": key, "label": None, "sys_head": meta.get("sys_head", ""),
+                       "sys_role": meta.get("sys_role", ""),
                        "model": meta.get("model", "") or data.get("model", ""),
                        "tools": list(meta.get("tools", [])), "calls": 0, "depth": depth}
                 agents[key] = rec
@@ -124,7 +154,7 @@ def infer_agents(data: dict) -> dict:
         if key[0] == "name":
             label = key[1]
         else:
-            label = _label_from_system(rec["sys_head"]) or f"agent {i + 1}"
+            label = rec.get("sys_role") or _label_from_system(rec["sys_head"]) or f"agent {i + 1}"
         base, n = label, 2
         while label in used:  # disambiguate collisions
             label = f"{base} ({n})"; n += 1

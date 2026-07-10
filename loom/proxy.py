@@ -107,12 +107,18 @@ class WireRecorder:
             system = _flatten(request.get("system", ""))
             tools = sorted(t.get("name", "") for t in (request.get("tools") or []))
         system = system or ""
-        return {
+        from .multiagent import best_role
+
+        fp = {
             "sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
             "sys_head": system[:160],
             "tools": [t for t in tools if t],
             "model": request.get("model", self.model),
         }
+        role = best_role(system)  # scan the FULL prompt for the specific role
+        if role:
+            fp["sys_role"] = role
+        return fp
 
     def _append(self, kind: str, payload, result, meta: "dict | None" = None) -> None:
         self.log.append(

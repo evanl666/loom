@@ -4,7 +4,7 @@ import hashlib
 
 from loom import Agent, tool
 from loom.action import actions
-from loom.multiagent import infer_agents
+from loom.multiagent import best_role, infer_agents
 from loom.providers import ModelResponse, ScriptedProvider, ToolCall
 
 
@@ -65,6 +65,18 @@ def test_wire_fingerprint_recovers_two_agents():
     # the coder's tool call is attributed to the coder, not the supervisor
     assert ia["step_agent"]["3"] == ia["step_agent"]["2"]
     assert ia["step_agent"]["0"] != ia["step_agent"]["2"]
+
+
+def test_best_role_finds_specific_role_past_generic_preamble():
+    # a framework preamble ("You are Claude Code...") must not mask the sub-agent's
+    # real role stated later in the same (possibly long) system prompt.
+    assert best_role("You are Claude Code. [800 chars] You are a Landmark Researcher. "
+                     "Be terse.") == "Landmark Researcher"
+    assert best_role("You are the Supervisor. Delegate to workers.") == "Supervisor"
+    assert best_role("You are a Math Specialist. Use calculate.") == "Math Specialist"
+    # generic identities give no label (caller falls back to "agent N")
+    assert best_role("You are a helpful assistant.") is None
+    assert best_role("You are Claude, made by Anthropic.") is None
 
 
 def test_single_agent_is_not_multi():
