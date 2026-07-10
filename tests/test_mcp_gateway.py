@@ -1,47 +1,59 @@
-"""MCP gateway: capability manifest + shield-guarded tools (no live server)."""
+"""MCP Gateway: firewall + record in front of an upstream MCP server.
 
+Uses a fake upstream (no live MCP server needed) to test the screen/forward/
+record core; the stdio re-serve is exercised separately with a real server.
+"""
 from loom import tool
-from loom.mcp import guarded_tools, mcp_manifest
+from loom.mcp import MCPGateway
+from loom.scan import scan
 from loom.shield import Shield
-
-
-@tool(capabilities={"network"})
-def send_webhook(url: str) -> str:
-    "post to a url"
-    return "sent"
 
 
 @tool
 def read_file(path: str) -> str:
-    "read a file"
-    return "contents"
+    "Read a file."
+    return f"contents of {path}"
 
 
-@tool
-def run_shell(cmd: str) -> str:
-    "run a shell command"
-    return "ok"
+@tool(capabilities={"write"})
+def write_file(path: str, content: str) -> str:
+    "Write a file."
+    _RAN.append(path)
+    return "written"
 
 
-def test_manifest_classifies_each_tool():
-    m = {r["tool"]: r for r in mcp_manifest([send_webhook, read_file, run_shell])}
-    assert m["send_webhook"]["declared"] is True
-    assert "network" in m["send_webhook"]["capabilities"]
-    assert "read" in m["read_file"]["capabilities"]
-    assert "exec" in m["run_shell"]["capabilities"]  # inferred from the name shape
-    assert all("schema" in r for r in m.values())
+_RAN = []
 
 
-def test_guarded_tools_block_denied_calls():
-    shield = Shield(deny=["cap:exec"])
-    guarded = {t.name: t for t in guarded_tools([read_file, run_shell], shield)}
-    # a denied exec tool returns a BLOCKED result instead of running
-    assert guarded["run_shell"].fn(cmd="rm -rf /").startswith("BLOCKED")
-    # an allowed tool runs normally
-    assert guarded["read_file"].fn(path="a.py") == "contents"
+class _FakeUpstream:
+    def tools(self):
+        return [read_file, write_file]
+
+    def call(self, name, **kwargs):
+        return {"read_file": read_file, "write_file": write_file}[name].fn(**kwargs)
 
 
-def test_guarded_confirm_falls_back_to_block():
-    shield = Shield(confirm=["cap:network"])
-    g = {t.name: t for t in guarded_tools([send_webhook], shield)}
-    assert g["send_webhook"].fn(url="http://x").startswith("BLOCKED")
+def test_gateway_blocks_denied_call_and_records():
+    _RAN.clear()
+    gw = MCPGateway(_FakeUpstream(), shield=Shield(deny=["write_file*"]))
+    assert "contents of x" in gw.call("read_file", path="x")  # allowed -> forwarded
+    blocked = gw.call("write_file", path="y", content="z")
+    assert blocked.startswith("BLOCKED")  # denied -> not forwarded
+    assert _RAN == []  # the real write never ran
+    decisions = [(c["tool"], c["decision"]) for c in gw.calls]
+    assert decisions == [("read_file", "allow"), ("write_file", "deny")]
+
+
+def test_gateway_traffic_is_a_scannable_trace():
+    gw = MCPGateway(_FakeUpstream(), shield=Shield(deny=["write_file*"]))
+    gw.call("read_file", path="x")
+    gw.call("write_file", path="y", content="z")
+    trace = gw.to_trace()
+    assert trace["log"] and trace["tools"]
+    rep = scan(trace)  # the recorded traffic analyzes like any loom trace
+    assert {"read_file", "write_file"} <= {t["name"] for t in rep["tools"]}
+
+
+def test_gateway_trust_score():
+    gw = MCPGateway(_FakeUpstream())
+    assert 0 <= gw.trust()["score"] <= 100

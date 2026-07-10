@@ -121,6 +121,114 @@ def guarded_tools(tools: "list[Tool]", shield) -> "list[Tool]":
     return wrapped
 
 
+class MCPGateway:
+    """A firewall + black-box recorder in front of an upstream MCP server.
+
+    The MCP equivalent of ``loom proxy``: every ``tools/call`` is screened by a
+    Shield (deny/confirm block it before it runs), forwarded to the real server,
+    and recorded -- so the traffic replays, taints, and scans like any other
+    Loom trace. Point a *loom agent* at ``gateway.guarded_tools()``, or re-serve
+    it to Claude Desktop / Cursor over stdio with ``serve_stdio()`` (a drop-in
+    firewalled MCP endpoint).
+    """
+
+    def __init__(self, upstream: "MCPServer", shield: Any = None, save_path: str = ""):
+        self.upstream = upstream
+        self.shield = shield
+        self.save_path = save_path
+        self.calls: list[dict] = []  # {tool, input, decision, rule, result}
+
+    def manifest(self) -> "list[dict]":
+        return mcp_manifest(self.upstream.tools())
+
+    def trust(self) -> dict:
+        return mcp_trust(self.manifest())
+
+    def list_tools(self) -> "list[Tool]":
+        return self.upstream.tools()
+
+    def call(self, name: str, **kwargs: Any) -> str:
+        """Screen, forward, record. A denied/confirmed call never reaches upstream."""
+        decision, rule = "allow", ""
+        if self.shield is not None:
+            decision, rule = self.shield.classify(name, kwargs)
+        if decision in ("deny", "confirm"):
+            result = (f"BLOCKED: {name} not run -- MCP gateway firewall {decision}"
+                      + (f" (rule: {rule})" if rule else ""))
+            self._record(name, kwargs, decision, rule, result)
+            return result
+        result = self.upstream.call(name, **kwargs)
+        self._record(name, kwargs, "allow", rule, result)
+        return result
+
+    def _record(self, name: str, args: dict, decision: str, rule: str, result: str) -> None:
+        self.calls.append({"tool": name, "input": args, "decision": decision,
+                           "rule": rule, "result": result})
+        if self.save_path:
+            self.save(self.save_path)
+
+    def to_trace(self) -> dict:
+        """The recorded traffic as a loom trace (so taint / scan / replay work)."""
+        log: list[dict] = []
+        seq = 0
+        for c in self.calls:
+            log.append({"seq": seq, "kind": "model", "key": f"g{seq}", "result": {
+                "text": "", "tool_calls": [{"id": f"c{seq}", "name": c["tool"], "input": c["input"]}],
+                "stop_reason": "tool_use", "usage": {}}})
+            seq += 1
+            log.append({"seq": seq, "kind": f"tool:{c['tool']}", "key": f"g{seq}",
+                        "result": c["result"]})
+            seq += 1
+        caps = {m["tool"]: m["capabilities"] for m in self.manifest()}
+        shield_events = [{"tool": c["tool"], "input": c["input"], "action": "deny",
+                          "rule": c["rule"], "via": "gateway"}
+                         for c in self.calls if c["decision"] in ("deny", "confirm")]
+        return {"version": 2, "prompt": "MCP gateway session", "output": "",
+                "episodes": ["MCP gateway session"], "log": log, "tools": caps,
+                "stop_reason": "end_turn", "shield_events": shield_events}
+
+    def save(self, path: str) -> None:
+        with open(path, "w") as f:
+            json.dump(self.to_trace(), f, indent=2)
+
+    def guarded_tools(self) -> "list[Tool]":
+        """Upstream tools, each routed through this gateway (screen + record)."""
+        from dataclasses import replace
+
+        out = []
+        for t in self.upstream.tools():
+            out.append(replace(t, fn=lambda _n=t.name, **kw: self.call(_n, **kw)))
+        return out
+
+    def serve_stdio(self, name: str = "loom-mcp-gateway") -> None:
+        """Re-expose the upstream (firewalled + recorded) as an MCP server on
+        stdio, so any MCP client can use the guarded endpoint. Blocks."""
+        import anyio
+        from mcp.server import Server
+        from mcp.server.stdio import stdio_server
+        from mcp.types import TextContent, Tool as MCPTool
+
+        server: Server = Server(name)
+        tools = self.upstream.tools()
+
+        @server.list_tools()
+        async def _list():  # noqa: ANN202
+            return [MCPTool(name=t.name, description=t.description,
+                            inputSchema=getattr(t, "input_schema", None)
+                            or {"type": "object", "properties": {}}) for t in tools]
+
+        @server.call_tool()
+        async def _call(tool_name: str, arguments: dict):  # noqa: ANN202
+            result = await anyio.to_thread.run_sync(lambda: self.call(tool_name, **(arguments or {})))
+            return [TextContent(type="text", text=str(result))]
+
+        async def _run():
+            async with stdio_server() as (r, w):
+                await server.run(r, w, server.create_initialization_options())
+
+        anyio.run(_run)
+
+
 def _require_mcp():
     try:
         from mcp import ClientSession, StdioServerParameters

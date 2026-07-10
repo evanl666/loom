@@ -1284,7 +1284,7 @@ def _cmd_alert(args: argparse.Namespace) -> int:
 
 def _cmd_mcp(args: argparse.Namespace) -> int:
     """MCP gateway: a capability manifest for an MCP server's tools."""
-    from .mcp import MCPServer, describe_mcp_trust, mcp_manifest, mcp_trust
+    from .mcp import MCPGateway, MCPServer, describe_mcp_trust, mcp_manifest, mcp_trust
 
     try:
         server = MCPServer(args.command, args=args.args or [])
@@ -1292,6 +1292,26 @@ def _cmd_mcp(args: argparse.Namespace) -> int:
         raise CLIError(str(e))
     except Exception as e:
         raise CLIError(f"could not start MCP server: {e}")
+
+    if getattr(args, "mcp_cmd", "") == "gateway":
+        from .shield import Shield
+        from .policy_file import load_document, to_shield_kwargs
+
+        kw = to_shield_kwargs(load_document(args.policy)) if args.policy else {}
+        kw.setdefault("deny", []); kw["deny"] = list(kw["deny"]) + args.deny
+        kw.setdefault("confirm", []); kw["confirm"] = list(kw["confirm"]) + args.confirm
+        gw = MCPGateway(server, shield=Shield(**kw), save_path=args.save)
+        t = gw.trust()
+        print(f"loom MCP gateway: firewalling {len(gw.list_tools())} tool(s), "
+              f"trust {t['score']}/100 ({t['grade']})"
+              + (f", recording -> {args.save}" if args.save else ""), file=sys.stderr)
+        try:
+            gw.serve_stdio()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.close()
+        return 0
     try:
         manifest = mcp_manifest(server.tools())
     finally:
@@ -3119,6 +3139,15 @@ def build_parser() -> argparse.ArgumentParser:
     mc_man.add_argument("args", nargs="*", help="arguments to the server command")
     mc_man.add_argument("--json", action="store_true", help="machine-readable")
     mc_man.set_defaults(func=_cmd_mcp)
+    mc_gw = mcsub.add_parser("gateway",
+                             help="firewall + record an MCP server, re-served on stdio")
+    mc_gw.add_argument("command", help="the upstream MCP server command, e.g. npx")
+    mc_gw.add_argument("args", nargs="*", help="arguments to the server command")
+    mc_gw.add_argument("--deny", action="append", default=[], metavar="GLOB")
+    mc_gw.add_argument("--confirm", action="append", default=[], metavar="GLOB")
+    mc_gw.add_argument("--policy", default="", help="a policy file for the firewall")
+    mc_gw.add_argument("--save", default="", metavar="FILE", help="record traffic to a trace")
+    mc_gw.set_defaults(func=_cmd_mcp)
 
     lb = sub.add_parser("leaderboard", help="rank agents by safety/cost/risk (<dir>/<agent>/*.loom.json)")
     lb.add_argument("directory")
