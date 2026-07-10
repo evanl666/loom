@@ -1533,6 +1533,30 @@ def _cmd_cost(args: argparse.Namespace) -> int:
     return 1 if (args.gate and c["findings"]) else 0
 
 
+def _cmd_snapshot(args: argparse.Namespace) -> int:
+    """Capture / restore an agent's external world (dirs + SQLite DBs)."""
+    from .worldstate import WorldSnapshot, describe_restore
+
+    if args.snapshot_cmd == "capture":
+        if not args.dir and not args.sqlite:
+            raise CLIError("capture needs at least one --dir or --sqlite")
+        w = WorldSnapshot(args.store)
+        for d in args.dir:
+            w.add_dir(d)
+        for db in args.sqlite:
+            w.add_sqlite(db)
+        w.save()
+        print(f"captured {len(w.entries)} world(s) -> {args.store}", file=sys.stderr)
+        return 0
+    # restore
+    try:
+        w = WorldSnapshot.load(args.store)
+    except (OSError, json.JSONDecodeError) as e:
+        raise CLIError(f"no snapshot at {args.store}: {e}")
+    print(describe_restore(w.restore_all()))
+    return 0
+
+
 def _cmd_dataset(args: argparse.Namespace) -> int:
     """Compile a corpus of runs into training / eval data (sft/trajectory/eval/dpo)."""
     from .dataset import compile_dataset, write_jsonl
@@ -3226,6 +3250,17 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("--fix", action="store_true", help="also emit concrete cost patches")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
+
+    sn = sub.add_parser("snapshot", help="capture / restore an agent's world (dirs + SQLite DBs)")
+    snsub = sn.add_subparsers(dest="snapshot_cmd", required=True)
+    sn_cap = snsub.add_parser("capture", help="snapshot world state into a store")
+    sn_cap.add_argument("store", help="store directory to write")
+    sn_cap.add_argument("--dir", action="append", default=[], metavar="DIR", help="a workspace")
+    sn_cap.add_argument("--sqlite", action="append", default=[], metavar="DB", help="a SQLite DB")
+    sn_cap.set_defaults(func=_cmd_snapshot)
+    sn_res = snsub.add_parser("restore", help="restore world state from a store")
+    sn_res.add_argument("store", help="store directory to restore from")
+    sn_res.set_defaults(func=_cmd_snapshot)
 
     ds = sub.add_parser("dataset", help="compile a corpus of runs into training/eval data")
     ds.add_argument("_from", metavar="from", choices=["from"], help="literal: dataset from <dir>")

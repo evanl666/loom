@@ -72,6 +72,50 @@ class FileTreeSnapshot(SnapshotBackend):
             pass
 
 
+class SqliteSnapshot(SnapshotBackend):
+    """A snapshot of a SQLite database -- the world of a SQL agent.
+
+    Uses the sqlite backup API (consistent even with an open/WAL database), so
+    a fork can rewind a test DB to its state at turn N and re-run against real
+    rows, not replayed text. Captures on construction.
+    """
+
+    def __init__(self, db_path: str, store_path: "str | None" = None):
+        import sqlite3
+
+        self.db_path = os.path.abspath(db_path)
+        if not os.path.isfile(self.db_path):
+            raise ValueError(f"{db_path} is not a SQLite file")
+        fd, self.store_path = (None, store_path) if store_path else tempfile.mkstemp(suffix=".sqlite")
+        if fd is not None:
+            os.close(fd)
+        self._sqlite3 = sqlite3
+        self._copy(self.db_path, self.store_path)  # capture
+
+    def _copy(self, src: str, dst: str) -> None:
+        s = self._sqlite3.connect(src)
+        d = self._sqlite3.connect(dst)
+        try:
+            with d:
+                s.backup(d)
+        finally:
+            s.close()
+            d.close()
+
+    def restore(self) -> bool:
+        """Overwrite the live DB with the captured snapshot."""
+        if not os.path.isfile(self.store_path):
+            return False
+        self._copy(self.store_path, self.db_path)
+        return True
+
+    def drop(self) -> None:
+        try:
+            os.remove(self.store_path)
+        except OSError:
+            pass
+
+
 def _safe_extractall(tar: "tarfile.TarFile", dest: str) -> None:
     """Extract, refusing any member that would escape ``dest`` (tar traversal)."""
     dest = os.path.realpath(dest)
