@@ -122,6 +122,26 @@ def cost_patches(data: dict) -> "list[dict]":
     return patches
 
 
+def cost_markdown(data: dict) -> str:
+    """A PR-comment cost report: totals, burn findings, and copy-paste patches."""
+    c = analyze_cost(data)
+    patches = cost_patches(data)
+    lines = ["### 💸 Loom cost report",
+             f"**{c['total_tokens']:,} tokens** ({c['input_tokens']:,} in / "
+             f"{c['output_tokens']:,} out) over {c['turns']} turn(s)"]
+    if c["findings"]:
+        lines.append("\n| pattern | severity | detail |\n|---|---|---|")
+        for f in c["findings"]:
+            lines.append(f"| {f['pattern']} | {f['severity']} | {f['detail']} |")
+    if patches:
+        lines.append("\n**Suggested patches:**")
+        for p in patches:
+            lines.append(f"- **{p['title']}** — `{p['patch']}`  \n  {p['why']}")
+    if not c["findings"]:
+        lines.append("\n✅ no burn patterns detected.")
+    return "\n".join(lines)
+
+
 def describe_patches(patches: "list[dict]") -> str:
     if not patches:
         return "no cost patches -- nothing burning."

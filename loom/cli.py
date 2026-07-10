@@ -1536,6 +1536,11 @@ def _cmd_cost(args: argparse.Namespace) -> int:
 
     data = _load_trace_json(args.path)
     c = analyze_cost(data)
+    if getattr(args, "md", ""):
+        from .cost import cost_markdown
+        out = cost_markdown(data)
+        (print(out) if args.md == "-" else open(args.md, "w").write(out))
+        return 1 if (args.gate and c["findings"]) else 0
     if args.json:
         out = {**c, "patches": cost_patches(data)} if args.fix else c
         print(json.dumps(out, indent=2))
@@ -1658,6 +1663,18 @@ def _cmd_sbom(args: argparse.Namespace) -> int:
     else:
         print(describe_sbom(sbom) if not args.json else json.dumps(sbom, indent=2))
     return 0
+
+
+def _cmd_shadow(args: argparse.Namespace) -> int:
+    """Shadow-deploy a policy against a corpus: what would it change, offline."""
+    from .shadow import describe_shadow, shadow_eval
+
+    r = shadow_eval(_expand_trace_paths(args.paths), args.policy, args.baseline)
+    if args.json:
+        print(json.dumps(r, indent=2))
+    else:
+        print(describe_shadow(r))
+    return 1 if (args.gate and not r["safe"]) else 0
 
 
 def _cmd_intent(args: argparse.Namespace) -> int:
@@ -3417,6 +3434,7 @@ def build_parser() -> argparse.ArgumentParser:
     ct.add_argument("path")
     ct.add_argument("--gate", action="store_true", help="exit 1 if a burn pattern is found")
     ct.add_argument("--fix", action="store_true", help="also emit concrete cost patches")
+    ct.add_argument("--md", default="", metavar="FILE", help="write a PR-comment report ('-'=stdout)")
     ct.add_argument("--json", action="store_true", help="machine-readable")
     ct.set_defaults(func=_cmd_cost)
 
@@ -3481,6 +3499,14 @@ def build_parser() -> argparse.ArgumentParser:
     sb.add_argument("-o", "--output", default="", help="write SBOM JSON to a file")
     sb.add_argument("--json", action="store_true", help="print JSON to stdout")
     sb.set_defaults(func=_cmd_sbom)
+
+    sh = sub.add_parser("shadow", help="shadow-deploy a policy against a corpus (offline canary)")
+    sh.add_argument("paths", nargs="+", help="traces / directories")
+    sh.add_argument("--policy", required=True, help="the policy to shadow")
+    sh.add_argument("--baseline", default="", help="diff against a current policy")
+    sh.add_argument("--gate", action="store_true", help="exit 1 if it would break a successful run")
+    sh.add_argument("--json", action="store_true")
+    sh.set_defaults(func=_cmd_shadow)
 
     it = sub.add_parser("intent", help="intent firewall: flag actions that don't serve the request")
     it.add_argument("path")
