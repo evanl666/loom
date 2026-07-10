@@ -475,8 +475,36 @@ class DebugSession:
         ("switch to a stronger model", {"model": "claude-sonnet-5"}),
     ]
 
+    def _proposed_fixes(self) -> "list[tuple[str, dict]]":
+        """Ask the copilot model for fixes TAILORED to this trace (vs the canned
+        list): each is a context edit to inject at the fork point. Best-effort --
+        no copilot model, a bad reply, or an error just means no extra fixes."""
+        if not self.copilot_model:
+            return []
+        import re as _re
+
+        from .judge import _resolve, run_summary
+
+        try:
+            provider = _resolve(self.copilot_model)
+            system = ("You are a debugging copilot. Given an agent run's transcript, "
+                      "propose up to 2 SPECIFIC one-line instructions that, injected "
+                      "into the model's context at the failure point, would fix the "
+                      "run. Reply with ONLY a JSON array: "
+                      '[{"label": "<3-6 words>", "edit": "<the instruction>"}]')
+            resp = provider.complete(
+                system, [{"role": "user", "content": run_summary(self.data)}], [])
+            m = _re.search(r"\[.*\]", resp.text or "", _re.S)
+            fixes = json.loads(m.group(0)) if m else []
+            return [(f"copilot: {f['label'][:40]}", {"append": str(f["edit"])[:500]})
+                    for f in fixes[:2]
+                    if isinstance(f, dict) and f.get("label") and f.get("edit")]
+        except Exception:  # noqa: BLE001 -- smart fixes are a bonus, never a blocker
+            return []
+
     def auto_fix(self, at: int) -> "list[dict]":
-        """Try several canned fixes at ``at`` in parallel-ish and compare them."""
+        """Try several fixes at ``at`` and compare them: the canned playbook plus,
+        when a copilot model is available, fixes the model tailored to THIS trace."""
         from .action import actions
 
         risky = sorted({a.tool for a in actions(self.data)
@@ -484,7 +512,7 @@ class DebugSession:
                         & {"money_movement", "destructive", "database_write"})})
         keep = sorted(set(self.agent.tools) - set(risky)) if self.agent else []
         out = []
-        for name, spec in self._FIXES:
+        for name, spec in list(self._FIXES) + self._proposed_fixes():
             kw: dict = {}
             if "append" in spec:
                 kw["append"] = spec["append"]
@@ -791,7 +819,9 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 length = int(self.headers.get("content-length") or 0)
                 body = json.loads(self.rfile.read(length) or b"{}")
-                self._json(200, check_assertions(sess.data, str(body.get("q", ""))))
+                # the copilot model doubles as the judge for `judge:` lines
+                self._json(200, check_assertions(sess.data, str(body.get("q", "")),
+                                                 judge=sess.copilot_model or None))
             except (ValueError, TypeError) as e:
                 self._json(400, {"error": str(e)})
             return
@@ -1496,7 +1526,8 @@ async function showAssert(){
   if(drawerOpen("assert")){closeDrawer();return;}
   const p=openDrawer("assert","✔ Assertions");
   p.innerHTML=`<div class="muted" style="font-size:11px;margin-bottom:8px">one per line — turns your expectations into a repeatable check</div>
-    <div id="assertwrap"><textarea id="asrin" placeholder="output contains order 42
+    <div id="assertwrap"><textarea id="asrin" placeholder="judge: the agent verified the order before refunding
+output contains order 42
 never issue_refund*
 no blocked
 calls get_*

@@ -19,6 +19,10 @@ One assertion per line. The grammar is deliberately small and forgiving:
     steps < N        (or <=, =) how many actions the run took
     tokens < N                  total token budget bound
     answers                     the run produced a final answer at all
+    judge: <expectation>        a SEMANTIC expectation an LLM judges against the
+                                transcript ("the agent verified the order before
+                                refunding") -- needs a judge model (--judge / the
+                                debugger's copilot model)
 
 Unknown lines are reported as errors, never silently passed.
 """
@@ -33,13 +37,26 @@ def _tool_calls(acts) -> list:
     return [a for a in acts if a.type == "call"]
 
 
-def _eval_one(expr: str, data: dict, acts, output: str) -> dict:
+def _eval_one(expr: str, data: dict, acts, output: str, judge=None) -> dict:
     """Evaluate a single assertion line -> {expr, ok, detail} or {expr, error}."""
     raw = expr.strip()
     low = raw.lower()
 
     def ok(cond: bool, detail: str = "") -> dict:
         return {"expr": raw, "ok": bool(cond), "detail": detail}
+
+    # -- semantic expectation, judged by an LLM --
+    m = re.match(r"judge\s*:\s*(.+)", raw, re.I)
+    if m:
+        if judge is None:
+            return {"expr": raw, "error": "semantic assertion needs a judge model "
+                                          "(--judge MODEL, or the debugger's copilot)"}
+        from .judge import llm_judge
+
+        v = llm_judge(judge, m.group(1).strip(), data)
+        if "error" in v:
+            return {"expr": raw, "error": v["error"]}
+        return ok(v["ok"], v["reason"])
 
     # -- output checks --
     m = re.match(r"output\s+(?:contains|has|includes)\s+(.+)", low)
@@ -99,11 +116,12 @@ def _eval_one(expr: str, data: dict, acts, output: str) -> dict:
     return {"expr": raw, "error": "unrecognized assertion"}
 
 
-def check_assertions(data: dict, exprs: "list[str] | str") -> dict:
+def check_assertions(data: dict, exprs: "list[str] | str", judge=None) -> dict:
     """Evaluate assertions against a trace. Returns {results:[...], passed, total}.
 
     ``exprs`` is a list of lines or a single newline-separated string. Blank
-    lines and ``#`` comments are ignored."""
+    lines and ``#`` comments are ignored. ``judge`` (a model name or provider)
+    enables semantic ``judge:`` lines."""
     from .action import actions
 
     if isinstance(exprs, str):
@@ -111,7 +129,7 @@ def check_assertions(data: dict, exprs: "list[str] | str") -> dict:
     lines = [e for e in (x.strip() for x in exprs) if e and not e.startswith("#")]
     acts = actions(data)
     output = str(data.get("output", "") or "")
-    results = [_eval_one(e, data, acts, output) for e in lines]
+    results = [_eval_one(e, data, acts, output, judge=judge) for e in lines]
     passed = sum(1 for r in results if r.get("ok"))
     return {"results": results, "passed": passed, "total": len(results),
             "all_pass": bool(results) and all(r.get("ok") for r in results)}

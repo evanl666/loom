@@ -21,8 +21,13 @@ from typing import Any, Callable
 def run_experiment(agent: Any, prompt: str, systems: "list[str] | None" = None,
                    models: "list[str] | None" = None,
                    check: "Callable[[str], bool] | None" = None,
-                   save_dir: str = "") -> "list[dict]":
-    """Run the task under each (system x model) variant; return ranked results."""
+                   save_dir: str = "", judge: Any = None, criteria: str = "") -> "list[dict]":
+    """Run the task under each (system x model) variant; return ranked results.
+
+    ``check`` is a plain output predicate; ``judge`` + ``criteria`` instead give
+    a SEMANTIC success signal -- an LLM judges each variant's full transcript
+    against the criteria ("the agent verified the order before refunding"), so
+    variants are ranked by meaning, not string matching."""
     import os
 
     from .agent import Agent
@@ -47,6 +52,15 @@ def run_experiment(agent: Any, prompt: str, systems: "list[str] | None" = None,
                 os.makedirs(save_dir, exist_ok=True)
                 run.save(os.path.join(save_dir, f"variant{idx}.loom.json"))
             label = _label(s, m, idx)
+            success, reason = (bool(check(run.output)) if check else None), ""
+            if judge is not None and criteria:
+                from .judge import llm_judge
+
+                v = llm_judge(judge, criteria, data)
+                if "error" in v:
+                    success, reason = None, v["error"]
+                else:
+                    success, reason = v["ok"], v["reason"]
             results.append({
                 "variant": label,
                 "system": (sys_p[:60] + "…") if sys_p and len(sys_p) > 60 else (sys_p or "(default)"),
@@ -54,7 +68,8 @@ def run_experiment(agent: Any, prompt: str, systems: "list[str] | None" = None,
                 "output": run.output,
                 "score": score_breakdown(data)["overall"],
                 "tokens": analyze_cost(data)["total_tokens"],
-                "success": (bool(check(run.output)) if check else None),
+                "success": success,
+                **({"judge_reason": reason} if reason else {}),
                 "ok": not run.truncated and not run.stop_reason,
             })
 

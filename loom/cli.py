@@ -1742,7 +1742,8 @@ def _cmd_assert(args: argparse.Namespace) -> int:
     if not exprs:
         print("no assertions given -- pass -e '<assertion>' or -f <file>")
         return 2
-    r = check_assertions(_load_trace_json(args.path), exprs)
+    r = check_assertions(_load_trace_json(args.path), exprs,
+                         judge=(args.judge or None))
     if args.json:
         print(json.dumps(r, indent=2))
     else:
@@ -1780,7 +1781,8 @@ def _cmd_experiment(args: argparse.Namespace) -> int:
     elif args.absent:
         check = absent_check(args.absent)
     results = run_experiment(agent, args.prompt, systems=args.system or None,
-                             models=args.model or None, check=check, save_dir=args.save)
+                             models=args.model or None, check=check, save_dir=args.save,
+                             judge=(args.judge or None), criteria=args.criteria)
     print(json.dumps(results, indent=2) if args.json else describe_experiment(results))
     return 0
 
@@ -3029,6 +3031,10 @@ def build_parser() -> argparse.ArgumentParser:
     xp.add_argument("--model", action="append", default=[], help="a model variant (repeatable)")
     xp.add_argument("--contains", default="", help="success = output contains this")
     xp.add_argument("--absent", default="", help="success = output does NOT contain this")
+    xp.add_argument("--judge", default="", metavar="MODEL",
+                    help="judge model: success = the transcript meets --criteria (semantic)")
+    xp.add_argument("--criteria", default="",
+                    help="the expectation the judge scores each variant against")
     xp.add_argument("--save", default="", help="save each variant's trace to this dir")
     xp.add_argument("--json", action="store_true")
     xp.set_defaults(func=_cmd_experiment)
@@ -3738,6 +3744,8 @@ def build_parser() -> argparse.ArgumentParser:
     asrt.add_argument("-e", "--expr", action="append", metavar="ASSERTION",
                       help="an assertion, e.g. 'never issue_refund*' (repeatable)")
     asrt.add_argument("-f", "--file", help="read assertions from a file, one per line")
+    asrt.add_argument("--judge", default="", metavar="MODEL",
+                      help="judge model for semantic 'judge: <expectation>' lines")
     asrt.add_argument("--json", action="store_true", help="machine-readable")
     asrt.set_defaults(func=_cmd_assert)
 

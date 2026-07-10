@@ -146,7 +146,7 @@ recorded as a replayable, taint-able trace.
 | `loom whatif --step N --result X` | **fault injection**: re-run with a tool result overridden |
 | `loom experiment "task" --system … --model …` | **A/B** prompts + models, scored & ranked |
 | `loom intent <trace> --judge` | **intent firewall**: flag actions that don't serve the request |
-| `loom assert <trace> -e "never issue_refund*"` | **behavioural assertions** as a CI gate (the debugger's assert bar) |
+| `loom assert <trace> -e "never issue_refund*"` | **behavioural assertions** as a CI gate — add `--judge` for semantic `judge: <expectation>` lines |
 | `loom canary run --agent m:a` | **honeytokens**: bait the agent, catch exfiltration |
 | `loom taint` / `loom dlp --judge` | exfiltration lineage · **semantic DLP** |
 | `loom scan` / `loom sbom` | supply-chain posture · CycloneDX **bill of materials** |

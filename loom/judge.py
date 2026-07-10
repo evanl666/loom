@@ -1,0 +1,76 @@
+"""One shared LLM-judgment primitive for every "is this expectation met?" surface.
+
+String rules (``output contains X``) can't express *semantic* expectations --
+"the agent verified the order before refunding", "the reply is polite". This
+module turns such an expectation + a compact view of the run into a strict
+pass/fail verdict with a reason, using whatever judge model the caller supplies.
+
+Used by:
+  * assertions.py  -- ``judge: <expectation>`` lines (assert bar + ``loom assert --judge``)
+  * experiment.py  -- ``judge_check(model, criteria)`` as a ranking check
+  * debugger.py    -- the assert drawer judges with the copilot model automatically
+
+Deliberately conservative: a judge error or malformed reply is reported as an
+error, never silently passed -- an eval that can quietly succeed is worse than
+no eval.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from typing import Any
+
+
+def _resolve(model: Any):
+    if isinstance(model, str):
+        from .agent import _resolve_provider
+
+        return _resolve_provider(model, None)
+    return model
+
+
+def run_summary(data: dict, max_chars: int = 4000) -> str:
+    """A compact, judge-readable view of a run: prompt, each action, output."""
+    from .action import actions
+
+    lines = [f"USER REQUEST: {str(data.get('prompt', ''))[:500]}"]
+    for a in actions(data):
+        if a.type == "call":
+            obs = (a.observation.text or "")[:200] if a.observation else ""
+            lines.append(f"[{a.step}] tool {a.tool}({json.dumps(a.input, default=str)[:200]})"
+                         f" -> {obs}")
+        elif a.type == "answer" and a.intent:
+            lines.append(f"[{a.step}] agent answered: {a.intent[:300]}")
+        elif a.type == "reason" and a.intent:
+            lines.append(f"[{a.step}] agent reasoning: {a.intent[:200]}")
+    lines.append(f"FINAL OUTPUT: {str(data.get('output', ''))[:800]}")
+    text = "\n".join(lines)
+    return text[:max_chars]
+
+
+def llm_judge(model: Any, expectation: str, data: dict) -> dict:
+    """Judge one semantic expectation against a run.
+
+    Returns {"ok": bool, "reason": str} or {"error": str} -- never raises."""
+    try:
+        provider = _resolve(model)
+        system = (
+            "You are a strict evaluator of an AI agent's recorded run. Given the "
+            "transcript and ONE expectation, decide if the run satisfies it.\n"
+            'Reply with ONLY a JSON object: {"pass": true|false, "reason": "<one short sentence>"}\n'
+            "Judge only what the transcript shows; when genuinely ambiguous, fail it "
+            "and say why."
+        )
+        user = f"EXPECTATION: {expectation}\n\nTRANSCRIPT:\n{run_summary(data)}"
+        resp = provider.complete(system, [{"role": "user", "content": user}], [])
+        text = resp.text or ""
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            return {"error": f"judge gave no JSON verdict: {text[:80]!r}"}
+        verdict = json.loads(m.group(0))
+        if not isinstance(verdict, dict) or not isinstance(verdict.get("pass"), bool):
+            return {"error": f"judge verdict malformed: {text[:80]!r}"}
+        return {"ok": verdict["pass"], "reason": str(verdict.get("reason", ""))[:200]}
+    except Exception as e:  # noqa: BLE001 -- a judge failure is a result, not a crash
+        return {"error": f"judge error: {type(e).__name__}: {e}"}
