@@ -47,7 +47,7 @@ def test_index_lists_runs_and_search_filters(server):
 
 def test_per_run_studio_and_incident_views(server):
     studio = _get(server.url + "/run/studio?p=env.loom.json")
-    assert "Actions — what it did, why, what changed" in studio  # the Action Debugger
+    assert "window.LOOM_STATIC=" in studio  # the embedded debugger UI
     incident = _get(server.url + "/run?p=env.loom.json&view=incident")
     assert "Incident report" in incident
 
@@ -91,7 +91,7 @@ def test_replay_room_comments_and_triage(server):
     idx = _get(base + "/")
     assert "✓ resolved" in idx and "👤 evan" in idx
     # the raw studio remains available for embedding
-    assert "Actions — what it did, why, what changed" in _get(base + "/run/studio?p=env.loom.json")
+    assert "window.LOOM_STATIC=" in _get(base + "/run/studio?p=env.loom.json")
 
 
 def test_room_notes_interoperate_with_the_cli(server, tmp_path):

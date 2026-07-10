@@ -159,12 +159,13 @@ def test_why_no_evidence_is_low_or_none_and_flagged():
     assert w["confidence"] in ("low", "none")
 
 
-def test_studio_why_disclosure_present():
+def test_studio_renders_the_debugger_ui():
+    # Studio is now the debugger UI frozen into a file; "why" moved to the
+    # debugger's copilot / intent tools (loom.export's why-panel was retired).
     from loom.export import trace_to_html
     page = trace_to_html(_support_run().to_dict())
-    assert '<details class="why">' in page
-    assert "stated intent" in page and "correlation, not proof" in page
-    assert "wjump" in page  # evidence links jump to the step
+    assert page.startswith("<!DOCTYPE html>")
+    assert "window.LOOM_STATIC=" in page and "function renderTree" in page
 
 
 def test_cli_flake_auto_records_and_analyzes(tmp_path, capsys, monkeypatch):

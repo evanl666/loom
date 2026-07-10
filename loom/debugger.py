@@ -1740,33 +1740,57 @@ def _panels_for(data: dict, step: int) -> "list[dict]":
 
 def static_data(data: dict) -> dict:
     """Everything the debugger page fetches, precomputed -- so the SAME UI can be
-    frozen into a self-contained file (no server, no agent, no model)."""
+    frozen into a self-contained file (no server, no agent, no model).
+
+    Defensive throughout: ``trace_to_html`` delegates here and is an analyzer
+    that must never raise on a hand-edited / hostile / malformed trace."""
+    from .action import require_trace
     from .multiagent import infer_agents
     from .rootcause import first_bad_step
 
-    steps = steps_for(data)
+    data = require_trace(data)
+
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:  # noqa: BLE001
+            return default
+
+    steps = _safe(lambda: steps_for(data), [])
+    d = data if isinstance(data, dict) else {}
     run = {
-        "prompt": data.get("prompt", ""), "output": data.get("output", ""),
-        "model": data.get("model", ""), "steps": steps,
+        "prompt": d.get("prompt", ""), "output": d.get("output", ""),
+        "model": d.get("model", ""), "steps": steps,
         "can_fork": False, "can_chat": False, "live": False, "running": False,
-        "system": data.get("system", ""), "all_tools": [],
+        "system": d.get("system", ""), "all_tools": [],
     }
     ctx: dict = {}
     panels: dict = {}
     for s in steps:
-        st = s.get("step")
-        if st is None or st < 0 or str(st) in ctx:
+        st = s.get("step") if isinstance(s, dict) else None
+        if not isinstance(st, int) or st < 0 or str(st) in ctx:
             continue
-        ctx[str(st)] = context_at(data, st)
-        p = _panels_for(data, st)
+        ctx[str(st)] = _safe(lambda st=st: context_at(data, st), [])
+        p = _safe(lambda st=st: _panels_for(data, st), [])
         if p:
             panels[str(st)] = p
-    try:
-        rc = first_bad_step(data)
-    except Exception:  # noqa: BLE001
-        rc = {"found": False}
-    return {"run": run, "agents": infer_agents(data), "context": ctx,
-            "panels": panels, "rootcause": rc, "branches": []}
+    return {"run": run, "agents": _safe(lambda: infer_agents(data), {"multi": False, "agents": []}),
+            "context": ctx, "panels": panels,
+            "rootcause": _safe(lambda: first_bad_step(data), {"found": False}),
+            "branches": []}
+
+
+def _scrub_banner(data: dict) -> str:
+    """Green if `loom share` scrubbed it, amber otherwise -- the safety signal
+    that must survive on a shareable report."""
+    if data.get("scrubbed"):
+        return ('<div style="padding:7px 16px;font-size:12px;background:#152a1c;'
+                'color:#7ee0a0;border-bottom:1px solid #2f7a45">🛡️ Scrubbed &mdash; '
+                'secrets redacted, safe to share.</div>')
+    return ('<div style="padding:7px 16px;font-size:12px;background:#2a2418;'
+            'color:#e8c98a;border-bottom:1px solid #7a5a2a">⚠️ Not scrubbed &mdash; '
+            'this trace may contain secrets the agent saw. Run <code>loom share</code> '
+            'before sharing it.</div>')
 
 
 def static_page(data: dict) -> str:
@@ -1774,6 +1798,13 @@ def static_page(data: dict) -> str:
     the same page, with its data inlined and server-only features (fork / live /
     copilot / assert) switched off. Shareable -- the viewer needs neither Loom
     nor the agent."""
-    payload = json.dumps(static_data(data)).replace("</", "<\\/")
+    try:
+        payload = json.dumps(static_data(data), default=str).replace("</", "<\\/")
+    except Exception:  # noqa: BLE001 -- never let a bad trace break the viewer
+        payload = json.dumps({"run": {"steps": []}, "agents": {"multi": False, "agents": []},
+                              "context": {}, "panels": {}, "rootcause": {"found": False},
+                              "branches": []})
     inject = "<script>window.LOOM_STATIC=" + payload + ";</script>\n"
-    return _PAGE.replace("<script>", inject + "<script>", 1)
+    page = _PAGE.replace("<script>", inject + "<script>", 1)
+    banner = _scrub_banner(data if isinstance(data, dict) else {})
+    return page.replace("</header>", "</header>\n" + banner, 1)
