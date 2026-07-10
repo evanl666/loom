@@ -32,3 +32,26 @@ def test_trim_does_not_orphan_tool_results():
     msgs = ctx.messages()
     # A tool message must never be the first message (it would be an API error).
     assert not msgs or msgs[0]["role"] != "tool"
+
+
+def test_trim_prunes_orphan_tool_result_stranded_behind_a_pinned_item():
+    """Dropping an assistant that made a tool call must not leave its tool result
+    orphaned mid-list -- a pinned item ahead of the pair used to strand it, which
+    providers (Anthropic/OpenAI) reject as a tool_result without a tool_use."""
+    from loom.context import Context
+    from loom.providers import ModelResponse, ToolCall
+
+    ctx = Context()
+    ctx.add_user("PIN", pinned=True)
+    ctx.add_assistant(ModelResponse(text="X" * 400, tool_calls=[ToolCall("c1", "add", {"a": 1})]))
+    ctx.add_tool_result("c1", "add", "small")
+    ctx.add_user("Y" * 40)
+    ctx.budget = ctx.total_tokens() - 50  # forces dropping the fat assistant
+
+    msgs = ctx.messages()
+    for i, m in enumerate(msgs):
+        if m["role"] == "tool":
+            prev = msgs[i - 1] if i > 0 else None
+            assert prev and prev["role"] == "assistant" and any(
+                tc.id == m["tool_call_id"] for tc in prev.get("tool_calls", [])
+            ), "orphan tool result left in the trimmed context"

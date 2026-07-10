@@ -137,16 +137,34 @@ class Context:
     def _trim(self) -> list[Item]:
         """Drop the oldest unpinned items until under budget, keeping tool pairs sane."""
         if self.budget is None or self.total_tokens() <= self.budget:
-            return list(self.items)
+            return self._prune_orphan_tools(list(self.items))
 
         items = list(self.items)
-        # Walk from the front dropping unpinned items; never orphan a tool result
-        # (a leading 'tool' item has no preceding tool_use and would be invalid).
+        # Walk from the front dropping unpinned items, then prune any tool result
+        # left without its preceding tool_use -- dropping the assistant that made a
+        # call orphans its result, and a pinned item ahead of the pair means the
+        # orphan is stranded mid-list, not at the front (providers reject that).
         while items and sum(i.tokens for i in items) > self.budget:
             drop_idx = next((i for i, it in enumerate(items) if not it.pinned), None)
             if drop_idx is None:
                 break  # everything left is pinned
             del items[drop_idx]
-            while items and items[0].role == "tool":
-                del items[0]
+            items = self._prune_orphan_tools(items)
         return items
+
+    @staticmethod
+    def _prune_orphan_tools(items: list[Item]) -> list[Item]:
+        """Drop tool results whose matching tool_use assistant is no longer present."""
+        out: list[Item] = []
+        live: set[str] = set()  # tool_call ids offered by the most recent assistant
+        for it in items:
+            if it.role == "assistant":
+                live = {tc.id for tc in it.tool_calls}
+                out.append(it)
+            elif it.role == "tool":
+                if it.tool_call_id in live:
+                    out.append(it)  # else: orphan, drop it
+            else:  # user turn closes the open tool_use window
+                live = set()
+                out.append(it)
+        return out
