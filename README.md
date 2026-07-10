@@ -130,6 +130,9 @@ recorded as a replayable, taint-able trace.
 | `loom replay <trace>` | re-run byte-identical, $0, offline |
 | `loom debug <trace> --agent m:a` | **interactive step-debugger** + live fork |
 | `loom studio <trace>` | self-contained visual report |
+| `loom rootcause` / `loom loops` | the **first bad step** + cascade · repeated/oscillating loops |
+| `loom whatif --step N --result X` | **fault injection**: re-run with a tool result overridden |
+| `loom experiment "task" --system … --model …` | **A/B** prompts + models, scored & ranked |
 | `loom intent <trace> --judge` | **intent firewall**: flag actions that don't serve the request |
 | `loom canary run --agent m:a` | **honeytokens**: bait the agent, catch exfiltration |
 | `loom taint` / `loom dlp --judge` | exfiltration lineage · **semantic DLP** |
