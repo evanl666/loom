@@ -418,6 +418,7 @@ kbd{background:#22222a;border:1px solid #33333c;border-radius:4px;padding:0 5px;
 .sub2{color:#b7b7bf;margin-bottom:6px}
 button.mini{padding:1px 8px;font-size:11px;margin-left:6px}
 pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:block}pre.diff .hunk{color:#7fc3ff;display:block}
+pre.code{background:#0c0c0f;border-color:#2c2c34;color:#d7d7de;max-height:420px;font-size:12.5px}
 .frame{border:1px solid #24242a;border-radius:8px;margin:6px 0;overflow:hidden}
 .frame .rl{display:block;font-size:11px;color:#8a8a92;padding:4px 10px;background:#161619;border-bottom:1px solid #22222a}
 .frame.curframe{border-color:#4a9eff}.frame.curframe .rl{color:#4a9eff;background:#12202f}
@@ -455,6 +456,19 @@ button.adopt:hover{background:#3a2f4a}
 <script>
 const E=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const J=x=>{try{return JSON.stringify(x,null,2)}catch(e){return String(x)}};
+function codeFields(inp){
+  // pull the file path + code out of a write/edit tool input so it shows as
+  // real source, not buried JSON. Handles content / new_str / code / old_str→new_str.
+  if(!inp||typeof inp!=="object") return null;
+  const path=inp.path||inp.file_path||inp.filename||inp.file||inp.notebook_path||"";
+  let code=null, verb="";
+  if(inp.content!=null){code=inp.content; verb="write";}
+  else if(inp.new_str!=null){code=(inp.old_str!=null?"- "+inp.old_str+"\n+ ":"")+inp.new_str; verb="edit";}
+  else if(inp.code!=null){code=inp.code;}
+  if(!path||code==null) return null;
+  const rest={}; for(const k in inp) if(!["path","file_path","filename","file","notebook_path","content","new_str","old_str","code"].includes(k)) rest[k]=inp[k];
+  return {path, code:String(code), verb, rest:Object.keys(rest).length?J(rest):""};
+}
 let RUN=null, steps=[], cur=0, canFork=false, CAN_CHAT=false;
 
 async function load(){
@@ -492,7 +506,13 @@ function renderDetail(){
   let h=`<span class="badge ${typeClass(s.type)}">${E(s.type)}</span> `+
         (s.tool?`<b>${E(s.tool)}</b>`:"")+` <span class="muted">step ${s.step} · turn ${(s.replay||{}).turn??"?"}${s.depth?" · depth "+s.depth:""}</span>`;
   if(s.intent) h+=`<div class="k">model reasoning</div><pre>${E(s.intent)}</pre>`;
-  if(s.input!=null) h+=`<div class="k">${s.tool?"tool input / code":"input"}</div><pre>${E(J(s.input))}</pre>`;
+  const cf=codeFields(s.input);
+  if(cf){
+    h+=`<div class="k">📄 ${E(cf.path)}${cf.verb?` <span class="muted">(${cf.verb})</span>`:""}</div><pre class="code">${E(cf.code)}</pre>`;
+    if(cf.rest) h+=`<div class="k">args</div><pre>${E(cf.rest)}</pre>`;
+  } else if(s.input!=null){
+    h+=`<div class="k">${s.tool?"tool input":"input"}</div><pre>${E(J(s.input))}</pre>`;
+  }
   if(o.text) h+=`<div class="k">result</div><pre>${E(o.text.length>4000?o.text.slice(0,4000)+"\n… (truncated)":o.text)}</pre>`;
   if(s.state_diff&&s.state_diff.kind&&s.state_diff.kind!=="none"){
     h+=`<div class="k">🌍 world change · ${E(s.state_diff.kind)}</div>`;
