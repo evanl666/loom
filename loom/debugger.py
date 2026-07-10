@@ -108,6 +108,38 @@ def copilot_report(data: dict) -> dict:
             "policy_suggestion": policy}
 
 
+def memory_blame(data: dict, step: int) -> dict:
+    """Which recalled memories could have influenced the action at ``step``?
+
+    Lists the memory recalls that were in context before the action, flags any
+    that carry injected instructions, and points at counterfactual verification
+    (loom why --causal) to prove which one actually drove it.
+    """
+    from .action import actions, effect_dicts
+    from .inject import _INJECTION
+
+    acts = actions(data)
+    target = next((a for a in acts if a.step == step and a.type == "call"), None)
+    influences = []
+    for e in effect_dicts(data):
+        if e.get("kind") == "memory" and (e.get("seq") or 0) < step:
+            text = e["result"] if isinstance(e.get("result"), str) else ""
+            influences.append({"step": e.get("seq"),
+                               "poisoned": bool(_INJECTION.search(text)),
+                               "preview": (text[:220] + "…") if len(text) > 220 else text})
+    return {
+        "step": step, "tool": target.tool if target else "",
+        "turn": (target.replay.turn if target and target.replay else 0),
+        "influences": influences,
+        "verify": (f"loom why {'<trace>'} --step {step} --causal --agent m:a"
+                   if influences else ""),
+        "note": ("this action ran after a POISONED memory recall — verify causation"
+                 if any(i["poisoned"] for i in influences)
+                 else "no memory recalls preceded this action" if not influences
+                 else "memory recalls preceded this action; fork to test their effect"),
+    }
+
+
 def _branch_payload(base_data: dict, branch_data: dict, at: int) -> dict:
     """Original vs branch steps + the first step that differs."""
     a = steps_for(base_data)
@@ -187,6 +219,13 @@ class _Handler(BaseHTTPRequestHandler):
             })
         elif self.path == "/api/copilot":
             self._json(200, copilot_report(sess.data))
+        elif self.path.startswith("/api/blame"):
+            from urllib.parse import parse_qs, urlparse
+            try:
+                step = int(parse_qs(urlparse(self.path).query).get("step", ["0"])[0])
+            except (TypeError, ValueError):
+                step = 0
+            self._json(200, memory_blame(sess.data, step))
         elif self.path.startswith("/api/context"):
             from urllib.parse import parse_qs, urlparse
             try:
@@ -286,6 +325,7 @@ pre.diff .add{color:#7ee0a0;display:block}pre.diff .del{color:#ff9b9b;display:bl
 #copilotpanel.hidden{display:none}.cop-sum{margin-bottom:8px;color:#cfe3ff}
 .chip.jump{cursor:pointer}.chip.jump:hover{border-color:#4a9eff}
 .cop-edit{font-size:12px;color:#c79bff;margin:4px 0}
+.frame.poison{border-color:#e5484d}.frame.poison .rl{color:#ff9b9b;background:#2a1518}
 </style></head><body>
 <header><b>🔬 Loom debugger</b><span class="muted" id="prompt">loading…</span>
 <span class="muted" style="margin-left:auto" id="model"></span></header>
@@ -352,6 +392,7 @@ function renderDetail(){
     if(s.state_diff.detail) h+=`<pre class="diff">${diffHtml(typeof s.state_diff.detail==="string"?s.state_diff.detail:J(s.state_diff.detail))}</pre>`;
   }
   h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
+  if(s.type==="call") h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
   if(s.risk) h+=`<div class="k">risk</div><span class="chip risk">⚠ ${E(s.risk)}</span>`;
   if(s.policy) h+=`<div class="k">firewall</div><span class="chip">${E(s.policy.action)} ${E(s.policy.rule||"")}</span>`;
@@ -373,6 +414,19 @@ function renderDetail(){
   d.innerHTML=h;
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
+  const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
+}
+async function loadBlame(){
+  const s=steps[cur], box=document.getElementById("blame");
+  document.getElementById("blamebtn").remove();
+  box.innerHTML='<span class="muted">tracing…</span>';
+  const r=await (await fetch("/api/blame?step="+s.step)).json();
+  let h=`<div class="sub2">${E(r.note)}</div>`;
+  if(r.influences.length){
+    h+=r.influences.map(m=>`<div class="frame${m.poisoned?' poison':''}"><span class="rl">🧠 memory recall @${m.step}${m.poisoned?' ⚠ POISONED':''}</span><pre>${E(m.preview)}</pre></div>`).join("");
+    if(r.verify) h+=`<div class="cop-edit">verify causation: <code>${E(r.verify)}</code></div>`;
+  }
+  box.innerHTML=h;
 }
 function diffHtml(t){
   return E(t).split("\n").map(l=>{
