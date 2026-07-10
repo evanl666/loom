@@ -89,3 +89,39 @@ def test_single_agent_is_not_multi():
         ModelResponse(text="ok", stop_reason="end_turn")]), tools=[get], name="solo")
     ia = infer_agents(a.run("go").to_dict())
     assert ia["multi"] is False
+
+
+def test_wire_delayed_delegation_attributed_to_the_requester():
+    """A delegate tool whose result comes back AFTER the sub-agent ran (a paired
+    delegation) must be attributed to the REQUESTER (not whoever acted last),
+    flagged as a sub-agent hand-off, and re-anchored before the sub-agent's work.
+    Mirrors LangGraph's Research Lead -> ask_data_analyst -> Data Analyst."""
+    import hashlib
+    from loom.debugger import steps_for
+
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+                "sys_head": system, "sys_role": system.split(".")[0].replace("You are the ", ""),
+                "tools": tools, "model": "m"}
+    LEAD, WORKER = "You are the Research Lead.", "You are the Data Analyst."
+    data = {"recorded_via": "proxy", "model": "m", "output": "990", "tools": {}, "log": [
+        # Research Lead asks the analyst; the tool result (seq 4) comes back LATE
+        {"seq": 0, "kind": "model", "depth": 0, "meta": fp(LEAD, ["ask_analyst"]),
+         "result": {"tool_calls": [{"id": "1", "name": "ask_analyst", "input": {"t": "3*3"}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "model", "depth": 0, "meta": fp(WORKER, ["calc"]),
+         "result": {"tool_calls": [{"id": "2", "name": "calc", "input": {"e": "3*3"}}], "stop_reason": "tool_use"}},
+        {"seq": 2, "kind": "tool:calc", "depth": 0, "result": "9"},
+        {"seq": 3, "kind": "model", "depth": 0, "meta": fp(WORKER, ["calc"]),
+         "result": {"text": "9", "stop_reason": "end_turn"}},
+        {"seq": 4, "kind": "tool:ask_analyst", "depth": 0, "result": "9"},  # late result
+        {"seq": 5, "kind": "model", "depth": 0, "meta": fp(LEAD, ["ask_analyst"]),
+         "result": {"text": "990", "stop_reason": "end_turn"}},
+    ]}
+    steps = steps_for(data)
+    by_tool = {s["tool"]: s for s in steps if s.get("type") == "call"}
+    assert by_tool["ask_analyst"]["agent"] == "Research Lead"   # requester, not the analyst
+    assert by_tool["ask_analyst"]["is_delegation"] is True      # a sub-agent hand-off
+    assert by_tool["calc"]["agent"] == "Data Analyst"
+    # re-anchored: the hand-off is shown BEFORE the analyst's calc
+    order = [s.get("tool") for s in steps if s.get("type") == "call"]
+    assert order.index("ask_analyst") < order.index("calc")

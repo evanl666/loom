@@ -81,25 +81,64 @@ def steps_for(data: dict) -> list[dict]:
         # its user message opens the next turn.
         if idx in ends_after and ep_i < len(episodes) and idx != ends_after[-1]:
             out.append(_user_node(episodes[ep_i])); ep_i += 1
-    # A tool call is a DELEGATION (labelled "subagent") when it handed off to a
-    # sub-agent. The reliable signal is the drain marker actions() leaves on an
-    # unpaired delegation call (catches ALL of several parallel hand-offs); the
-    # next-step-goes-deeper heuristic is a fallback for framework delegate tools
-    # that DO return a result.
+    # Flag DELEGATION calls (labelled "subagent"). Three signals, most-reliable
+    # first: (1) the drain marker actions() leaves on an unpaired hand-off
+    # (catches parallel delegations); (2) a delegate tool that DID return a
+    # result, detected because a DEEPER agent ran between the call's request and
+    # its result (requested_at..step); (3) the immediate next step goes deeper.
     for i, d in enumerate(out):
         if d.get("type") != "call":
             continue
+        nest = d.get("nest", 0)
         obs = (d.get("observation") or {}).get("text") or ""
         if obs.startswith("(delegated to sub-agent"):
             d["is_delegation"] = True
             continue
+        req = d.get("requested_at", -1)
+        if req >= 0 and any(x.get("type") in ("reason", "answer", "call")
+                            and req <= x.get("step", -1) < d.get("step", -1)
+                            and x.get("nest", 0) > nest for x in out):
+            d["is_delegation"] = True
+            continue
         for nxt in out[i + 1:]:
             if nxt.get("type") == "user" or (nxt.get("type") == "call"
-                    and nxt.get("nest", 0) == d.get("nest", 0)):
+                    and nxt.get("nest", 0) == nest):
                 continue  # skip a user node or a sibling delegation at this level
-            if nxt.get("nest", 0) > d.get("nest", 0):
+            if nxt.get("nest", 0) > nest:
                 d["is_delegation"] = True
             break
+
+    # Re-anchor a delegation call whose result came back LATE (a paired delegate
+    # tool: the sub-agent ran, THEN the result arrived) to right BEFORE its
+    # sub-agent's first step, so the tree reads request -> sub-agent -> return
+    # instead of showing the hand-off after the work it triggered.
+    def _child_start(deleg):
+        req, res, n = deleg.get("requested_at", -1), deleg.get("step", -1), deleg.get("nest", 0)
+        for x in out:
+            if x is deleg:
+                continue
+            st = x.get("step", -1)
+            if req <= st < res and x.get("nest", 0) > n:
+                return x  # the sub-agent's first step (out is in result-seq order)
+        return None
+
+    before = {}   # id(child_first_step) -> the delegation to insert before it
+    move_ids = set()
+    for d in out:
+        if d.get("is_delegation") and d.get("requested_at", -1) >= 0:
+            c = _child_start(d)
+            if c is not None and id(c) not in before:
+                before[id(c)] = d
+                move_ids.add(id(d))
+    if move_ids:
+        reordered = []
+        for d in out:
+            if id(d) in move_ids:
+                continue  # skip its original (late) position
+            if id(d) in before:
+                reordered.append(before[id(d)])  # the hand-off, right before the child
+            reordered.append(d)
+        out = reordered
     return out
 
 

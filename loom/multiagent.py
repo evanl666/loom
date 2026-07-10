@@ -159,8 +159,16 @@ def infer_agents(data: dict) -> dict:
             if seq is not None:
                 step_agent[str(seq)] = key
         else:
-            # a tool / other effect belongs to the agent that just requested it
-            key = last_agent or (stack[-1] if stack else None)
+            # a tool / other effect belongs to the agent that REQUESTED it, NOT
+            # whoever acted last: its own meta.agent (native), else the agent
+            # still awaiting a result (stack top -- correct even for a delegation
+            # whose sub-agent has already returned and been popped), else the
+            # last agent to act.
+            m = e.get("meta") or {}
+            if m.get("agent") and ("name", m["agent"]) in agents:
+                key = ("name", m["agent"])
+            else:
+                key = (stack[-1] if stack else None) or last_agent
             if key is not None and seq is not None:
                 step_agent[str(seq)] = key
 

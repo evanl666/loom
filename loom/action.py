@@ -119,6 +119,9 @@ class Action:
     state_diff: "StateDiff | None" = None   # filled by a Pack
     policy: "PolicyDecision | None" = None
     replay: "ReplayPoint | None" = None
+    requested_at: int = -1  # seq of the model call that emitted this tool call
+                            # (differs from step when a sub-agent's result comes
+                            # back late) -- lets the debugger flag delegations
 
     @property
     def risky(self) -> bool:
@@ -138,6 +141,8 @@ class Action:
             d["capabilities"] = self.capabilities
         if self.risk:
             d["risk"] = self.risk
+        if self.requested_at >= 0:
+            d["requested_at"] = self.requested_at
         for k in ("observation", "state_diff", "policy", "replay"):
             v = getattr(self, k)
             if v is not None:
@@ -298,14 +303,14 @@ def actions(source: Any) -> list[Action]:
             queue = pending.get(e.depth) or []
             match = next((i for i, q in enumerate(queue) if q[0] == name), None)
             if match is None:
-                intent, tool_input = "", None
+                intent, tool_input, req_seq = "", None, -1
             else:
-                _, intent, tool_input, _, _ = queue.pop(match)
+                _, intent, tool_input, req_seq, _ = queue.pop(match)
             text = _result_text(e.result)
             err = isinstance(e.result, str) and e.result.startswith(("ERROR", "BLOCKED", "DRY-RUN"))
             out.append(Action(
                 step=e.seq, depth=e.depth, type="call", tool=name, intent=intent,
-                input=tool_input,
+                input=tool_input, requested_at=req_seq if req_seq != e.seq else -1,
                 capabilities=sorted(_caps(name, tool_input or {}, declared=_declared(name))),
                 risk=_classify(name, tool_input or {}),
                 observation=Observation(text=text, error=err, raw=e.result),
