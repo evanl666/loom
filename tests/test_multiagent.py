@@ -316,12 +316,19 @@ def test_generic_subagent_labeled_from_handoff_subagent_type():
     """When a sub-agent's OWN system prompt is too generic to name it (the Claude
     Agent SDK gives every call a 'You are Claude Code' preamble), label it from
     the explicit target its hand-off carried (Task tool subagent_type)."""
-    GEN = "You are Claude Code, an AI assistant."   # generic -> no role
+    GEN = "You are Claude Code, an AI assistant."   # generic -> best_role gives no name
+
+    def gen(who, tools, seq, tcs=None, text=None):
+        # a generic agent: sys_role EMPTY (best_role found nothing), like the CLI
+        meta = {"sys_hash": hashlib.sha1(who.encode()).hexdigest()[:12],
+                "sys_head": GEN, "sys_role": "", "tools": tools, "model": "m", "msgs": 1}
+        res = {"stop_reason": "tool_use", "tool_calls": tcs} if tcs else {"text": text or "", "stop_reason": "end_turn"}
+        return {"seq": seq, "kind": "model", "depth": 0, "meta": meta, "result": res}
+
     data = {"recorded_via": "proxy", "model": "m", "output": "x", "tools": {}, "log": [
-        _wire(GEN, ["Task"], seq=0, msgs=1,
-              tcs=[{"id": "1", "name": "Task", "input": {"subagent_type": "researcher", "prompt": "find X"}}]),
+        gen("orch", ["Task"], 0, tcs=[{"id": "1", "name": "Task", "input": {"subagent_type": "researcher", "prompt": "find X"}}]),
         {"seq": 1, "kind": "tool:Task", "result": "found"},
-        _wire(GEN, [], seq=2, msgs=1, text="330m"),   # the sub-agent: generic prompt, no tools
+        gen("sub", [], 2, text="330m"),   # the sub-agent: generic prompt, no tools of its own
     ]}
     labels = [a["label"] for a in infer_agents(data)["agents"]]
     assert "Researcher" in labels   # named from subagent_type, not "agent 2"
