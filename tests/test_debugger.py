@@ -241,3 +241,29 @@ def test_fork_fault_injects_a_tool_result(tmp_path):
     at = sess.next_model_turn_after(tool_step)
     res = sess.fork(at=at, set_results={tool_step: "INJECTED_ERROR"})
     assert "INJECTED_ERROR" in res["branch_output"]  # the tail reacted to the fake result
+
+
+def test_fork_injected_message_shows_as_a_node_in_the_branch():
+    """'inject into context' adds a real user turn the model saw at the fork point.
+    It must surface as an injected node attached to that turn's agent, so it shows
+    in the branch's step list and (for a sub-agent) inside its context."""
+    import hashlib
+
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12], "sys_head": system,
+                "sys_role": system.split(".")[0].replace("You are the ", ""), "tools": tools, "model": "m"}
+    data = {"recorded_via": "proxy", "model": "m", "output": "hi", "tools": {},
+            "fork_injections": {"0": "please say good morning"}, "log": [
+        {"seq": 0, "kind": "model", "meta": fp("You are the Coordinator.", ["ask_x"]),
+         "result": {"tool_calls": [{"id": "1", "name": "ask_x", "input": {}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "model", "meta": fp("You are the Worker.", []),
+         "result": {"text": "good morning, done", "stop_reason": "end_turn"}}]}
+    steps = steps_for(data)
+    inj = [s for s in steps if s.get("injected")]
+    assert len(inj) == 1
+    assert inj[0]["type"] == "user" and "good morning" in inj[0]["intent"]
+    # attached to the fork-point agent (the Coordinator, turn 0), before its step
+    assert inj[0].get("agent") == "Coordinator"
+    ci = next(i for i, s in enumerate(steps) if s.get("injected"))
+    mi = next(i for i, s in enumerate(steps) if s.get("type") == "reason" and s.get("agent") == "Coordinator")
+    assert ci < mi   # the injected turn comes before the model turn that saw it

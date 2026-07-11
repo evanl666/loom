@@ -81,6 +81,31 @@ def steps_for(data: dict) -> list[dict]:
         # its user message opens the next turn.
         if idx in ends_after and ep_i < len(episodes) and idx != ends_after[-1]:
             out.append(_user_node(episodes[ep_i])); ep_i += 1
+
+    # A fork's INJECTED message ("inject into context") is a real user turn the
+    # model saw at the fork point -- surface it as a node right before that turn's
+    # model step so it shows in the branch's step list AND its context.
+    injections = data.get("fork_injections") if isinstance(data.get("fork_injections"), dict) else {}
+    for turn_s, text in injections.items():
+        try:
+            turn = int(turn_s)
+        except (TypeError, ValueError):
+            continue
+        pos = next((i for i, d in enumerate(out)
+                    if d.get("type") in ("reason", "answer")
+                    and (d.get("replay") or {}).get("turn") == turn), None)
+        if pos is None:
+            continue
+        anchor = out[pos]
+        node = _user_node(str(text))
+        node["injected"] = True
+        if anchor.get("agent_id"):   # nest it under the agent that saw it
+            node["agent"] = anchor["agent"]
+            node["agent_id"] = anchor["agent_id"]
+            node["agent_color"] = anchor.get("agent_color", 0)
+            node["nest"] = anchor.get("nest", 0)
+        out.insert(pos, node)
+
     # DELEGATION detection -- principled, not structural. A tool call is a
     # delegation IFF the agent that made it actually SPAWNED a child agent (an
     # infer_agents edge) whose identity matches the call's name/args. This is
@@ -177,9 +202,11 @@ def steps_for(data: dict) -> list[dict]:
     if ia["multi"]:
         by_agent: dict = {}
         for d in out:
-            if d.get("type") != "user":
+            # an injected user node belongs to its agent (nests inline); the root
+            # prompt / episode roots (plain user nodes) open the dialogue at top.
+            if d.get("type") != "user" or d.get("injected"):
                 by_agent.setdefault(d.get("agent_id"), []).append(d)
-        user_nodes = [d for d in out if d.get("type") == "user"]
+        user_nodes = [d for d in out if d.get("type") == "user" and not d.get("injected")]
         seen_agents: set = set()
         grouped: list = list(user_nodes[:1])  # the root prompt opens the dialogue
 
@@ -590,6 +617,8 @@ class DebugSession:
             edit = lambda ctx: ctx.add_user(text, source="debugger")  # noqa: E731
         branch = base.fork(at=at, edit=edit)
         bdata = branch.to_dict()
+        if append.strip():   # so the injected message shows in the branch's context
+            bdata["fork_injections"] = {str(at): append.strip()}
         payload = _branch_payload(self.data, bdata, at)
         # record the branch in the tree (Git-branch-style experiment history)
         from .cost import analyze_cost
@@ -644,6 +673,8 @@ class DebugSession:
                  "append": append.strip() or None, "model": model,
                  "result_overrides": result_overrides or None}
         bdata = self.live.fork_external(at, edits)
+        if append.strip():   # so the injected message shows in the branch's context
+            bdata["fork_injections"] = {str(at): append.strip()}
         payload = _branch_payload(base, bdata, at)
         label = (append[:40] or (f"system: {system[:24]}" if system else "")
                  or (f"fault@{','.join(map(str, sorted(set_results)))}" if set_results else "")
@@ -1538,7 +1569,7 @@ function setLiveStat(t){const e=document.getElementById("livestat"); if(e)e.text
 function typeClass(t){return "b-"+t}
 // Clean, human labels: model / tool / subagent / you (instead of reason/call/answer).
 function stepKind(s){
-  if(s.type==="user") return {label:"you", cls:"b-user"};
+  if(s.type==="user") return s.injected?{label:"injected", cls:"b-user"}:{label:"you", cls:"b-user"};
   if(s.type==="call") return s.is_delegation ? {label:"subagent", cls:"b-sub"} : {label:"tool", cls:"b-call"};
   if(s.type==="ask-human") return {label:"human", cls:"b-user"};
   if(s.type==="meta") return {label:"meta", cls:"b-reason"};
@@ -1589,7 +1620,7 @@ function renderSteps(){
   el.innerHTML=steps.map((s,i)=>{
     if(isHidden(s)) return "";
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
-    const k=stepKind(s), lbl=s.tool?E(s.tool):"";
+    const k=stepKind(s), lbl=s.tool?E(s.tool):(s.injected?E((s.intent||"").slice(0,50)):"");
     const ind=(s.nest||0)?`<span class="depth">${"› ".repeat(s.nest)}</span>`:"";
     return `<div class="step${i===cur?' cur':''}" data-i="${i}"><span class="muted">${s.step}</span>`+
       `<span class="badge ${k.cls}">${k.label}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
@@ -1606,7 +1637,7 @@ function renderTree(el){
   const roots=[], stack=[]; let segN=0;
   steps.forEach((s,idx)=>{
     if(isHidden(s)) return;                       // delegation call: shown on its model node
-    if(s.type==="user"){ roots.push({userRow:idx}); stack.length=0; return; }  // dialogue root, plain row
+    if(s.type==="user"&&!s.injected){ roots.push({userRow:idx}); stack.length=0; return; }  // dialogue root, plain row
     const n=s.nest||0, aid=s.agent_id||"main";
     while(stack.length){
       const t=stack[stack.length-1];
@@ -1634,7 +1665,7 @@ function renderTree(el){
     if(col) return head;
     const body=node.content.map(c=>{
       if(c.child) return render(c.child);
-      const idx=c.step, s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
+      const idx=c.step, s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):(s.injected?E((s.intent||"").slice(0,50)):"");
       return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad+18}px">`+
         `<span class="muted">${s.step}</span><span class="badge ${k.cls}">${k.label}</span> <span>${lbl}</span>${risky}</div>`;
     }).join("");
@@ -1837,7 +1868,7 @@ async function loadContext(){
   }
   if(!frame.length){box.innerHTML='<span class="muted">(only the user request — this is the first model call)</span>';return;}
   box.innerHTML=frame.map(m=>{
-    const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human",task:"📩 delegated task"}[m.role]||m.role;
+    const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human",task:"📩 delegated task",injected:"💉 injected (fork)"}[m.role]||m.role;
     return `<div class="frame"><span class="rl">${role}</span><pre>${E((m.content||"").slice(0,1500))}</pre></div>`;
   }).join("");
 }
@@ -1863,7 +1894,8 @@ function agentFrame(s){
   for(let j=0;j<cur;j++){            // this agent's OWN prior steps, in order
     const x=steps[j];
     if(x.agent_id!==aid) continue;
-    if((x.type==="reason"||x.type==="answer")&&x.intent) frame.push({role:"assistant",content:x.intent,step:x.step});
+    if(x.type==="user"&&x.injected) frame.push({role:"injected",content:x.intent||"",step:x.step});
+    else if((x.type==="reason"||x.type==="answer")&&x.intent) frame.push({role:"assistant",content:x.intent,step:x.step});
     else if(x.type==="call"){
       frame.push({role:"assistant",content:"→ call "+x.tool+"("+J(x.input||{})+")",step:x.step});
       const o=x.observation||{};
