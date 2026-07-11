@@ -99,6 +99,7 @@ class Recorder:
         self._cursor = 0
         self.depth = 0  # current nesting depth; agents set this before recording
         self.agent_name = ""  # name of the agent currently recording (multi-agent attribution)
+        self.systems: dict[str, str] = {}  # sys_hash -> full system prompt, per agent
         self.journal = None  # optional write-ahead Journal; set by the agent
         self.cache = None  # optional EffectCache; set by the agent
         self.executing = False  # True while an effect's thunk runs (see loom/ambient.py)
@@ -197,6 +198,14 @@ class Recorder:
                 self.cache.put(key, encoded)
 
         meta = {"agent": self.agent_name} if self.agent_name else {}
+        # Keep each agent's full system prompt (once per distinct prompt) so the
+        # debugger can show and edit it -- mirrors what the wire proxy records.
+        if kind == "model" and isinstance(payload, dict) and payload.get("system"):
+            sysstr = payload["system"] if isinstance(payload["system"], str) else str(payload["system"])
+            h = _key(["system", sysstr])[:12]
+            meta["sys_hash"] = h
+            meta["sys_head"] = sysstr[:160]
+            self.systems.setdefault(h, sysstr)
         entry = EffectEntry(seq=seq, kind=kind, key=key, result=encoded, depth=self.depth, meta=meta)
         # Forking overwrites the tail of the original log from this point on.
         del self.log[seq:]

@@ -252,6 +252,10 @@ class Run:
             "pending_depth": self.pending_depth,
             "stop_reason": self.stop_reason,
             "log": [e.to_dict() for e in self.log],
+            # Each agent's full system prompt (once per sys_hash) for the debugger
+            # to show + edit; recorded natively, mirroring the wire proxy.
+            **({"systems": dict(self.recorder.systems)}
+               if getattr(self.recorder, "systems", None) else {}),
             **({"healed_by": self.healed_by} if self.healed_by else {}),
             # Declared tool capabilities, so post-hoc analysis (actions / scan /
             # taint / risk) trusts the @tool(capabilities=...) contract instead
