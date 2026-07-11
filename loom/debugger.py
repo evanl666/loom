@@ -1717,7 +1717,11 @@ function agentFrame(s){
     frame.push({role:"user",content:RUN.prompt||"",step:-1});
   } else {
     const deleg=steps.find(x=>x.type==="call"&&x.delegates_to===aid);
-    const task=deleg&&deleg.input?(deleg.input.task||J(deleg.input)):"";
+    // the delegated task lives under different keys across frameworks (task /
+    // description / query / prompt / input); take the first string one.
+    const inp=(deleg&&deleg.input)||{};
+    const task=["task","description","query","prompt","input","instruction","goal"]
+      .map(k=>inp[k]).find(v=>typeof v==="string"&&v.trim());
     frame.push({role:"task",content:task||"(this sub-agent's task was delegated by its parent)",step:-1});
   }
   for(let j=0;j<cur;j++){            // this agent's OWN prior steps, in order
