@@ -154,28 +154,41 @@ def steps_for(data: dict) -> list[dict]:
     # Lead"). Greedy 1:1; only assigns on a real token overlap, never a guess.
     import re as _re
 
-    def _toks(s):
-        return set(_re.findall(r"[a-z]{3,}", str(s).lower())) - {
-            "the", "and", "ask", "for", "delegate", "task", "work", "agent",
-            "sub", "call", "lead", "team", "coworker", "assistant"}
+    _STOP_TOK = {"the", "and", "ask", "for", "delegate", "task", "work", "agent",
+                 "sub", "call", "lead", "team", "coworker", "assistant", "specialist",
+                 "return", "result", "using", "then", "with", "this"}
+
+    def _stems(*parts):
+        # stem to 5 chars so e.g. subagent_type 'calculator' matches tool
+        # 'calculate' and 'researcher' matches 'research'.
+        out_: set = set()
+        for p in parts:
+            for w in _re.findall(r"[a-z]{4,}", str(p).lower()):
+                if w not in _STOP_TOK:
+                    out_.add(w[:5])
+        return out_
 
     mapped = {d.get("delegates_to") for d in out if d.get("delegates_to")}
-    label_of = {a["id"]: a["label"] for a in ia["agents"]}
+    child_toks = {}  # agent id -> stems of its label + role + tool names
+    for a in ia["agents"]:
+        child_toks[a["id"]] = _stems(a["label"], *(a.get("tools") or []))
     by_parent: dict = {}
     for d in out:
         if (d.get("type") == "call" and d.get("is_delegation")
                 and not d.get("delegates_to") and d.get("agent_id")):
             by_parent.setdefault(d["agent_id"], []).append(d)
     for parent, delegs in by_parent.items():
-        children = [e["to"] for e in ia["edges"]
-                    if e["from"] == parent and e["to"] not in mapped]
-        children = list(dict.fromkeys(children))
+        children = list(dict.fromkeys(
+            e["to"] for e in ia["edges"] if e["from"] == parent and e["to"] not in mapped))
         for d in delegs:
             inp = d.get("input") if isinstance(d.get("input"), dict) else {}
-            dt = _toks(d.get("tool", "")) | _toks(inp.get("task", ""))
+            # every naming/task signal the delegate call carries
+            dt = _stems(d.get("tool", ""), inp.get("subagent_type", ""), inp.get("type", ""),
+                        inp.get("name", ""), inp.get("agent", ""), inp.get("task", ""),
+                        inp.get("description", ""), inp.get("query", ""), inp.get("prompt", ""))
             best, best_score = None, 0
             for cid in children:
-                sc = len(dt & _toks(label_of.get(cid, "")))
+                sc = len(dt & child_toks.get(cid, set()))
                 if sc > best_score:
                     best, best_score = cid, sc
             if best is not None:

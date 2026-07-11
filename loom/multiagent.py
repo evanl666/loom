@@ -58,12 +58,19 @@ def best_role(system: str) -> "str | None":
     and prefer a phrase carrying a role keyword."""
     if not system:
         return None
+    # The agent's OWN stated identity -- the first non-generic "You are (a) X" --
+    # is the most reliable ("You are a Coordinator. Delegate to the researcher..."
+    # must read Coordinator, not the delegation target). Only fall back to the
+    # "X specialist/agent" phrasing when there's no such self-identification.
+    for m in _ROLE_PATTERNS[0].finditer(system):
+        role = _clean_role(m.group(1))
+        if role and role.lower() not in _GENERIC:
+            return role
     cands: list[str] = []
-    for pat in _ROLE_PATTERNS:
-        for m in pat.finditer(system):
-            role = _clean_role(m.group(1))
-            if role and role.lower() not in _GENERIC:
-                cands.append(role)
+    for m in _ROLE_PATTERNS[1].finditer(system):
+        role = _clean_role(m.group(1))
+        if role and role.lower() not in _GENERIC:
+            cands.append(role)
     if not cands:
         return None
     specific = [c for c in cands if _SPECIFIC.search(c)]
