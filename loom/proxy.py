@@ -38,6 +38,7 @@ _FORWARD_HEADERS = {
     "anthropic-beta",
     "openai-organization",
     "openai-project",
+    "x-goog-api-key",       # Google Gemini auth
     "accept",
 }
 
@@ -51,6 +52,54 @@ def _flatten(content) -> str:
             b.get("text", "") if isinstance(b, dict) else str(b) for b in content
         )
     return str(content)
+
+
+def _gemini_parts_text(parts) -> str:
+    """Concatenate the text of a Gemini content ``parts`` list."""
+    if not isinstance(parts, list):
+        return ""
+    return "".join(p.get("text", "") for p in parts if isinstance(p, dict) and "text" in p)
+
+
+def _gemini_system(request: dict) -> str:
+    """The system prompt from a Gemini request (camelCase or snake_case)."""
+    si = request.get("systemInstruction") or request.get("system_instruction") or {}
+    if isinstance(si, str):
+        return si
+    return _gemini_parts_text(si.get("parts")) if isinstance(si, dict) else ""
+
+
+def _gemini_tools(request: dict) -> list:
+    """Tool names declared in a Gemini request (functionDeclarations)."""
+    names = []
+    for t in request.get("tools") or []:
+        if not isinstance(t, dict):
+            continue
+        decls = t.get("functionDeclarations") or t.get("function_declarations") or []
+        for d in decls:
+            if isinstance(d, dict) and d.get("name"):
+                names.append(d["name"])
+    return sorted(names)
+
+
+def _gemini_result(resp) -> str:
+    """A Gemini functionResponse payload as a readable string for a tool effect."""
+    if isinstance(resp, str):
+        return resp
+    if isinstance(resp, dict):
+        for k in ("result", "output", "content", "text"):
+            if isinstance(resp.get(k), str):
+                return resp[k]
+        return json.dumps(resp)
+    return str(resp)
+
+
+def _model_from_path(path: str) -> str:
+    """Gemini puts the model in the URL (``/v1beta/models/gemini-x:generateContent``)."""
+    if "/models/" not in path:
+        return ""
+    seg = path.split("/models/", 1)[1]
+    return seg.split(":", 1)[0].split("?", 1)[0].split("/", 1)[0]
 
 
 class WireRecorder:
@@ -72,28 +121,36 @@ class WireRecorder:
     def record(self, request: dict, response: dict) -> None:
         self.model = request.get("model", self.model)
         if "choices" in response:  # OpenAI chat-completions dialect
-            self._pending_fp = self._fingerprint(request, openai=True)
+            self._pending_fp = self._fingerprint(request, dialect="openai")
             self._absorb_request_openai(request)
             self._absorb_response_openai(response)
+        elif "candidates" in response:  # Google Gemini dialect
+            self._pending_fp = self._fingerprint(request, dialect="gemini")
+            self._absorb_request_gemini(request)
+            self._absorb_response_gemini(response)
         else:  # Anthropic messages dialect
             system = _flatten(request.get("system", ""))
             self.system = system or self.system
-            self._pending_fp = self._fingerprint(request, openai=False)
+            self._pending_fp = self._fingerprint(request, dialect="anthropic")
             self._absorb_request(request)
             self._absorb_response(response)
         self.wire.append(response)
 
-    def _fingerprint(self, request: dict, *, openai: bool) -> dict:
+    def _fingerprint(self, request: dict, *, dialect: str) -> dict:
         """A per-model-call agent fingerprint recovered from the wire request.
 
         Parent/child agent structure lives in the application, invisible to a
         recording proxy -- but each sub-agent almost always has a distinct
         system prompt and tool set. Capturing (system hash + head, tool names,
         model) per call lets ``infer_agents`` reconstruct which sub-agent made
-        each call for ANY framework, without the framework cooperating."""
+        each call for ANY framework, without the framework cooperating.
+
+        The three wire dialects (Anthropic, OpenAI, Gemini) carry the same three
+        facts in different shapes; we normalize them here so everything
+        downstream (infer_agents, the debugger, the firewall) is dialect-blind."""
         import hashlib
 
-        if openai:
+        if dialect == "openai":
             system = ""
             for m in request.get("messages", []):
                 if m.get("role") == "system":
@@ -103,9 +160,15 @@ class WireRecorder:
                 (t.get("function", {}) or {}).get("name", "")
                 for t in (request.get("tools") or [])
             )
+            n_msgs = len(request.get("messages") or [])
+        elif dialect == "gemini":
+            system = _gemini_system(request)
+            tools = _gemini_tools(request)
+            n_msgs = len(request.get("contents") or [])
         else:
             system = _flatten(request.get("system", ""))
             tools = sorted(t.get("name", "") for t in (request.get("tools") or []))
+            n_msgs = len(request.get("messages") or [])
         system = system or ""
         from .multiagent import best_role
 
@@ -113,11 +176,11 @@ class WireRecorder:
             "sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
             "sys_head": system[:160],
             "tools": [t for t in tools if t],
-            "model": request.get("model", self.model),
+            "model": request.get("model") or self.model,
             # how much conversation this call carried -- a FRESH sub-agent starts
             # small (just its task), a shared-conversation PEER (a group chat)
             # starts large. Lets infer_agents tell delegation from peer turns.
-            "msgs": len(request.get("messages") or []),
+            "msgs": n_msgs,
         }
         role = best_role(system)  # scan the FULL prompt for the specific role
         if role:
@@ -218,6 +281,60 @@ class WireRecorder:
                 "usage": {
                     "input_tokens": usage.get("prompt_tokens", 0),
                     "output_tokens": usage.get("completion_tokens", 0),
+                },
+            },
+            meta=self._pending_fp,
+        )
+        if text:
+            self.output = text
+
+    def _absorb_request_gemini(self, request: dict) -> None:
+        """Gemini keeps the turn history in ``contents`` (role user/model);
+        function results ride as ``functionResponse`` parts in a user turn."""
+        si = _gemini_system(request)
+        if si:
+            self.system = si or self.system
+        contents = request.get("contents") or []
+        for m in contents[self._seen_messages :]:
+            if not isinstance(m, dict) or m.get("role") == "model":
+                continue  # model turns are the responses we already recorded
+            for p in m.get("parts") or []:
+                if not isinstance(p, dict):
+                    continue
+                if "functionResponse" in p:
+                    fr = p.get("functionResponse") or {}
+                    name = fr.get("name", "tool")
+                    resp = fr.get("response", fr)
+                    self._append(f"tool:{name}", {"id": name}, _gemini_result(resp))
+                elif p.get("text"):
+                    self.episodes.append(p["text"])
+        self._seen_messages = len(contents)
+
+    def _absorb_response_gemini(self, response: dict) -> None:
+        cand = (response.get("candidates") or [{}])[0] or {}
+        parts = ((cand.get("content") or {}).get("parts")) or []
+        text, tool_calls = "", []
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if "text" in p:
+                text += p.get("text", "")
+            elif "functionCall" in p:
+                fc = p.get("functionCall") or {}
+                name = fc.get("name", "")
+                # Gemini function calls carry no id; the name keys the pairing.
+                tool_calls.append({"id": name, "name": name, "input": fc.get("args", {}) or {}})
+        usage = response.get("usageMetadata", {}) or {}
+        self._append(
+            "model",
+            {"n": len(self.wire)},
+            {
+                "text": text,
+                "tool_calls": tool_calls,
+                "stop_reason": "tool_use" if tool_calls else "end_turn",
+                "usage": {
+                    "input_tokens": usage.get("promptTokenCount", 0),
+                    "output_tokens": usage.get("candidatesTokenCount", 0),
                 },
             },
             meta=self._pending_fp,
@@ -478,6 +595,78 @@ def synthesize_openai_sse(response: dict) -> bytes:
     return b"".join(out)
 
 
+def reconstruct_gemini_sse(raw: str) -> dict:
+    """Rebuild the final GenerateContentResponse from a Gemini SSE transcript."""
+    text = ""
+    fcalls: list = []
+    finish = None
+    usage: dict = {}
+    model = ""
+    for line in raw.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        model = event.get("modelVersion") or model
+        if event.get("usageMetadata"):
+            usage = event["usageMetadata"]
+        for cand in event.get("candidates") or []:
+            if not isinstance(cand, dict):
+                continue
+            finish = cand.get("finishReason") or finish
+            for p in ((cand.get("content") or {}).get("parts")) or []:
+                if isinstance(p, dict) and "text" in p:
+                    text += p.get("text", "")
+                elif isinstance(p, dict) and "functionCall" in p:
+                    fcalls.append(p)
+    parts: list = ([{"text": text}] if text else []) + fcalls
+    out = {"candidates": [{"content": {"role": "model", "parts": parts},
+                           "finishReason": finish or "STOP", "index": 0}],
+           "usageMetadata": usage}
+    if model:
+        out["modelVersion"] = model
+    return out
+
+
+def synthesize_gemini_sse(response: dict) -> bytes:
+    """Render a recorded GenerateContentResponse as a Gemini SSE stream, for replay."""
+    cand = (response.get("candidates") or [{}])[0] or {}
+    parts = ((cand.get("content") or {}).get("parts")) or []
+    out = []
+    for p in parts:
+        body = {"candidates": [{"content": {"role": "model", "parts": [p]}, "index": 0}]}
+        out.append(f"data: {json.dumps(body)}\n\n".encode())
+    final: dict = {"candidates": [{"content": {"role": "model", "parts": []},
+                                   "finishReason": cand.get("finishReason", "STOP"), "index": 0}]}
+    if response.get("usageMetadata"):
+        final["usageMetadata"] = response["usageMetadata"]
+    out.append(f"data: {json.dumps(final)}\n\n".encode())
+    return b"".join(out)
+
+
+def _reconstruct_stream(path: str, raw: str) -> dict:
+    """Pick the SSE reconstructor for the endpoint's dialect."""
+    p = path.lower()
+    if "chat/completions" in p:
+        return reconstruct_openai_sse(raw)
+    if "generatecontent" in p:  # Gemini :generateContent / :streamGenerateContent
+        return reconstruct_gemini_sse(raw)
+    return reconstruct_sse(raw)
+
+
+def _synth_for(response: dict):
+    """Pick the SSE synthesizer matching a recorded response's dialect."""
+    if "choices" in response:
+        return synthesize_openai_sse
+    if "candidates" in response:
+        return synthesize_gemini_sse
+    return synthesize_sse
+
+
 class ProxyServer(ThreadingHTTPServer):
     """The recording (or replaying) proxy. Bind port 0 to pick a free port."""
 
@@ -650,7 +839,7 @@ class _Handler(BaseHTTPRequestHandler):
         if not isinstance(request, dict):
             self._send_json(400, {"error": "request body must be a JSON object"})
             return
-        wants_stream = bool(request.get("stream"))
+        wants_stream = bool(request.get("stream")) or "streamgeneratecontent" in self.path.lower()
 
         if (self.server.auth and not self.path.startswith("/loom/")
                 and self.headers.get("x-loom-auth", "") != self.server.auth):
@@ -679,8 +868,7 @@ class _Handler(BaseHTTPRequestHandler):
                 response = self.server.replay_wire[self.server.replay_index]
                 self.server.replay_index += 1
             if wants_stream:
-                synth = synthesize_openai_sse if "choices" in response else synthesize_sse
-                self._send_sse(synth(response))
+                self._send_sse(_synth_for(response)(response))
             else:
                 self._send_json(200, response)
             return
@@ -741,18 +929,12 @@ class _Handler(BaseHTTPRequestHandler):
                         self.wfile.write(chunk)
                         self.wfile.flush()
                     raw = b"".join(chunks).decode("utf-8", "replace")
-                    if "chat/completions" in self.path:
-                        response = reconstruct_openai_sse(raw)
-                    else:
-                        response = reconstruct_sse(raw)
+                    response = _reconstruct_stream(self.path, raw)
                 elif streamed:
                     # A shield must see the whole response BEFORE the client does,
                     # so buffer the upstream stream and synthesize one afterwards.
                     raw = upstream.read().decode("utf-8", "replace")
-                    if "chat/completions" in self.path:
-                        response = reconstruct_openai_sse(raw)
-                    else:
-                        response = reconstruct_sse(raw)
+                    response = _reconstruct_stream(self.path, raw)
                 else:
                     raw_body = upstream.read()
                     try:
@@ -780,12 +962,17 @@ class _Handler(BaseHTTPRequestHandler):
             response, screen_events = shield.screen(response)
             events.extend(screen_events)
 
+        # Gemini names the model in the URL, not the body -- fold it into the
+        # recorded request (after forwarding) so the trace keeps the model name.
+        if not request.get("model"):
+            m = _model_from_path(self.path)
+            if m:
+                request["model"] = m
         # Persist BEFORE answering: when the client sees the reply, the
         # exchange is already on disk (wirelog append + throttled trace write).
         self.server.persist(request, response, events)
         if streamed and shield is not None:
-            synth = synthesize_openai_sse if "choices" in response else synthesize_sse
-            self._send_sse(synth(response))
+            self._send_sse(_synth_for(response)(response))
         elif not streamed:
             self._send_json(200, response)
 

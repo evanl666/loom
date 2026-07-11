@@ -355,6 +355,97 @@ def test_openai_sse_reconstruction_and_synthesis_roundtrip():
     assert reconstruct_openai_sse(stream)["choices"][0]["message"]["content"] == "Rainy in Berlin."
 
 
+# --- Google Gemini dialect (contents / systemInstruction / functionDeclarations) ---
+GEMINI_TOOL_RESPONSE = {
+    "candidates": [{"content": {"role": "model", "parts": [
+        {"functionCall": {"name": "get_weather", "args": {"city": "Berlin"}}}]},
+        "finishReason": "STOP"}],
+    "usageMetadata": {"promptTokenCount": 11, "candidatesTokenCount": 6},
+}
+GEMINI_FINAL = {
+    "candidates": [{"content": {"role": "model", "parts": [{"text": "Rainy in Berlin."}]},
+                    "finishReason": "STOP"}],
+    "usageMetadata": {"promptTokenCount": 20, "candidatesTokenCount": 4},
+}
+
+
+def _post_gemini(port, payload, stream=False):
+    verb = "streamGenerateContent" if stream else "generateContent"
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{port}/v1beta/models/gemini-2.0-flash:{verb}",
+        data=json.dumps(payload).encode(),
+        headers={"content-type": "application/json", "x-goog-api-key": "gk-test"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.loads(r.read())
+
+
+def test_gemini_dialect_records_a_loom_trace(tmp_path):
+    from loom.multiagent import infer_agents
+
+    upstream = _serve(_FakeUpstream([GEMINI_TOOL_RESPONSE, GEMINI_FINAL]))
+    path = str(tmp_path / "gemini.loom.json")
+    proxy = _serve(
+        ProxyServer(port=0, target=f"http://127.0.0.1:{upstream.server_address[1]}", save_path=path)
+    )
+    sys_prompt = "You are a Research Specialist. Use get_weather."
+    # native Gemini request: NO model in the body (it is in the URL), system in
+    # systemInstruction, tools in functionDeclarations, history in contents.
+    _post_gemini(proxy.port, {
+        "systemInstruction": {"role": "system", "parts": [{"text": sys_prompt}]},
+        "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {}}]}],
+        "contents": [{"role": "user", "parts": [{"text": "Weather in Berlin?"}]}],
+    })
+    _post_gemini(proxy.port, {
+        "systemInstruction": {"role": "system", "parts": [{"text": sys_prompt}]},
+        "tools": [{"functionDeclarations": [{"name": "get_weather", "parameters": {}}]}],
+        "contents": [
+            {"role": "user", "parts": [{"text": "Weather in Berlin?"}]},
+            {"role": "model", "parts": [{"functionCall": {"name": "get_weather", "args": {"city": "Berlin"}}}]},
+            {"role": "user", "parts": [{"functionResponse": {"name": "get_weather", "response": {"result": "rain, 12C"}}}]},
+        ],
+    })
+    with open(path) as f:
+        data = json.load(f)
+    assert data["model"] == "gemini-2.0-flash"          # recovered from the URL
+    assert data["system"] == sys_prompt
+    assert data["episodes"] == ["Weather in Berlin?"]
+    assert [e["kind"] for e in data["log"]] == ["model", "tool:get_weather", "model"]
+    assert data["log"][0]["result"]["tool_calls"][0]["input"] == {"city": "Berlin"}
+    assert data["log"][1]["result"] == "rain, 12C"      # functionResponse -> tool effect
+    assert data["log"][0]["result"]["usage"] == {"input_tokens": 11, "output_tokens": 6}
+    assert data["output"] == "Rainy in Berlin."
+    # the same wire fingerprint drives multi-agent recovery, dialect-blind
+    assert data["log"][0]["meta"]["sys_role"] == "Research Specialist"
+    assert data["log"][0]["meta"]["tools"] == ["get_weather"]
+    assert verify_trace(path) == []
+    proxy.shutdown()
+    upstream.shutdown()
+
+
+def test_gemini_sse_reconstruction_and_synthesis_roundtrip():
+    from loom.proxy import reconstruct_gemini_sse, synthesize_gemini_sse, _reconstruct_stream
+
+    raw = "\n".join([
+        'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"Rainy "}]}}]}',
+        'data: {"candidates":[{"content":{"role":"model","parts":[{"text":"in Berlin."}]}}]}',
+        'data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":20,"candidatesTokenCount":4}}',
+    ])
+    msg = reconstruct_gemini_sse(raw)
+    assert msg["candidates"][0]["content"]["parts"][0]["text"] == "Rainy in Berlin."
+    assert msg["usageMetadata"]["candidatesTokenCount"] == 4
+
+    # a tool call split across chunks, routed via the streaming path (capital G)
+    fc_raw = 'data: {"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"add","args":{"a":1}}}]},"finishReason":"STOP"}]}'
+    routed = _reconstruct_stream("/v1beta/models/gemini-2.0-flash:streamGenerateContent", fc_raw)
+    assert routed["candidates"][0]["content"]["parts"][0]["functionCall"]["name"] == "add"
+
+    # a recorded response synthesizes back into a parseable Gemini stream
+    stream = synthesize_gemini_sse(GEMINI_FINAL).decode()
+    assert reconstruct_gemini_sse(stream)["candidates"][0]["content"]["parts"][0]["text"] == "Rainy in Berlin."
+
+
 def test_real_openai_sdk_through_the_proxy(tmp_path):
     openai = pytest.importorskip("openai")
 
