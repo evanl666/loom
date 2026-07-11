@@ -122,26 +122,22 @@ def steps_for(data: dict) -> list[dict]:
     for parent_id, kids in children_of.items():
         kids = list(dict.fromkeys(kids))
         calls = [d for d in out if d.get("type") == "call" and d.get("agent_id") == parent_id]
-        # greedy 1:1 by name/arg overlap -- assign the clearest matches first
-        scored = sorted(((len(_call_stems(d) & child_toks.get(c, set())), i, id(d), d, c)
-                         for i, d in enumerate(calls) for c in kids),
-                        key=lambda t: (-t[0], t[1]))
-        used_c, used_d = set(), set()
-        for sc, _i, did, d, c in scored:
-            if sc <= 0 or c in used_c or did in used_d:
-                continue
-            d["is_delegation"] = True
-            d["delegates_to"] = c
-            used_c.add(c)
-            used_d.add(did)
-        # fallback for an OPAQUE delegate tool (name carries no signal): if the
-        # leftover unpaired hand-offs match the leftover children 1:1, pair them.
-        left_c = [c for c in kids if c not in used_c]
-        left_d = [d for d in calls if id(d) not in used_d and _unpaired(d)]
-        if left_c and len(left_c) == len(left_d):
-            for d, c in zip(left_d, left_c):
+        # Map each call to the child it spawned by name/arg overlap. A child may
+        # be matched by SEVERAL calls -- an agent can delegate to the same
+        # sub-agent more than once (native Coordinator -> ask_support_lead twice).
+        for d in calls:
+            cs = _call_stems(d)
+            best, best_sc = None, 0
+            for c in kids:
+                sc = len(cs & child_toks.get(c, set()))
+                if sc > best_sc:
+                    best, best_sc = c, sc
+            if best is not None:                     # name/args identify the spawned child
                 d["is_delegation"] = True
-                d["delegates_to"] = c
+                d["delegates_to"] = best
+            elif _unpaired(d) and len(kids) == 1:    # opaque hand-off, one possible child
+                d["is_delegation"] = True
+                d["delegates_to"] = kids[0]
 
     # Re-anchor each delegation to right BEFORE its (semantically-mapped) child's
     # first step, so the tree reads request -> sub-agent -> return even when the
