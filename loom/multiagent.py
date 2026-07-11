@@ -84,6 +84,14 @@ def _clean_role(phrase: str) -> str:
     return " ".join(words[:3])[:26]
 
 
+def _generic_role(role: str) -> bool:
+    """A role phrase that doesn't actually name a specific agent -- generic
+    branding ('Claude agent', 'Anthropic's Claude Agent SDK' -> 's Claude') or a
+    possessive remnant. These must be skipped so the REAL role surfaces."""
+    rl = (role or "").lower()
+    return (rl in _GENERIC) or ("claude" in rl) or (rl.lstrip("s").strip() in _GENERIC)
+
+
 def best_role(system: str) -> "str | None":
     """The most specific role phrase in a (possibly long) system prompt.
 
@@ -99,12 +107,12 @@ def best_role(system: str) -> "str | None":
     # "X specialist/agent" phrasing when there's no such self-identification.
     for m in _ROLE_PATTERNS[0].finditer(system):
         role = _clean_role(m.group(1))
-        if role and role.lower() not in _GENERIC:
+        if role and not _generic_role(role):
             return role
     cands: list[str] = []
     for m in _ROLE_PATTERNS[1].finditer(system):
         role = _clean_role(m.group(1))
-        if role and role.lower() not in _GENERIC:
+        if role and not _generic_role(role):
             cands.append(role)
     if not cands:
         return None
@@ -201,8 +209,16 @@ def infer_agents(data: dict) -> dict:
                        "tools": list(meta.get("tools", [])), "calls": 0, "depth": depth}
                 agents[key] = rec
                 order.append(key)
-            elif meta.get("tools") and not rec["tools"]:
-                rec["tools"] = list(meta.get("tools", []))
+            else:
+                if meta.get("tools") and not rec["tools"]:
+                    rec["tools"] = list(meta.get("tools", []))
+                # for the merged main session, adopt the system that names a REAL
+                # role (the orchestrator), not the CLI's title-gen utility that
+                # happened to come first on the wire.
+                if key == ("main", "session") and not best_role(_systems.get(rec.get("sys_hash", ""), "")) \
+                        and best_role(_systems.get(meta.get("sys_hash", ""), "")):
+                    rec["sys_hash"] = meta.get("sys_hash", "")
+                    rec["sys_head"] = meta.get("sys_head", "")
             rec["calls"] += 1
             res = e.get("result") if isinstance(e.get("result"), dict) else {}
             tcs = res.get("tool_calls") or []
