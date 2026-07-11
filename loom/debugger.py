@@ -1919,7 +1919,13 @@ async function faultInject(){
     if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
     else{
       const div=res.diverge;
-      const bs=res.branch_steps.map((b,i)=>`<div class="branchstep${div!=null&&i>=div?' div':''}"><span class="muted">${b.step}</span> <b>${E(b.tool||b.type)}</b> ${E((b.intent||"").slice(0,60))}</div>`).join("");
+      const bs=res.branch_steps.map((b,i)=>{
+        if(b.is_delegation) return "";
+        const kind=stepKind(b), o=b.observation||{};
+        const txt = b.type==="call" ? (o.text||"") : (b.intent||o.text||"");
+        return `<div class="branchstep${div!=null&&i>=div?' div':''}"><span class="badge ${kind.cls}">${kind.label}</span>`+
+          (b.tool?` <b>${E(b.tool)}</b>`:"")+(txt?` <span class="muted">${E(txt.slice(0,60))}</span>`:"")+`</div>`;
+      }).join("");
       bx.innerHTML=`<div class="branchhead">✅ how the agent reacts to the injected result</div><div class="fl">output</div><pre>${E(res.branch_output)}</pre>${bs}`;
     }
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
@@ -1957,11 +1963,14 @@ async function doFork(){
     if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"fork failed")}</pre>`;return;}
     const div=res.diverge;
     const bs=res.branch_steps.map((b,i)=>{
+      if(b.is_delegation) return "";   // a hand-off is shown on its model node, not a row
       const cls=(div!=null&&i>=div)?"branchstep div":(i>=(div??1e9)?"branchstep new":"branchstep");
-      const kind=stepKind(b);
-      const txt=(b.intent||(b.observation||{}).text||"");
+      const kind=stepKind(b), o=b.observation||{};
+      // MODEL turn -> its reasoning/answer; TOOL -> its OUTPUT (not the model's
+      // reasoning, which belongs to the model row above it); user/injected -> the message
+      const txt = b.type==="call" ? (o.text||"") : (b.intent||o.text||"");
       return `<div class="${cls}"><span class="badge ${kind.cls}">${kind.label}</span>`+
-             (b.tool?` <b>${E(b.tool)}</b>`:"")+` <span class="muted">${E(txt.slice(0,70))}</span></div>`;
+             (b.tool?` <b>${E(b.tool)}</b>`:"")+(txt?` <span class="muted">${E(txt.slice(0,70))}</span>`:"")+`</div>`;
     }).join("");
     bx.innerHTML=`<div class="branchhead">✅ new branch #${res.branch_id}${div!=null?` · diverges at step ${div}`:""}</div>`+
                  `<button id="openbranch" class="openbr">🔍 open this branch as a full trace →</button>`+
