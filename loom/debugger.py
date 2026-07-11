@@ -1288,6 +1288,8 @@ pre.mdcode{background:#f8fafc;border-color:#e2e8f0}
 .treehead{background:#fbfbfc;border-bottom:1px solid #f0f1f3;color:#1f2328}
 .treehead:hover{background:#f0f2f5}.treehead .tw{color:#8a9099}
 .tguide{background:#e0e3e8}.step.tstep{border-bottom:1px solid #f4f5f7}
+.subtag{font-size:8.5px;font-weight:700;letter-spacing:.4px;color:#6b3fc0;background:#efe7fb;border:1px solid #ddccf5;border-radius:4px;padding:0 4px;margin-right:4px}
+.callrow{cursor:pointer}
 /* timeline + live bar */
 #tlbar{background:#fff;border-top:1px solid #e6e8eb}
 #tlinfo,#livestat{color:#8a9099}
@@ -1450,6 +1452,20 @@ function stepKind(s){
   return {label:"model", cls:"b-answer"};  // reason + answer are the model speaking
 }
 const LANES=["main agent","subagent","sub-subagent","depth 3"];
+// A delegation call is NOT its own list row: it's shown inside its model node's
+// "delegated to" line, and the sub-agent's steps nest right below -- so a row
+// for it would just duplicate the model message. Kept in `steps` for logic.
+function isHidden(s){return !!s.is_delegation;}
+function nextVisible(i,dir){
+  for(let j=i;j>=0&&j<steps.length;j+=dir){ if(!isHidden(steps[j])) return j; }
+  for(let j=i-dir;j>=0&&j<steps.length;j-=dir){ if(!isHidden(steps[j])) return j; }  // fall back the other way
+  return i;
+}
+// the first step belonging to the sub-agent a delegation call spawned
+function subagentStart(delegIdx){
+  const to=steps[delegIdx].delegates_to; if(!to) return -1;
+  return steps.findIndex(x=>x.agent_id===to);
+}
 // the tool calls a model turn (step i) decided to make: the calls at the same
 // nesting level that follow it (deeper sub-agent steps are skipped over).
 function callsOfModel(i){
@@ -1468,6 +1484,7 @@ function renderSteps(){
   const el=document.getElementById("steps");
   if(TREE){renderTree(el);return;}
   el.innerHTML=steps.map((s,i)=>{
+    if(isHidden(s)) return "";
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
     const k=stepKind(s), lbl=s.tool?E(s.tool):"";
     const ind=s.depth?`<span class="depth">${"› ".repeat(s.depth)}</span>`:"";
@@ -1481,16 +1498,20 @@ function renderTree(el){
   // delegation-tree depth (s.nest) so parent -> sub-agent reads as a tree.
   const segs=[];
   steps.forEach((s,idx)=>{
+    if(isHidden(s)) return;                       // delegation call: shown on its model node, not a row
     const aid=s.agent_id||"main";
     const last=segs[segs.length-1];
     if(last&&last.aid===aid) last.items.push(idx);
-    else segs.push({aid,agent:s.agent||"main agent",color:s.agent_color||0,nest:s.nest||0,items:[idx]});
+    else segs.push({aid,agent:s.agent||"main agent",color:s.agent_color||0,nest:s.nest||0,items:[idx],root:idx===steps.findIndex(x=>x.agent_id&&x.type!=="user")});
   });
+  const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
   el.innerHTML=segs.map((seg,si)=>{
     const pad=6+seg.nest*15, col=COLLAPSED[si];
     const guide=seg.nest?`<span class="tguide" style="left:${pad-8}px"></span>`:"";
+    // a non-root agent is a SUB-AGENT -- tag its segment so it's unmistakable
+    const sub=(seg.aid!=="main"&&seg.aid!==rootId)?`<span class="subtag">SUBAGENT</span>`:"";
     const head=`<div class="treehead" style="padding-left:${pad}px" data-seg="${si}">${guide}`+
-      `<span class="tw">${col?"▸":"▾"}</span><span class="atag c${seg.color}">${E(seg.agent)}</span>`+
+      `<span class="tw">${col?"▸":"▾"}</span>${sub}<span class="atag c${seg.color}">${E(seg.agent)}</span>`+
       `<span class="muted" style="font-size:10px">${seg.items.length}</span></div>`;
     const kids=col?"":seg.items.map(idx=>{
       const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
@@ -1511,32 +1532,36 @@ function renderTimeline(){
   const tl=document.getElementById("timeline"); if(!tl)return;
   const toks=steps.map(stepTokens), mx=Math.max(1,...toks);
   tl.innerHTML=steps.map((s,i)=>{
+    if(isHidden(s)) return "";
     const h=6+Math.round(28*toks[i]/mx);
     const cls=s.risk?"tk risky":(s.type==="call"?"tk call":s.type==="answer"?"tk answer":"tk reason");
     return `<span class="${cls}${i===cur?" cur":""}" data-i="${i}" style="height:${h}px" title="step ${s.step} ${E(s.tool||s.type)} · ${toks[i]} tok${s.risk?" ⚠"+E(s.risk):""}"></span>`;
   }).join("");
   tl.querySelectorAll("span").forEach(d=>d.onclick=()=>select(+d.dataset.i));
-  const total=toks.reduce((a,b)=>a+b,0);
-  document.getElementById("tlinfo").textContent=`${steps.length} steps · ${total.toLocaleString()} tok`;
+  const total=toks.reduce((a,b)=>a+b,0), vis=steps.filter(s=>!isHidden(s)).length;
+  document.getElementById("tlinfo").textContent=`${vis} steps · ${total.toLocaleString()} tok`;
 }
 let PLAY=null;
 function togglePlay(){
   const b=document.getElementById("play");
   if(PLAY){clearInterval(PLAY);PLAY=null;b.textContent="▶";b.classList.remove("on");return;}
   b.textContent="⏸";b.classList.add("on");
-  PLAY=setInterval(()=>{ if(cur>=steps.length-1){togglePlay();return;} select(cur+1); },900);
+  PLAY=setInterval(()=>{ const nx=nextVisible(cur+1,1); if(nx<=cur){togglePlay();return;} select(nx); },900);
 }
 function select(i){
-  cur=Math.max(0,Math.min(steps.length-1,i));
+  i=Math.max(0,Math.min(steps.length-1,i));
+  cur=isHidden(steps[i])?nextVisible(i,1):i;   // never land on a hidden (delegation) step
   document.querySelectorAll(".step").forEach(d=>d.classList.toggle("cur",+d.dataset.i===cur));
-  document.querySelectorAll("#timeline span").forEach((d,j)=>d.classList.toggle("cur",j===cur));
+  document.querySelectorAll("#timeline span").forEach(d=>d.classList.toggle("cur",+d.dataset.i===cur));
   const c=document.querySelector(".step.cur"); if(c)c.scrollIntoView({block:"nearest"});
-  document.getElementById("pos").textContent=`step ${cur+1} / ${steps.length}`;
+  const vis=steps.filter(s=>!isHidden(s)), vpos=vis.indexOf(steps[cur]);
+  document.getElementById("pos").textContent=`step ${vpos+1} / ${vis.length}`;
   renderDetail();
-  document.getElementById("prev").disabled=cur===0;
-  document.getElementById("first").disabled=cur===0;
-  document.getElementById("next").disabled=cur===steps.length-1;
-  document.getElementById("last").disabled=cur===steps.length-1;
+  const first=nextVisible(0,1), last=nextVisible(steps.length-1,-1);
+  document.getElementById("prev").disabled=cur<=first;
+  document.getElementById("first").disabled=cur<=first;
+  document.getElementById("next").disabled=cur>=last;
+  document.getElementById("last").disabled=cur>=last;
 }
 function renderDetail(){
   const s=steps[cur], o=s.observation||{}, d=document.getElementById("detail");
@@ -1562,7 +1587,8 @@ function renderDetail(){
     const cj=callsOfModel(cur);
     if(cj.length) h+=`<div class="k">→ decided to call</div>`+cj.map(j=>{
       const x=steps[j], xk=stepKind(x);
-      return `<div class="callrow" data-j="${j}"><span class="badge ${xk.cls}">${xk.label}</span> <b>${E(x.tool)}</b> <span class="muted">${E(J(x.input||{}).slice(0,90))}</span></div>`;
+      const arrow=x.is_delegation?` <span class="muted">→ opens ${E(x.tool)} sub-agent below ↓</span>`:"";
+      return `<div class="callrow" data-j="${j}"><span class="badge ${xk.cls}">${xk.label}</span> <b>${E(x.tool)}</b> <span class="muted">${E(J(x.input||{}).slice(0,80))}</span>${arrow}</div>`;
     }).join("");
     if(o.text&&!s.intent) h+=`<div class="k">output</div><pre>${E(o.text.slice(0,4000))}</pre>`;
   }
@@ -1609,7 +1635,12 @@ function renderDetail(){
   </div>`;
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
   d.innerHTML=h;
-  d.querySelectorAll(".callrow").forEach(r=>r.onclick=()=>select(+r.dataset.j));
+  d.querySelectorAll(".callrow").forEach(r=>r.onclick=()=>{
+    const j=+r.dataset.j;
+    // a delegation has no row of its own -> jump into the sub-agent it opened
+    const t=steps[j].is_delegation?subagentStart(j):j;
+    select(t>=0?t:j);
+  });
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
   const af=document.getElementById("autofix"); if(af) af.onclick=doAutoFix;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
@@ -1767,8 +1798,8 @@ document.addEventListener("keydown",e=>{
   if(!document.getElementById("palette").classList.contains("hidden")){paletteKey(e);return;}
   if(e.key==="Escape"&&!document.getElementById("drawer").classList.contains("hidden")){closeDrawer();return;}
   if(e.target.tagName==="TEXTAREA"||e.target.tagName==="INPUT")return;
-  if(e.key==="ArrowLeft")select(cur-1); else if(e.key==="ArrowRight")select(cur+1);
-  else if(e.key==="Home")select(0); else if(e.key==="End")select(steps.length-1);
+  if(e.key==="ArrowLeft")select(nextVisible(cur-1,-1)); else if(e.key==="ArrowRight")select(nextVisible(cur+1,1));
+  else if(e.key==="Home")select(nextVisible(0,1)); else if(e.key==="End")select(nextVisible(steps.length-1,-1));
 });
 // ---- floating right drawer (copilot / branches / assert) ----
 function drawerOpen(view){const d=document.getElementById("drawer");return !d.classList.contains("hidden")&&d.dataset.view===view;}
@@ -2025,10 +2056,10 @@ document.getElementById("swim").onclick=toggleTree;
 document.getElementById("export").onclick=exportSession;
 document.getElementById("copilot").onclick=loadCopilot;
 document.getElementById("drawerx").onclick=closeDrawer;
-document.getElementById("prev").onclick=()=>select(cur-1);
-document.getElementById("next").onclick=()=>select(cur+1);
-document.getElementById("first").onclick=()=>select(0);
-document.getElementById("last").onclick=()=>select(steps.length-1);
+document.getElementById("prev").onclick=()=>select(nextVisible(cur-1,-1));
+document.getElementById("next").onclick=()=>select(nextVisible(cur+1,1));
+document.getElementById("first").onclick=()=>select(nextVisible(0,1));
+document.getElementById("last").onclick=()=>select(nextVisible(steps.length-1,-1));
 load();
 </script></body></html>"""
 
