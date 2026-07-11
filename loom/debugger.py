@@ -818,7 +818,23 @@ class DebugSession:
         a = next((x for x in actions(self.data) if x.step == step and x.type == "call"), None)
         if a is None:
             raise ValueError(f"step {step} is not a tool call")
-        tool = self.agent.tools.get(a.tool)
+        # the tool may live on a SUB-agent, not the root -- search the whole tree.
+        from .agent import SubagentTool
+
+        def _find(agent, name, seen):
+            if agent is None or id(agent) in seen:
+                return None
+            seen.add(id(agent))
+            t = agent.tools.get(name)
+            if t is not None and not isinstance(t, SubagentTool):
+                return t
+            for tl in agent.tools.values():
+                if isinstance(tl, SubagentTool):
+                    hit = _find(tl.agent, name, seen)
+                    if hit is not None:
+                        return hit
+            return None
+        tool = _find(self.agent, a.tool, set())
         if tool is None:
             raise ValueError(f"no tool named {a.tool!r} on this agent")
         use = args if args is not None else (a.input or {})
