@@ -33,6 +33,27 @@ def test_static_data_inlines_what_the_page_fetches():
     assert sd["context_all"] and all("step" in m for m in sd["context_all"])
 
 
+def test_static_page_gates_off_every_server_only_feature():
+    """A frozen studio page must never reach a server. Every gate that hides
+    fork / explain / copilot / blame / live-ask is OFF, every read feature's data
+    is inlined, and every button wired unconditionally at load exists in the HTML
+    (a missing id -> getElementById(null).onclick throws -> all later JS breaks)."""
+    data = _multi_agent_trace()
+    sd = static_data(data)
+    assert sd["run"]["can_fork"] is False   # fork panel / fault-inject / autofix hidden
+    assert sd["run"]["can_chat"] is False   # explain button + copilot not rendered
+    assert sd["run"]["live"] is False       # live ask bar + polling off
+    for k in ("run", "agents", "panels", "context_all", "rootcause", "branches"):
+        assert k in sd                       # every read feature's data is inlined
+    assert sd["branches"] == []              # no forking in a frozen file -> no branches
+
+    html = static_page(data)
+    for bid in ("copilot", "assertbtn", "export", "brk", "rootcause", "branches",
+                "agentsbtn", "palettebtn", "swim", "play", "prompt", "model"):
+        assert f'id="{bid}"' in html, f"#{bid} is wired at load but missing from the HTML"
+    assert "!STATIC" in html                 # memory blame is gated off when static
+
+
 def test_static_page_is_self_contained_and_is_the_debugger():
     html = static_page(_multi_agent_trace())
     assert "window.LOOM_STATIC=" in html          # data inlined
