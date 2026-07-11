@@ -1566,32 +1566,55 @@ function renderSteps(){
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
 function renderTree(el){
-  // group consecutive same-agent steps into segments; indent by the agent's
-  // delegation-tree depth (s.nest) so parent -> sub-agent reads as a tree.
-  const segs=[];
-  steps.forEach((s,idx)=>{
-    if(isHidden(s)) return;                       // delegation call: shown on its model node, not a row
-    const aid=s.agent_id||"main";
-    const last=segs[segs.length-1];
-    if(last&&last.aid===aid) last.items.push(idx);
-    else segs.push({aid,agent:s.agent||"main agent",color:s.agent_color||0,nest:s.nest||0,items:[idx],root:idx===steps.findIndex(x=>x.agent_id&&x.type!=="user")});
-  });
+  // Build a NESTED tree: a sub-agent is one node containing its own steps AND,
+  // inline, any child sub-agent it spawned -- then the parent continues in the
+  // SAME node. A stack keyed by (nest, agent_id) does this: returning to a parent
+  // after a child reuses the parent's open node (so Research Lead is ONE node
+  // with Data Analyst nested inside, not two Research Lead segments).
   const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
-  el.innerHTML=segs.map((seg,si)=>{
-    const pad=6+seg.nest*15, col=COLLAPSED[si];
-    const guide=seg.nest?`<span class="tguide" style="left:${pad-8}px"></span>`:"";
-    // a non-root agent is a SUB-AGENT -- tag its segment so it's unmistakable
-    const sub=(seg.aid!=="main"&&seg.aid!==rootId)?`<span class="subtag">SUBAGENT</span>`:"";
-    const head=`<div class="treehead" style="padding-left:${pad}px" data-seg="${si}">${guide}`+
-      `<span class="tw">${col?"▸":"▾"}</span>${sub}<span class="atag c${seg.color}">${E(seg.agent)}</span>`+
-      `<span class="muted" style="font-size:10px">${seg.items.length}</span></div>`;
-    const kids=col?"":seg.items.map(idx=>{
-      const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
+  const roots=[], stack=[]; let segN=0;
+  steps.forEach((s,idx)=>{
+    if(isHidden(s)) return;                       // delegation call: shown on its model node
+    if(s.type==="user"){ roots.push({userRow:idx}); stack.length=0; return; }  // dialogue root, plain row
+    const n=s.nest||0, aid=s.agent_id||"main";
+    while(stack.length){
+      const t=stack[stack.length-1];
+      if(t.nest<n) break;                         // an ancestor -> nest under it
+      if(t.nest===n && t.aid===aid) break;        // same agent+level -> continue it
+      stack.pop();
+    }
+    let top=stack[stack.length-1];
+    if(!top || top.nest!==n || top.aid!==aid){
+      const node={si:segN++,aid,agent:s.agent||"main agent",color:s.agent_color||0,
+                  nest:n,root:aid===rootId,content:[]};
+      if(top) top.content.push({child:node}); else roots.push(node);
+      stack.push(node); top=node;
+    }
+    top.content.push({step:idx});
+  });
+  function render(node){
+    const pad=6+node.nest*15, col=COLLAPSED[node.si];
+    const guide=node.nest?`<span class="tguide" style="left:${pad-8}px"></span>`:"";
+    const sub=(node.aid!=="main"&&node.aid!==rootId)?`<span class="subtag">SUBAGENT</span>`:"";
+    const nsteps=node.content.filter(c=>c.step!=null).length;
+    const head=`<div class="treehead" style="padding-left:${pad}px" data-seg="${node.si}">${guide}`+
+      `<span class="tw">${col?"▸":"▾"}</span>${sub}<span class="atag c${node.color}">${E(node.agent)}</span>`+
+      `<span class="muted" style="font-size:10px">${nsteps}</span></div>`;
+    if(col) return head;
+    const body=node.content.map(c=>{
+      if(c.child) return render(c.child);
+      const idx=c.step, s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
       return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad+18}px">`+
         `<span class="muted">${s.step}</span><span class="badge ${k.cls}">${k.label}</span> <span>${lbl}</span>${risky}</div>`;
     }).join("");
-    return head+kids;
-  }).join("");
+    return head+body;
+  }
+  function row(idx,pad){
+    const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
+    return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad}px">`+
+      `<span class="muted">${s.step}</span><span class="badge ${k.cls}">${k.label}</span> <span>${lbl}</span>${risky}</div>`;
+  }
+  el.innerHTML=roots.map(r=>r.userRow!=null?row(r.userRow,10):render(r)).join("");
   el.querySelectorAll(".treehead").forEach(d=>d.onclick=()=>{const i=+d.dataset.seg;COLLAPSED[i]=!COLLAPSED[i];renderSteps();});
   el.querySelectorAll(".tstep").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
