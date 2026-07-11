@@ -27,6 +27,7 @@ class AnthropicProvider:
         api_key: "str | None" = None,
         max_tokens: int = 2048,
         on_token: "Callable[[str], None] | None" = None,
+        base_url: "str | None" = None,
     ):
         try:
             import anthropic
@@ -35,7 +36,10 @@ class AnthropicProvider:
                 "AnthropicProvider requires the anthropic SDK. "
                 'Install it with: pip install "loom-harness[anthropic]"'
             ) from e
-        self._client = anthropic.Anthropic(api_key=api_key)
+        # An explicit base_url overrides ANTHROPIC_BASE_URL -- used to make the
+        # debugger's OWN meta calls (explain/copilot) bypass a recording proxy so
+        # they never pollute the trace they are analyzing.
+        self._client = anthropic.Anthropic(api_key=api_key, **({"base_url": base_url} if base_url else {}))
         self.model = model
         self.name = "anthropic"
         self.max_tokens = max_tokens

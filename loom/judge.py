@@ -22,11 +22,11 @@ import re
 from typing import Any
 
 
-def _resolve(model: Any):
+def _resolve(model: Any, base_url: "str | None" = None):
     if isinstance(model, str):
         from .agent import _resolve_provider
 
-        return _resolve_provider(model, None)
+        return _resolve_provider(model, None, base_url=base_url)
     return model
 
 

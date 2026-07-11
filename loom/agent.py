@@ -120,7 +120,8 @@ def _with_timeout(tool: Any, args: dict, seconds: float) -> Any:
         pool.shutdown(wait=False)
 
 
-def _resolve_provider(model: Any, provider: "ModelProvider | None") -> ModelProvider:
+def _resolve_provider(model: Any, provider: "ModelProvider | None",
+                      base_url: "str | None" = None) -> ModelProvider:
     if provider is not None:
         return provider
     if hasattr(model, "complete"):  # a provider instance passed as `model`
@@ -128,7 +129,7 @@ def _resolve_provider(model: Any, provider: "ModelProvider | None") -> ModelProv
     # Otherwise treat `model` as an Anthropic model id string.
     from .providers.anthropic import AnthropicProvider
 
-    return AnthropicProvider(model=model)
+    return AnthropicProvider(model=model, base_url=base_url)
 
 
 class Agent:

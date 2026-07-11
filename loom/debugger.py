@@ -231,7 +231,7 @@ def context_at(data: dict, step: int, acts=None) -> list[dict]:
     return frame
 
 
-def explain_step(data: dict, step: int, model) -> dict:
+def explain_step(data: dict, step: int, model, base_url: "str | None" = None) -> dict:
     """Explain ONE step to a developer -- tightly. The old version reused the
     whole-run copilot, so it narrated the run (and often the wrong step); this
     gives the model only THIS step + the context the agent had seen up to it, and
@@ -262,7 +262,7 @@ def explain_step(data: dict, step: int, model) -> dict:
               "risky, say so.")
     user = f"CONTEXT the agent had seen:\n{convo}\n\nTHIS STEP (step {step}):\n{this}"
     try:
-        provider = _resolve(model)
+        provider = _resolve(model, base_url=base_url)
         resp = provider.complete(system, [{"role": "user", "content": user}], [])
         return {"reply": (resp.text or "").strip()}
     except Exception as e:  # noqa: BLE001
@@ -403,7 +403,7 @@ def _run_summary(data: dict) -> str:
 
 
 def copilot_chat(data: dict, messages: "list[dict]", model: Any,
-                 step: "int | None" = None) -> dict:
+                 step: "int | None" = None, base_url: "str | None" = None) -> dict:
     """A conversational debug copilot backed by a real model.
 
     ``messages`` is the chat history [{role, content}]. The model is given the
@@ -419,7 +419,7 @@ def copilot_chat(data: dict, messages: "list[dict]", model: Any,
 
     if isinstance(model, str):
         from .agent import _resolve_provider
-        model = _resolve_provider(model, None)
+        model = _resolve_provider(model, None, base_url=base_url)
 
     diag = describe_diagnosis(diagnose(data))
     cur = ""
@@ -517,6 +517,27 @@ class DebugSession:
     @data.setter
     def data(self, value: dict) -> None:
         self._static_data = value
+
+    @property
+    def meta_base_url(self) -> "str | None":
+        """Where the debugger's OWN model calls (explain/copilot/autofix/judge) go,
+        so they BYPASS a live session's recording proxy and never appear as spurious
+        agents in the trace being analyzed. None when no proxy is in the way."""
+        lv = self.live
+        if lv is not None and getattr(lv, "_proxy", None) is not None:
+            return getattr(lv, "target", "") or "https://api.anthropic.com"
+        return None
+
+    @property
+    def meta_provider(self):
+        """The copilot model as a PROVIDER pre-built to bypass the recording proxy.
+        Pass this (not the model string) to every meta call so none is recorded."""
+        if not self.copilot_model:
+            return None
+        if getattr(self, "_meta_provider_cache", None) is None:
+            from .judge import _resolve
+            self._meta_provider_cache = _resolve(self.copilot_model, base_url=self.meta_base_url)
+        return self._meta_provider_cache
 
     def _agent_for(self, model: str, system: "str | None" = None,
                    tools: "list[str] | None" = None):
@@ -686,7 +707,7 @@ class DebugSession:
         from .judge import _resolve, run_summary
 
         try:
-            provider = _resolve(self.copilot_model)
+            provider = self.meta_provider or _resolve(self.copilot_model)
             system = ("You are a debugging copilot. Given an agent run's transcript, "
                       "propose up to 2 SPECIFIC one-line instructions that, injected "
                       "into the model's context at the failure point, would fix the "
@@ -993,7 +1014,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return
             try:
                 out = copilot_chat(sess.data, body.get("messages") or [],
-                                   sess.copilot_model, step=body.get("step"))
+                                   sess.meta_provider or sess.copilot_model, step=body.get("step"))
                 self._json(200, out)
             except Exception as e:  # noqa: BLE001
                 self._json(502, {"error": f"copilot error: {type(e).__name__}: {e}"})
@@ -1022,7 +1043,7 @@ class _Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length) or b"{}")
                 # the copilot model doubles as the judge for `judge:` lines
                 self._json(200, check_assertions(sess.data, str(body.get("q", "")),
-                                                 judge=sess.copilot_model or None))
+                                                 judge=sess.meta_provider))
             except (ValueError, TypeError) as e:
                 self._json(400, {"error": str(e)})
             return
@@ -1037,7 +1058,7 @@ class _Handler(BaseHTTPRequestHandler):
             if not sess.copilot_model:
                 self._json(400, {"error": "no copilot model -- start with --copilot-model MODEL or --agent"})
                 return
-            self._json(200, explain_step(sess.data, step, sess.copilot_model))
+            self._json(200, explain_step(sess.data, step, sess.meta_provider or sess.copilot_model))
             return
         if self.path != "/api/fork":
             self._json(404, {"error": "not found"})
@@ -1696,7 +1717,10 @@ function renderDetail(){
     if(s.state_diff.summary) h+=`<div class="sub2">${E(s.state_diff.summary)}</div>`;
     if(s.state_diff.detail) h+=`<pre class="diff">${diffHtml(typeof s.state_diff.detail==="string"?s.state_diff.detail:J(s.state_diff.detail))}</pre>`;
   }
-  h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
+  // "context the model saw" only makes sense on a MODEL turn -- a tool result or
+  // a user message is an INPUT to the model, not something the model "saw" here.
+  const isModelTurn=(s.type==="reason"||s.type==="answer");
+  if(isModelTurn) h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
   if(CAN_CHAT) h+=`<button id="explainbtn" title="ask the copilot to explain this step">🔎 Explain this step</button><div id="explainout"></div>`;
   if(s.type==="call"&&!STATIC) h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
   h+=`<div id="dynpanels"></div>`;  // pack-contributed panels (SQL plan, file, screenshot…)
