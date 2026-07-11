@@ -373,3 +373,54 @@ def test_peer_group_chat_is_flat_not_delegation():
     assert lvl["Research Specialist"] == 0 and lvl["Math Specialist"] == 0  # flat peers
     assert ia["edges"] == []                                                # no delegation
     assert not any(s.get("is_delegation") for s in steps_for(data))         # no false flags
+
+
+def test_claude_cli_markers_orchestrator_subagents_no_title_gen():
+    """The Claude Agent SDK (via the claude CLI) is the hard case: every call gets
+    a generic 'You are a Claude agent' preamble, sub-agents are flagged with an
+    explicit cc_is_subagent marker, and the CLI slips in an internal title-
+    generation call. Use the marker as authoritative: sub-agents are children of
+    the one main session, the title-gen is NOT a separate agent, and roles come
+    from the real 'You are a X' past the preamble."""
+    def sysf(role, sub=False):
+        h = "x-anthropic-billing-header: cc_version=1.2.3; cc_entrypoint=sdk-py; "
+        if sub:
+            h += "cc_is_subagent=true; "
+        return h + "You are a Claude agent, built on Anthropic's Claude Agent SDK. " + role
+
+    def h(s):
+        return hashlib.sha1(s.encode()).hexdigest()[:12]
+
+    ORCH = sysf("You are an Orchestrator. You MUST delegate.")
+    TITLE = sysf("Generate a concise, sentence-case title (3-7 words).")
+    RES = sysf("You are a Landmark Researcher. Reply with one numeric fact.", sub=True)
+    WRI = sysf("You are a Summary Writer. Write one sentence.", sub=True)
+    systems = {h(ORCH): ORCH, h(TITLE): TITLE, h(RES): RES, h(WRI): WRI}
+
+    def model(system, seq, tcs=None, text=""):
+        res = {"tool_calls": tcs, "stop_reason": "tool_use"} if tcs else {"text": text, "stop_reason": "end_turn"}
+        return {"seq": seq, "kind": "model", "result": res,
+                "meta": {"sys_hash": h(system), "sys_head": system[:160], "model": "m"}}
+
+    def task(sub):
+        return [{"id": sub, "name": "Agent", "input": {"subagent_type": sub}}]
+
+    data = {"recorded_via": "proxy", "model": "m", "output": "done", "tools": {},
+            "systems": systems, "log": [
+        model(ORCH, 0, tcs=task("researcher"), text="delegating"),
+        model(TITLE, 1, text='{"title": "Eiffel height"}'),        # CLI title-gen -- not an agent
+        model(RES, 2, text="330 meters"),                          # the researcher sub-agent
+        {"seq": 3, "kind": "tool:Agent", "result": "330 meters"},
+        model(ORCH, 4, tcs=task("writer"), text="now writing"),
+        model(WRI, 5, text="The Eiffel Tower is 330 meters tall."),  # the writer sub-agent
+        {"seq": 6, "kind": "tool:Agent", "result": "..."},
+        model(ORCH, 7, text="DONE")]}
+    ia = infer_agents(data)
+    labels = [a["label"] for a in ia["agents"]]
+    assert labels == ["Orchestrator", "Landmark Researcher", "Summary Writer"]  # 3, no title-gen
+    lvl = {a["label"]: a["level"] for a in ia["agents"]}
+    assert lvl["Landmark Researcher"] == 1 and lvl["Summary Writer"] == 1  # children of the main session
+    ids = {a["label"]: a["id"] for a in ia["agents"]}
+    edges = {(e["from"], e["to"]) for e in ia["edges"]}
+    assert (ids["Orchestrator"], ids["Landmark Researcher"]) in edges
+    assert (ids["Orchestrator"], ids["Summary Writer"]) in edges

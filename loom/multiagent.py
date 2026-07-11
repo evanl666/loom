@@ -34,8 +34,9 @@ _STOP = {"you", "a", "an", "the", "helpful", "ai", "are", "is", "was", "be",
 # like Claude Code's "You are Claude Code..."). Skip these and keep scanning
 # for the specific role a sub-agent was given.
 _GENERIC = {
-    "", "claude", "claude code", "assistant", "an assistant", "ai assistant",
-    "helpful assistant", "chatbot", "agent", "an agent", "language model",
+    "", "claude", "claude code", "claude agent", "assistant", "an assistant",
+    "ai assistant", "helpful assistant", "chatbot", "agent", "an agent",
+    "language model",
 }
 # Role keywords that mark a *specific* role -- preferred over a bare noun.
 _SPECIFIC = re.compile(
@@ -50,6 +51,15 @@ _STEM_STOP = {"the", "and", "ask", "for", "delegate", "task", "work", "agent",
 # Arg keys on a delegation tool-call that name/describe the target sub-agent.
 _DELEG_ARG_KEYS = ("subagent_type", "type", "name", "agent", "task",
                    "description", "query", "prompt", "instruction", "goal", "input")
+
+
+_SUBAGENT_MARK = re.compile(r"cc_is_subagent\s*[=:]\s*true", re.I)
+
+
+def _is_subagent(system: str) -> bool:
+    """True if a call carries an explicit sub-agent marker (the Claude CLI stamps
+    ``cc_is_subagent=true`` into the system prompt of a delegated sub-agent)."""
+    return bool(system) and bool(_SUBAGENT_MARK.search(system))
 
 
 def stem_tokens(*parts) -> set:
@@ -149,6 +159,16 @@ def infer_agents(data: dict) -> dict:
                               # (e.g. Task tool subagent_type='researcher'), used to
                               # label a sub-agent whose own system prompt is generic
 
+    # Some frameworks stamp an explicit sub-agent marker on the wire (the Claude
+    # CLI writes `cc_is_subagent=true` into the system). When present it is
+    # authoritative: sub-agent calls are the real delegated agents, and every
+    # NON-sub-agent call is the one main session (the orchestrator plus the CLI's
+    # own utility calls like conversation-title generation) -- not a new agent.
+    # Read the FULL system (the 160-char sys_head truncates the marker).
+    _systems = data.get("systems") if isinstance(data.get("systems"), dict) else {}
+    subagent_hashes = {h for h, s in _systems.items() if _is_subagent(s)}
+    subagent_markers = bool(subagent_hashes)
+
     def _ident(meta: dict, depth: int) -> tuple:
         nonlocal source
         if meta.get("agent"):
@@ -157,6 +177,8 @@ def infer_agents(data: dict) -> dict:
         if meta.get("sys_hash"):
             if source != "native":
                 source = "wire"
+            if subagent_markers and meta["sys_hash"] not in subagent_hashes:
+                return ("main", "session")   # collapse orchestrator + utility calls
             return ("fp", meta["sys_hash"], tuple(meta.get("tools", [])))
         return ("depth", depth)
 
@@ -205,6 +227,13 @@ def infer_agents(data: dict) -> dict:
                     stack.pop()
             elif key in depth_of:            # reappearing (was popped) -- keep its depth
                 pass
+            elif subagent_markers and key[0] == "fp" and key[1] in subagent_hashes:
+                # AUTHORITATIVE marker (Claude CLI): a marked sub-agent is a child
+                # of the main session, regardless of the stack -- the orchestrator
+                # makes intermediate no-tool-call turns that would pop it otherwise.
+                root_key = ("main", "session")
+                depth_of[key] = depth_of.get(root_key, 0) + 1
+                _add_edge(root_key, key, seq)
             else:                            # genuine first appearance -- attach to a parent
                 # This sub-agent's own naming signal (its role + tool set).
                 child_stems = stem_tokens(
@@ -291,7 +320,12 @@ def infer_agents(data: dict) -> dict:
         if key[0] == "name":
             label = key[1]
         else:
-            label = rec.get("sys_role") or _label_from_system(rec["sys_head"]) or f"agent {i + 1}"
+            # Prefer a role recovered from the FULL system prompt (the recorded
+            # sys_role can be stale if role-extraction improved since recording);
+            # fall back to the recorded role, then the 160-char head.
+            full_sys = systems.get(rec.get("sys_hash", ""), "")
+            label = (best_role(full_sys) if full_sys else "") or rec.get("sys_role") \
+                or _label_from_system(rec["sys_head"]) or f"agent {i + 1}"
             # if the agent's OWN prompt was too generic to name it, fall back to the
             # explicit name its hand-off gave it (Task subagent_type='researcher').
             base_l = re.sub(r"\s*\(\d+\)$", "", str(label)).strip().lower()
