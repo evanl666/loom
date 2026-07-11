@@ -312,6 +312,27 @@ def test_grandchild_nesting_attaches_to_deeper_parent():
     assert (ids["Research Lead"], ids["Data Analyst"]) in edges  # analyst under the lead
 
 
+def test_handoff_with_early_result_still_creates_an_edge():
+    """A CONTROL-TRANSFER handoff (OpenAI Agents SDK / Semantic Kernel) emits its
+    transfer_to_X result BEFORE the target agent takes over, and the target
+    carries the whole conversation (msgs>=2). It must still be recovered as a
+    directed edge (Triage -> Refund), not mistaken for a flat peer turn."""
+    data = {"recorded_via": "proxy", "model": "m", "output": "done", "tools": {}, "log": [
+        _wire("You are a Triage Specialist.", ["transfer_to_refund_agent"], seq=0, msgs=1,
+              tcs=[{"id": "1", "name": "transfer_to_refund_agent", "input": {}}]),
+        {"seq": 1, "kind": "tool:transfer_to_refund_agent", "result": "handed off"},  # result BEFORE target
+        _wire("You are a Refund Specialist.", ["issue_refund"], seq=2, msgs=3,     # carries the convo
+              tcs=[{"id": "2", "name": "issue_refund", "input": {}}]),
+        {"seq": 3, "kind": "tool:issue_refund", "result": "refunded"},
+        _wire("You are a Refund Specialist.", ["issue_refund"], seq=4, msgs=5, text="done"),
+    ]}
+    ia = infer_agents(data)
+    lvl = {a["label"]: a["level"] for a in ia["agents"]}
+    assert lvl["Triage Specialist"] == 0 and lvl["Refund Specialist"] == 1   # nested, not flat peers
+    ids = {a["label"]: a["id"] for a in ia["agents"]}
+    assert (ids["Triage Specialist"], ids["Refund Specialist"]) in {(e["from"], e["to"]) for e in ia["edges"]}
+
+
 def test_peer_group_chat_is_flat_not_delegation():
     """A round-robin group chat (AutoGen): peers share ONE growing conversation and
     take turns. The msgs signal (context already large on a peer's first turn)

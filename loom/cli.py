@@ -491,6 +491,7 @@ def _cmd_record(args: argparse.Namespace) -> int:
         env["OPENAI_BASE_URL"] = base + "/v1"
     else:
         env["ANTHROPIC_BASE_URL"] = base
+        env["ANTHROPIC_API_BASE"] = base   # LiteLLM / CrewAI dialect (e.g. OpenAI Agents SDK)
     print(f"loom record: proxying {args.target} on {base}", file=sys.stderr)
 
     profile_path = ""

@@ -251,10 +251,10 @@ def infer_agents(data: dict) -> dict:
                 idx = next((i for i, (n, _a) in enumerate(pending_tools) if n == tname), None)
                 if idx is not None:
                     key = pending_tools.pop(idx)[1]
-                    oc = open_calls.get(key) or []   # this call was a leaf, not a delegation
-                    hit = next((c for c in oc if c["name"] == tname), None)
-                    if hit is not None:
-                        oc.remove(hit)
+                    # NOTE: do NOT drop this call from open_calls here. A hand-off
+                    # tool (transfer_to_X) emits its result BEFORE the target agent
+                    # takes over; the call must stay available so that agent can
+                    # match it. A leaf tool simply never matches a child anyway.
             if key is None:
                 if m.get("agent") and ("name", m["agent"]) in agents:
                     key = ("name", m["agent"])
