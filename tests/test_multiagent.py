@@ -139,3 +139,35 @@ def test_tool_only_model_call_still_shows_a_model_step():
         "prompt": "x", "output": "done", "tools": {}}
     types = [a.type for a in actions(data)]
     assert types[0] == "reason" and types[1] == "call"   # model decision, then the call
+
+
+def test_parallel_delegations_mapped_to_children_semantically():
+    """A coordinator that fires several hand-offs from ONE turn is structurally
+    ambiguous on the wire; match each to the child whose role overlaps the
+    delegate tool name/task (ask_research -> Research Lead)."""
+    import hashlib
+    from loom.debugger import steps_for
+
+    def fp(system, tools):
+        role = system.replace("You are the ", "").rstrip(".")
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+                "sys_head": system, "sys_role": role, "tools": tools, "model": "m"}
+    data = {"recorded_via": "proxy", "model": "m", "output": "done", "tools": {}, "log": [
+        {"seq": 0, "kind": "model", "depth": 0, "meta": fp("You are the Coordinator.", ["ask_research", "ask_support"]),
+         "result": {"tool_calls": [
+             {"id": "1", "name": "ask_research", "input": {"task": "find X"}},
+             {"id": "2", "name": "ask_support", "input": {"task": "help Y"}}], "stop_reason": "tool_use"}},
+        # support runs FIRST (execution order != tool_call order), then research
+        {"seq": 1, "kind": "model", "depth": 0, "meta": fp("You are the Support Lead.", ["email"]),
+         "result": {"text": "helped", "stop_reason": "end_turn"}},
+        {"seq": 2, "kind": "model", "depth": 0, "meta": fp("You are the Research Lead.", ["search"]),
+         "result": {"text": "found", "stop_reason": "end_turn"}},
+        {"seq": 3, "kind": "model", "depth": 0, "meta": fp("You are the Coordinator.", ["ask_research", "ask_support"]),
+         "result": {"text": "done", "stop_reason": "end_turn"}},
+    ]}
+    steps = steps_for(data)
+    lab = {s["agent_id"]: s.get("agent") for s in steps if s.get("agent_id")}
+    m = {s["tool"]: lab.get(s.get("delegates_to")) for s in steps if s.get("is_delegation")}
+    # matched by role token overlap, NOT by positional order (support ran first)
+    assert m.get("ask_research") == "Research Lead"
+    assert m.get("ask_support") == "Support Lead"

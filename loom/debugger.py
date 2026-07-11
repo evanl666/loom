@@ -145,6 +145,43 @@ def steps_for(data: dict) -> list[dict]:
                 reordered.append(before[id(d)])  # the hand-off, right before the child
             reordered.append(d)
         out = reordered
+
+    # Best-effort SEMANTIC mapping for parallel drain delegations, which are
+    # structurally ambiguous on the wire (a coordinator firing ask_research +
+    # ask_support at once -- nothing says which spawned which child). Match each
+    # unmapped hand-off to the child the parent spawned whose name/role best
+    # overlaps the delegate tool name + task text ("ask_research" -> "Research
+    # Lead"). Greedy 1:1; only assigns on a real token overlap, never a guess.
+    import re as _re
+
+    def _toks(s):
+        return set(_re.findall(r"[a-z]{3,}", str(s).lower())) - {
+            "the", "and", "ask", "for", "delegate", "task", "work", "agent",
+            "sub", "call", "lead", "team", "coworker", "assistant"}
+
+    mapped = {d.get("delegates_to") for d in out if d.get("delegates_to")}
+    label_of = {a["id"]: a["label"] for a in ia["agents"]}
+    by_parent: dict = {}
+    for d in out:
+        if (d.get("type") == "call" and d.get("is_delegation")
+                and not d.get("delegates_to") and d.get("agent_id")):
+            by_parent.setdefault(d["agent_id"], []).append(d)
+    for parent, delegs in by_parent.items():
+        children = [e["to"] for e in ia["edges"]
+                    if e["from"] == parent and e["to"] not in mapped]
+        children = list(dict.fromkeys(children))
+        for d in delegs:
+            inp = d.get("input") if isinstance(d.get("input"), dict) else {}
+            dt = _toks(d.get("tool", "")) | _toks(inp.get("task", ""))
+            best, best_score = None, 0
+            for cid in children:
+                sc = len(dt & _toks(label_of.get(cid, "")))
+                if sc > best_score:
+                    best, best_score = cid, sc
+            if best is not None:
+                d["delegates_to"] = best
+                children.remove(best)
+                mapped.add(best)
     return out
 
 
