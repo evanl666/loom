@@ -81,81 +81,13 @@ def steps_for(data: dict) -> list[dict]:
         # its user message opens the next turn.
         if idx in ends_after and ep_i < len(episodes) and idx != ends_after[-1]:
             out.append(_user_node(episodes[ep_i])); ep_i += 1
-    # Flag DELEGATION calls (labelled "subagent"). Three signals, most-reliable
-    # first: (1) the drain marker actions() leaves on an unpaired hand-off
-    # (catches parallel delegations); (2) a delegate tool that DID return a
-    # result, detected because a DEEPER agent ran between the call's request and
-    # its result (requested_at..step); (3) the immediate next step goes deeper.
-    for i, d in enumerate(out):
-        if d.get("type") != "call":
-            continue
-        nest = d.get("nest", 0)
-        obs = (d.get("observation") or {}).get("text") or ""
-        if obs.startswith("(delegated to sub-agent"):
-            # a real hand-off is followed by a DEEPER agent; if the run is flat
-            # (a peer group chat), this was just a leaf tool whose result wasn't
-            # recorded -- not a delegation.
-            if any(x.get("nest", 0) > nest for x in out):
-                d["is_delegation"] = True
-            continue
-        req = d.get("requested_at", -1)
-        if req >= 0 and any(x.get("type") in ("reason", "answer", "call")
-                            and req <= x.get("step", -1) < d.get("step", -1)
-                            and x.get("nest", 0) > nest for x in out):
-            d["is_delegation"] = True
-            continue
-        for nxt in out[i + 1:]:
-            if nxt.get("type") == "user" or (nxt.get("type") == "call"
-                    and nxt.get("nest", 0) == nest):
-                continue  # skip a user node or a sibling delegation at this level
-            if nxt.get("nest", 0) > nest:
-                d["is_delegation"] = True
-            break
-
-    # Re-anchor a delegation call whose result came back LATE (a paired delegate
-    # tool: the sub-agent ran, THEN the result arrived) to right BEFORE its
-    # sub-agent's first step, so the tree reads request -> sub-agent -> return
-    # instead of showing the hand-off after the work it triggered.
-    def _child_start(deleg):
-        req, res, n = deleg.get("requested_at", -1), deleg.get("step", -1), deleg.get("nest", 0)
-        for x in out:
-            if x is deleg:
-                continue
-            st = x.get("step", -1)
-            if req <= st < res and x.get("nest", 0) > n:
-                return x  # the sub-agent's first step (out is in result-seq order)
-        return None
-
-    before = {}   # id(child_first_step) -> the delegation to insert before it
-    move_ids = set()
-    for d in out:
-        if d.get("is_delegation") and d.get("requested_at", -1) >= 0:
-            c = _child_start(d)
-            if c is not None and id(c) not in before:
-                before[id(c)] = d
-                move_ids.add(id(d))
-                # record which sub-agent this hand-off spawned, so the context
-                # panel can show that agent's delegated task (reliable for a
-                # late-returning delegation; parallel drain hand-offs stay
-                # unmapped -- their child is structurally ambiguous on the wire).
-                if c.get("agent_id"):
-                    d["delegates_to"] = c["agent_id"]
-    if move_ids:
-        reordered = []
-        for d in out:
-            if id(d) in move_ids:
-                continue  # skip its original (late) position
-            if id(d) in before:
-                reordered.append(before[id(d)])  # the hand-off, right before the child
-            reordered.append(d)
-        out = reordered
-
-    # Best-effort SEMANTIC mapping for parallel drain delegations, which are
-    # structurally ambiguous on the wire (a coordinator firing ask_research +
-    # ask_support at once -- nothing says which spawned which child). Match each
-    # unmapped hand-off to the child the parent spawned whose name/role best
-    # overlaps the delegate tool name + task text ("ask_research" -> "Research
-    # Lead"). Greedy 1:1; only assigns on a real token overlap, never a guess.
+    # DELEGATION detection -- principled, not structural. A tool call is a
+    # delegation IFF the agent that made it actually SPAWNED a child agent (an
+    # infer_agents edge) whose identity matches the call's name/args. This is
+    # robust to interleaved parallel branches: a deeper agent from ANOTHER branch
+    # running between a leaf tool's call and its result no longer masquerades as a
+    # delegation (the old "a deeper agent ran nearby" heuristic did exactly that,
+    # flagging draft_email/send_email as sub-agent hand-offs).
     import re as _re
 
     _STOP_TOK = {"the", "and", "ask", "for", "delegate", "task", "work", "agent",
@@ -172,33 +104,74 @@ def steps_for(data: dict) -> list[dict]:
                     out_.add(w[:5])
         return out_
 
-    mapped = {d.get("delegates_to") for d in out if d.get("delegates_to")}
-    child_toks = {}  # agent id -> stems of its label + role + tool names
-    for a in ia["agents"]:
-        child_toks[a["id"]] = _stems(a["label"], *(a.get("tools") or []))
-    by_parent: dict = {}
+    def _call_stems(d):
+        inp = d.get("input") if isinstance(d.get("input"), dict) else {}
+        return _stems(d.get("tool", ""), inp.get("subagent_type", ""), inp.get("type", ""),
+                      inp.get("name", ""), inp.get("agent", ""), inp.get("task", ""),
+                      inp.get("description", ""), inp.get("query", ""), inp.get("prompt", ""))
+
+    def _unpaired(d):  # a hand-off with no recorded leaf result (native drain marker)
+        obs = (d.get("observation") or {}).get("text") or ""
+        return obs.startswith("(delegated to sub-agent") or not obs
+
+    child_toks = {a["id"]: _stems(a["label"], a.get("sys_role", ""), *(a.get("tools") or []))
+                  for a in ia["agents"]}
+    children_of: dict = {}
+    for e in ia["edges"]:
+        children_of.setdefault(e["from"], []).append(e["to"])
+    for parent_id, kids in children_of.items():
+        kids = list(dict.fromkeys(kids))
+        calls = [d for d in out if d.get("type") == "call" and d.get("agent_id") == parent_id]
+        # greedy 1:1 by name/arg overlap -- assign the clearest matches first
+        scored = sorted(((len(_call_stems(d) & child_toks.get(c, set())), i, id(d), d, c)
+                         for i, d in enumerate(calls) for c in kids),
+                        key=lambda t: (-t[0], t[1]))
+        used_c, used_d = set(), set()
+        for sc, _i, did, d, c in scored:
+            if sc <= 0 or c in used_c or did in used_d:
+                continue
+            d["is_delegation"] = True
+            d["delegates_to"] = c
+            used_c.add(c)
+            used_d.add(did)
+        # fallback for an OPAQUE delegate tool (name carries no signal): if the
+        # leftover unpaired hand-offs match the leftover children 1:1, pair them.
+        left_c = [c for c in kids if c not in used_c]
+        left_d = [d for d in calls if id(d) not in used_d and _unpaired(d)]
+        if left_c and len(left_c) == len(left_d):
+            for d, c in zip(left_d, left_c):
+                d["is_delegation"] = True
+                d["delegates_to"] = c
+
+    # Re-anchor each delegation to right BEFORE its (semantically-mapped) child's
+    # first step, so the tree reads request -> sub-agent -> return even when the
+    # hand-off's result came back late. Uses the reliable semantic child, so
+    # interleaved parallel branches each anchor correctly.
+    first_of: dict = {}
     for d in out:
-        if (d.get("type") == "call" and d.get("is_delegation")
-                and not d.get("delegates_to") and d.get("agent_id")):
-            by_parent.setdefault(d["agent_id"], []).append(d)
-    for parent, delegs in by_parent.items():
-        children = list(dict.fromkeys(
-            e["to"] for e in ia["edges"] if e["from"] == parent and e["to"] not in mapped))
-        for d in delegs:
-            inp = d.get("input") if isinstance(d.get("input"), dict) else {}
-            # every naming/task signal the delegate call carries
-            dt = _stems(d.get("tool", ""), inp.get("subagent_type", ""), inp.get("type", ""),
-                        inp.get("name", ""), inp.get("agent", ""), inp.get("task", ""),
-                        inp.get("description", ""), inp.get("query", ""), inp.get("prompt", ""))
-            best, best_score = None, 0
-            for cid in children:
-                sc = len(dt & child_toks.get(cid, set()))
-                if sc > best_score:
-                    best, best_score = cid, sc
-            if best is not None:
-                d["delegates_to"] = best
-                children.remove(best)
-                mapped.add(best)
+        cid = d.get("agent_id")
+        if cid and cid not in first_of and d.get("type") in ("reason", "answer", "call"):
+            first_of[cid] = d
+    pos = {id(d): i for i, d in enumerate(out)}
+    anchor_for: dict = {}   # id(child_first_step) -> the delegation to insert before it
+    move_ids = set()
+    for d in out:
+        c = d.get("delegates_to")
+        if d.get("is_delegation") and c in first_of and first_of[c] is not d:
+            anchor = first_of[c]
+            # only move a hand-off that currently sits AFTER its child (late return)
+            if pos[id(d)] > pos[id(anchor)] and id(anchor) not in anchor_for:
+                anchor_for[id(anchor)] = d
+                move_ids.add(id(d))
+    if move_ids:
+        reordered = []
+        for d in out:
+            if id(d) in move_ids:
+                continue  # skip its original (late) position
+            if id(d) in anchor_for:
+                reordered.append(anchor_for[id(d)])  # the hand-off, right before the child
+            reordered.append(d)
+        out = reordered
     return out
 
 
@@ -1523,10 +1496,20 @@ function subagentStart(delegIdx){
   const to=steps[delegIdx].delegates_to; if(!to) return -1;
   return steps.findIndex(x=>x.agent_id===to);
 }
-// the tool calls a model turn (step i) decided to make: the calls at the same
-// nesting level that follow it (deeper sub-agent steps are skipped over).
+// the tool calls a model turn (step i) decided to make. PRIMARY: the calls
+// tagged with this model step as their requester (requested_at) -- robust to
+// interleaved parallel branches, where the calls are NOT positionally adjacent.
+// FALLBACK (older traces w/o requested_at): the same-nest calls that follow.
 function callsOfModel(i){
-  const s=steps[i], n=s.nest||0, out=[];
+  const s=steps[i]; if(!s) return [];
+  if(s.step!=null){
+    const byReq=[];
+    for(let j=0;j<steps.length;j++){
+      if(steps[j].type==="call" && steps[j].requested_at===s.step) byReq.push(j);
+    }
+    if(byReq.length) return byReq;
+  }
+  const n=s.nest||0, out=[];
   for(let j=i+1;j<steps.length;j++){
     const x=steps[j], xn=x.nest||0;
     if(x.type==="call"&&xn===n) out.push(j);

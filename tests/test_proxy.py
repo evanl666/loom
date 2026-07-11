@@ -807,3 +807,40 @@ def test_fork_external_reruns_adapter_in_a_subprocess(tmp_path, monkeypatch):
     assert outs[0] == "LIVE:ORIG"                          # turn 0 matched the recorded prefix
     assert outs[1:] == ["LIVE:EDIT", "LIVE:EDIT"]          # tail re-ran live with the edit
     up.shutdown()
+
+
+def test_tool_results_captured_across_interleaved_subagent_conversations():
+    """Two sub-agents interleave their turns on the wire (a coordinator fan-out).
+    Each tool result must be recorded once, keyed by tool_use_id -- a linear
+    'new messages since last request' scan dropped results across the branches."""
+    from loom.proxy import WireRecorder
+
+    def resp(text="", calls=None):
+        c = [{"type": "text", "text": text}] if text else []
+        for cid, name in (calls or []):
+            c.append({"type": "tool_use", "id": cid, "name": name, "input": {}})
+        return {"content": c, "stop_reason": "tool_use" if calls else "end_turn", "usage": {}}
+
+    def req(system, msgs):
+        return {"model": "m", "system": system, "messages": msgs}
+
+    def tr(cid, out):
+        return {"type": "tool_result", "tool_use_id": cid, "content": out}
+
+    rec = WireRecorder()
+    rec.record(req("Coordinator", [{"role": "user", "content": "both"}]),
+               resp(calls=[("r", "ask_research"), ("s", "ask_support")]))
+    rec.record(req("Research", [{"role": "user", "content": "research"}]), resp(calls=[("w", "web_search")]))
+    rec.record(req("Support", [{"role": "user", "content": "support"}]), resp(calls=[("c", "read_record")]))
+    rec.record(req("Research", [{"role": "user", "content": "research"},
+                                {"role": "assistant", "content": [{"type": "tool_use", "id": "w", "name": "web_search", "input": {}}]},
+                                {"role": "user", "content": [tr("w", "330m")]}]), resp(text="RL done"))
+    rec.record(req("Support", [{"role": "user", "content": "support"},
+                               {"role": "assistant", "content": [{"type": "tool_use", "id": "c", "name": "read_record", "input": {}}]},
+                               {"role": "user", "content": [tr("c", "Jane PII")]}]), resp(text="SL done"))
+
+    tools = {e.kind: e.result for e in rec.log if e.kind.startswith("tool:")}
+    assert "tool:web_search" in tools
+    assert tools.get("tool:read_record") == "Jane PII"   # was dropped by the linear scan
+    # a result is emitted exactly once even though it appears in many later requests
+    assert sum(1 for e in rec.log if e.kind == "tool:read_record") == 1

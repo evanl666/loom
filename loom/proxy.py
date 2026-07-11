@@ -239,7 +239,8 @@ class WireRecorder:
         self.output = ""
         self.systems: dict[str, str] = {}  # sys_hash -> full system prompt (once per agent)
         self._tool_names: dict[str, str] = {}  # tool_use_id -> tool name
-        self._seen_messages = 0
+        self._emitted_results: set = set()  # tool_use_ids already turned into effects
+        self._seen_texts: set = set()       # user texts already turned into episodes
         self._pending_fp: dict = {}  # agent fingerprint for the model call being recorded
         self.workspace: "dict | None" = None  # cwd/git/argv/os, set by the recorder
 
@@ -322,10 +323,24 @@ class WireRecorder:
                         result=result, meta=meta or {})
         )
 
+    def _emit_tool_result(self, tuid: str, content: str, name: str = "") -> None:
+        """Record a tool result ONCE, keyed by its tool_use_id -- robust to a
+        multi-agent framework that interleaves several sub-agent conversations
+        on the wire (a linear 'new messages' scan dropped results across them)."""
+        if not tuid or tuid in self._emitted_results:
+            return
+        self._emitted_results.add(tuid)
+        self._append(f"tool:{name or self._tool_names.get(tuid, 'tool')}", {"id": tuid}, content)
+
+    def _emit_episode(self, text: str) -> None:
+        if text and text not in self._seen_texts:
+            self._seen_texts.add(text)
+            self.episodes.append(text)
+
     def _absorb_request(self, request: dict) -> None:
-        """New user text becomes episodes; new tool results become tool effects."""
-        messages = request.get("messages", [])
-        for m in messages[self._seen_messages :]:
+        """New user text becomes episodes; each tool result (keyed by id) becomes
+        a tool effect exactly once, wherever it appears in the wire."""
+        for m in request.get("messages", []):
             if m.get("role") != "user":
                 continue  # assistant turns are the responses we already recorded
             content = m.get("content", "")
@@ -334,15 +349,9 @@ class WireRecorder:
                 if not isinstance(b, dict):
                     b = {"type": "text", "text": str(b)}
                 if b.get("type") == "tool_result":
-                    name = self._tool_names.get(b.get("tool_use_id", ""), "tool")
-                    self._append(
-                        f"tool:{name}",
-                        {"id": b.get("tool_use_id", "")},
-                        _flatten(b.get("content", "")),
-                    )
+                    self._emit_tool_result(b.get("tool_use_id", ""), _flatten(b.get("content", "")))
                 elif b.get("type") == "text" and b.get("text"):
-                    self.episodes.append(b["text"])
-        self._seen_messages = len(messages)
+                    self._emit_episode(b["text"])
 
     def _absorb_response(self, response: dict) -> None:
         text, tool_calls = "", []
@@ -369,23 +378,14 @@ class WireRecorder:
             self.output = text
 
     def _absorb_request_openai(self, request: dict) -> None:
-        messages = request.get("messages", [])
-        for m in messages[self._seen_messages :]:
+        for m in request.get("messages", []):
             role = m.get("role")
             if role == "system":
                 self.system = _flatten(m.get("content", "")) or self.system
             elif role == "tool":
-                name = self._tool_names.get(m.get("tool_call_id", ""), "tool")
-                self._append(
-                    f"tool:{name}",
-                    {"id": m.get("tool_call_id", "")},
-                    _flatten(m.get("content", "")),
-                )
+                self._emit_tool_result(m.get("tool_call_id", ""), _flatten(m.get("content", "")))
             elif role == "user":
-                text = _flatten(m.get("content", ""))
-                if text:
-                    self.episodes.append(text)
-        self._seen_messages = len(messages)
+                self._emit_episode(_flatten(m.get("content", "")))
 
     def _absorb_response_openai(self, response: dict) -> None:
         message = (response.get("choices") or [{}])[0].get("message", {}) or {}
@@ -423,8 +423,7 @@ class WireRecorder:
         si = _gemini_system(request)
         if si:
             self.system = si or self.system
-        contents = request.get("contents") or []
-        for m in contents[self._seen_messages :]:
+        for m in request.get("contents") or []:
             if not isinstance(m, dict) or m.get("role") == "model":
                 continue  # model turns are the responses we already recorded
             for p in m.get("parts") or []:
@@ -433,11 +432,13 @@ class WireRecorder:
                 if "functionResponse" in p:
                     fr = p.get("functionResponse") or {}
                     name = fr.get("name", "tool")
-                    resp = fr.get("response", fr)
-                    self._append(f"tool:{name}", {"id": name}, _gemini_result(resp))
+                    result = _gemini_result(fr.get("response", fr))
+                    # Gemini function results carry no id; key the dedupe on the
+                    # (name, result) so a result is recorded once across interleaved turns.
+                    self._emit_tool_result(f"{name}:{hashlib.sha1(result.encode()).hexdigest()[:12]}",
+                                           result, name=name)
                 elif p.get("text"):
-                    self.episodes.append(p["text"])
-        self._seen_messages = len(contents)
+                    self._emit_episode(p["text"])
 
     def _absorb_response_gemini(self, response: dict) -> None:
         cand = (response.get("candidates") or [{}])[0] or {}

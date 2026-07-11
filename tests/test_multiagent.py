@@ -173,6 +173,55 @@ def test_parallel_delegations_mapped_to_children_semantically():
     assert m.get("ask_support") == "Support Lead"
 
 
+def test_leaf_tool_not_flagged_delegation_across_interleaved_branches():
+    """A leaf tool whose result arrives AFTER a deeper agent from another parallel
+    branch ran must NOT be mislabeled a delegation. A tool call is a delegation
+    only if the agent that made it actually spawned a matching child agent.
+    Mirrors LangGraph fan-out: Coordinator -> {Research Lead -> Data Analyst,
+    Support Lead(draft_email leaf)}, with Data Analyst running between the Support
+    Lead's draft_email call and its result."""
+    from loom.debugger import steps_for
+
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+                "sys_head": system[:160], "sys_role": system.split(".")[0].replace("You are the ", "").replace("You are a ", ""),
+                "tools": tools, "model": "m"}
+
+    def model(system, tools, tcs=None, text=None, seq=0):
+        res = {"tool_calls": tcs, "stop_reason": "tool_use"} if tcs else {"text": text or "", "stop_reason": "end_turn"}
+        return {"seq": seq, "kind": "model", "meta": fp(system, tools), "result": res}
+
+    def tc(name):
+        return {"id": name, "name": name, "input": {}}
+
+    COORD, RL, SL, DA = ("You are the Coordinator.", "You are the Research Lead.",
+                         "You are the Support Lead.", "You are the Data Analyst.")
+    data = {"recorded_via": "proxy", "model": "m", "output": "done", "tools": {}, "log": [
+        model(COORD, ["ask_research", "ask_support"], [tc("ask_research"), tc("ask_support")], seq=0),
+        model(RL, ["ask_data_analyst"], [tc("ask_data_analyst")], seq=1),
+        model(SL, ["draft_email"], [tc("draft_email")], seq=2),
+        model(DA, ["calculate"], [tc("calculate")], seq=3),
+        {"seq": 4, "kind": "tool:calculate", "result": "990"},
+        model(DA, ["calculate"], text="990", seq=5),
+        {"seq": 6, "kind": "tool:draft_email", "result": "DRAFT to jane@x"},   # SL leaf, AFTER DA ran
+        model(SL, ["draft_email"], text="sent", seq=7),
+        {"seq": 8, "kind": "tool:ask_data_analyst", "result": "990"},
+        model(RL, ["ask_data_analyst"], text="330x3=990", seq=9),
+        {"seq": 10, "kind": "tool:ask_research", "result": "990"},
+        {"seq": 11, "kind": "tool:ask_support", "result": "sent"},
+        model(COORD, ["ask_research", "ask_support"], text="all done", seq=12),
+    ]}
+    steps = steps_for(data)
+    byname = {s["tool"]: s for s in steps if s.get("type") == "call"}
+    # the leaf tool is NOT a delegation, despite Data Analyst running before its result
+    assert not byname["draft_email"].get("is_delegation")
+    # the real delegations are flagged and mapped to the right child
+    lab = {s.get("agent_id"): s.get("agent") for s in steps if s.get("agent_id")}
+    assert byname["ask_research"].get("is_delegation") and lab[byname["ask_research"]["delegates_to"]] == "Research Lead"
+    assert byname["ask_support"].get("is_delegation") and lab[byname["ask_support"]["delegates_to"]] == "Support Lead"
+    assert byname["ask_data_analyst"].get("is_delegation") and lab[byname["ask_data_analyst"]["delegates_to"]] == "Data Analyst"
+
+
 def test_infer_agents_surfaces_the_full_system_prompt_per_agent():
     """Each agent carries its FULL system prompt (resolved from the trace's
     per-sys_hash `systems` map the proxy records), so the debugger can show and
