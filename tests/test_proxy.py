@@ -685,54 +685,87 @@ def _rec(t):
             "usage": {"input_tokens": 1, "output_tokens": 1}}
 
 
-def test_proxy_fork_replays_prefix_then_lives_with_edited_system():
+def test_proxy_fork_matches_prefix_by_content_then_lives_with_edited_system():
+    from loom.proxy import request_fingerprint, request_sys_hash
+
+    def req(system, msg):
+        return {"model": "claude", "system": system, "messages": [{"role": "user", "content": msg}]}
+
     up = _serve(_EchoUpstream())
     proxy = ProxyServer(port=0, target=f"http://127.0.0.1:{up.server_address[1]}", save_path=None)
-    proxy.fork = {"at": 1, "served": 0, "wire": [_rec("PREFIX0"), _rec("PREFIX1"), _rec("PREFIX2")],
-                  "edits": {"system": "NEW", "base_system": "OLD", "append": None, "model": "keep"}}
+    # only turn 0 is in the prefix pool, keyed BY CONTENT (order-independent)
+    proxy.fork = {"prefix": {request_fingerprint(req("OLD", "turn0")): [_rec("PREFIX0")]},
+                  "inject_key": None, "edit_sys_hash": request_sys_hash(req("OLD", "")),
+                  "new_system": "NEW", "append": None, "model": "keep", "_injected": False}
     _serve(proxy)
 
-    def post(system):
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{proxy.port}/v1/messages",
-            data=json.dumps({"model": "claude", "system": system,
-                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
+    def post(r):
+        rq = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.port}/v1/messages", data=json.dumps(r).encode(),
             headers={"content-type": "application/json", "x-api-key": "k"}, method="POST")
-        return json.loads(urllib.request.urlopen(req, timeout=5).read())
+        return json.loads(urllib.request.urlopen(rq, timeout=5).read())
 
-    r0, r1, r2 = post("OLD"), post("OLD"), post("OLD")   # the re-run sends its ORIGINAL system
-    assert r0["content"][0]["text"] == "PREFIX0"          # prefix served from the recording (free)
-    assert r1["content"][0]["text"] == "LIVE:NEW"         # fork point: live with the EDITED system
-    assert r2["content"][0]["text"] == "LIVE:NEW"
-    assert len(up.seen) == 2                              # only the tail hit the live API
-    assert [s.get("system") for s in up.seen] == ["NEW", "NEW"]
-    branch = proxy.recorder.to_dict()
-    assert [e["result"]["text"] for e in branch["log"] if e["kind"] == "model"] == \
-        ["PREFIX0", "LIVE:NEW", "LIVE:NEW"]
+    r0 = post(req("OLD", "turn0"))    # matches the prefix by content -> replayed free
+    r1 = post(req("OLD", "turn1"))    # not in the prefix -> live, edited agent's system swapped
+    r2 = post(req("OLD", "turn2"))
+    assert r0["content"][0]["text"] == "PREFIX0"
+    assert r1["content"][0]["text"] == "LIVE:NEW" and r2["content"][0]["text"] == "LIVE:NEW"
+    assert [s.get("system") for s in up.seen] == ["NEW", "NEW"]   # only the tail hit the API
+    proxy.shutdown()
+    up.shutdown()
+
+
+def test_proxy_fork_content_match_is_order_independent():
+    """The re-run may make its prefix calls in a DIFFERENT order; content matching
+    still serves each the right recorded response (positional replay could not)."""
+    from loom.proxy import request_fingerprint
+
+    def req(msg):
+        return {"model": "claude", "system": "S", "messages": [{"role": "user", "content": msg}]}
+
+    up = _serve(_EchoUpstream())
+    proxy = ProxyServer(port=0, target=f"http://127.0.0.1:{up.server_address[1]}", save_path=None)
+    proxy.fork = {"prefix": {request_fingerprint(req("A")): [_rec("RESP-A")],
+                             request_fingerprint(req("B")): [_rec("RESP-B")]},
+                  "inject_key": None, "edit_sys_hash": None, "new_system": None,
+                  "append": None, "model": "keep", "_injected": False}
+    _serve(proxy)
+
+    def post(msg):
+        rq = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.port}/v1/messages", data=json.dumps(req(msg)).encode(),
+            headers={"content-type": "application/json", "x-api-key": "k"}, method="POST")
+        return json.loads(urllib.request.urlopen(rq, timeout=5).read())
+
+    assert post("B")["content"][0]["text"] == "RESP-B"   # reversed order -> still correct
+    assert post("A")["content"][0]["text"] == "RESP-A"
+    assert up.seen == []                                  # both served from the recording
     proxy.shutdown()
     up.shutdown()
 
 
 def test_fork_wire_edits_across_dialects():
-    from loom.proxy import _apply_fork_edits, _wire_read_system
+    from loom.proxy import _apply_fork_edits, _wire_read_system, request_sys_hash
 
     a = {"system": "OLD", "messages": [{"role": "user", "content": "hi"}]}
-    _apply_fork_edits(a, {"system": "NEW", "base_system": "OLD", "append": "more"}, first=True, path="/v1/messages")
+    fk = {"new_system": "NEW", "edit_sys_hash": request_sys_hash(a), "append": "more", "model": "keep"}
+    _apply_fork_edits(a, fk, is_inject=True, path="/v1/messages")
     assert a["system"] == "NEW" and a["messages"][-1] == {"role": "user", "content": "more"}
 
     o = {"messages": [{"role": "system", "content": "OLD"}, {"role": "user", "content": "hi"}]}
-    _apply_fork_edits(o, {"system": "NEW", "base_system": "OLD"}, first=False, path="/v1/chat/completions")
+    fko = {"new_system": "NEW", "edit_sys_hash": request_sys_hash(o), "model": "keep"}
+    _apply_fork_edits(o, fko, is_inject=False, path="/v1/chat/completions")
     assert _wire_read_system(o) == "NEW"
 
     g = {"systemInstruction": {"parts": [{"text": "OLD"}]}, "contents": [{"role": "user", "parts": [{"text": "hi"}]}]}
-    _apply_fork_edits(g, {"system": "NEW", "base_system": "OLD", "append": "more", "model": "other"},
-                      first=True, path="/v1beta/models/gemini:streamGenerateContent")
+    fkg = {"new_system": "NEW", "edit_sys_hash": request_sys_hash(g), "append": "more", "model": "other"}
+    _apply_fork_edits(g, fkg, is_inject=True, path="/v1beta/models/gemini:streamGenerateContent")
     assert _wire_read_system(g) == "NEW"
     assert g["contents"][-1]["parts"][0]["text"] == "more"
     assert "model" not in g                               # Gemini's model lives in the URL
 
-    peer = {"system": "PEER", "messages": []}             # a different agent -> left untouched
-    _apply_fork_edits(peer, {"system": "NEW", "base_system": "OLD"}, first=False, path="/v1/messages")
+    peer = {"system": "PEER", "messages": []}             # a different agent (sys_hash) -> untouched
+    _apply_fork_edits(peer, fk, is_inject=False, path="/v1/messages")
     assert peer["system"] == "PEER"
 
 
@@ -766,8 +799,11 @@ def test_fork_external_reruns_adapter_in_a_subprocess(tmp_path, monkeypatch):
         time.sleep(0.02)
     assert not sess.running and len(proxy.recorder.wire) == 3
 
-    branch = sess.fork_external(1, {"system": "EDIT", "base_system": "ORIG", "append": None, "model": "keep"})
+    import hashlib
+    edit_hash = hashlib.sha1(b"ORIG").hexdigest()[:12]     # the edited agent's fingerprint
+    branch = sess.fork_external(1, {"new_system": "EDIT", "edit_sys_hash": edit_hash,
+                                    "append": None, "model": "keep"})
     outs = [e["result"]["text"] for e in branch["log"] if e["kind"] == "model"]
-    assert outs[0] == "LIVE:ORIG"                          # recorded prefix (turn 0)
+    assert outs[0] == "LIVE:ORIG"                          # turn 0 matched the recorded prefix
     assert outs[1:] == ["LIVE:EDIT", "LIVE:EDIT"]          # tail re-ran live with the edit
     up.shutdown()

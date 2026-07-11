@@ -294,6 +294,7 @@ def infer_agents(data: dict) -> dict:
             "tools": rec["tools"], "calls": rec["calls"],
             "is_root": i == 0, "color": i % 8,
             "system": system, "sys_head": rec.get("sys_head", ""),
+            "sys_hash": rec.get("sys_hash", ""),
         })
 
     # Delegation-tree depth per agent comes straight from the call-stack

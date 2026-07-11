@@ -593,20 +593,20 @@ class DebugSession:
         from .multiagent import infer_agents
 
         base = self.data
-        # Only rewrite the EDITED agent's calls (leave its peers alone): match on
-        # that agent's original system prompt at the fork turn. For an external
-        # proxy trace every model call is a depth-0 turn, so turn == model index.
-        base_system = None
+        # Rewrite only the EDITED agent's calls (peers keep theirs): identify it
+        # by the sys_hash of the agent making the fork-point call -- the same wire
+        # identity infer_agents uses. For an external proxy trace every model call
+        # is a depth-0 turn, so turn == model index.
+        edit_sys_hash = None
         if system is not None:
             ia = infer_agents(base)
             sa = ia.get("step_agent", {})
-            asys = {a["id"]: a.get("system", "") for a in ia.get("agents", [])}
+            ahash = {a["id"]: a.get("sys_hash", "") for a in ia.get("agents", [])}
             models = [e for e in (base.get("log") or [])
                       if isinstance(e, dict) and e.get("kind") == "model"]
             if 0 <= at < len(models):
-                seq = models[at].get("seq")
-                base_system = asys.get(sa.get(str(seq)), "") or None
-        edits = {"system": system, "base_system": base_system,
+                edit_sys_hash = ahash.get(sa.get(str(models[at].get("seq")))) or None
+        edits = {"new_system": system, "edit_sys_hash": edit_sys_hash,
                  "append": append.strip() or None, "model": model}
         bdata = self.live.fork_external(at, edits)
         payload = _branch_payload(base, bdata, at)

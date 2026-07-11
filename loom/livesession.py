@@ -84,10 +84,12 @@ class LiveSession:
 
     def fork_external(self, at: int, edits: dict) -> dict:
         """Fork an EXTERNAL agent at model-turn ``at``: a fresh proxy replays the
-        recorded prefix (0..at-1) for free, then rewrites the request (edited
-        system / injected message / model) and forwards LIVE from ``at`` on. The
-        adapter is re-run in a SUBPROCESS so its model client picks up the fork
-        proxy's base_url (frameworks bake it at import). Returns the branch trace."""
+        recorded prefix (the exchanges before ``at``) BY CONTENT -- so a re-run
+        that reorders its calls still matches -- then rewrites the request (edited
+        system / injected message / model) and forwards LIVE for the fork-point
+        call and everything downstream. The adapter is re-run in a SUBPROCESS so
+        its model client picks up the fork proxy's base_url (frameworks bake it at
+        import). Returns the branch trace."""
         import subprocess
         import sys
 
@@ -97,10 +99,23 @@ class LiveSession:
                 "`loom live --agent module:attr` and at least one recorded turn")
         from .proxy import ProxyServer
 
-        orig_wire = [dict(r) for r in self._proxy.recorder.wire]
+        rec = self._proxy.recorder
+        keys, wire = list(rec.request_keys), [dict(r) for r in rec.wire]
+        at = max(0, min(int(at), len(keys)))
+        prefix: dict = {}                      # content key -> [recorded responses]
+        for i in range(at):                    # everything BEFORE the fork point replays
+            prefix.setdefault(keys[i], []).append(wire[i])
         prompt = self._episodes[0] if self._episodes else ""
         fproxy = ProxyServer(port=0, target=self.target, save_path=None)
-        fproxy.fork = {"at": int(at), "wire": orig_wire, "served": 0, "edits": edits}
+        fproxy.fork = {
+            "prefix": prefix,
+            "inject_key": keys[at] if (edits.get("append") and at < len(keys)) else None,
+            "edit_sys_hash": edits.get("edit_sys_hash"),
+            "new_system": edits.get("new_system"),
+            "append": edits.get("append"),
+            "model": edits.get("model", "keep"),
+            "_injected": False,
+        }
         threading.Thread(target=fproxy.serve_forever, daemon=True).start()
         base = f"http://127.0.0.1:{fproxy.server_address[1]}"
         module_name, _, attr = self.spec.partition(":")
@@ -156,6 +171,7 @@ class LiveSession:
     def _run_func(self, prompt: str) -> None:
         # Point the external agent's model client at our in-process proxy, then
         # let it run -- every model call is captured and streamed.
+        self._episodes.append(prompt)   # remember the prompt so a fork can re-run it
         os.environ["ANTHROPIC_BASE_URL"] = self.base_url
         os.environ["OPENAI_BASE_URL"] = self.base_url + "/v1"
         out = self.func(prompt)

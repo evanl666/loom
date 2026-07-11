@@ -19,6 +19,7 @@ Stdlib only, like the rest of the kernel.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -142,21 +143,77 @@ def _wire_append_user(request: dict, text: str) -> None:
         request.setdefault("messages", []).append({"role": "user", "content": text})
 
 
-def _apply_fork_edits(request: dict, edits: dict, *, first: bool, path: str) -> dict:
-    """Rewrite a request at/after the fork point: swap the edited agent's system
-    prompt (only where it matches the original, so peers keep theirs), inject a
-    message at the fork turn, and/or override the model."""
-    new_sys = edits.get("system")
-    if new_sys is not None:
-        base = edits.get("base_system")
-        cur = _wire_read_system(request)
-        if not base or cur.strip() == str(base).strip():
-            _wire_set_system(request, new_sys)
-    model = edits.get("model")
+def _wire_tool_names(request: dict) -> list:
+    """Tool names declared in a request, dialect-aware."""
+    if _wire_dialect(request) == "gemini":
+        return _gemini_tools(request)
+    tools = request.get("tools") or []
+    if tools and isinstance(tools[0], dict) and "function" in tools[0]:   # openai
+        return sorted((t.get("function", {}) or {}).get("name", "") for t in tools)
+    return sorted(t.get("name", "") for t in tools if isinstance(t, dict))   # anthropic
+
+
+def _wire_messages_digest(request: dict) -> list:
+    """The (role, stable-text) of each turn -- the part of a request that
+    identifies WHICH call it is, free of volatile ids/timestamps, so a re-run's
+    request can be matched to the recorded exchange it reproduces."""
+    out = []
+    if _wire_dialect(request) == "gemini":
+        for m in request.get("contents") or []:
+            if not isinstance(m, dict):
+                continue
+            txt = []
+            for p in m.get("parts") or []:
+                if not isinstance(p, dict):
+                    continue
+                if "text" in p:
+                    txt.append(p["text"])
+                elif "functionCall" in p:
+                    fc = p["functionCall"] or {}
+                    txt.append(fc.get("name", "") + json.dumps(fc.get("args", {}), sort_keys=True))
+                elif "functionResponse" in p:
+                    txt.append(json.dumps((p["functionResponse"] or {}).get("response", {}), sort_keys=True))
+            out.append((m.get("role", ""), "".join(txt)))
+        return out
+    for m in request.get("messages") or []:
+        if not isinstance(m, dict) or m.get("role") == "system":
+            continue
+        txt = _flatten(m.get("content", ""))
+        for tc in m.get("tool_calls") or []:                 # openai assistant tool calls
+            fn = (tc.get("function", {}) or {})
+            txt += fn.get("name", "") + (fn.get("arguments", "") or "")
+        out.append((m.get("role", ""), txt))
+    return out
+
+
+def request_sys_hash(request: dict) -> str:
+    """The agent fingerprint of a request -- the sha1 of its system prompt, the
+    SAME identity ``_fingerprint``/``infer_agents`` use to tell agents apart."""
+    return hashlib.sha1(_wire_read_system(request).encode()).hexdigest()[:12]
+
+
+def request_fingerprint(request: dict) -> str:
+    """A stable content key for a model request: (system, message digest, tools).
+    Two requests with the same key are the same logical call -- lets a fork match
+    a re-run's request to the recorded exchange it reproduces, order-independent."""
+    blob = json.dumps({"s": _wire_read_system(request),
+                       "m": _wire_messages_digest(request),
+                       "t": _wire_tool_names(request)}, sort_keys=True)
+    return hashlib.sha1(blob.encode()).hexdigest()[:16]
+
+
+def _apply_fork_edits(request: dict, fk: dict, *, is_inject: bool, path: str) -> dict:
+    """Rewrite a request that is going LIVE past the fork point: swap the edited
+    agent's system prompt (identified by its sys_hash, so peers keep theirs),
+    inject the context message at the fork-point call, and/or override the model."""
+    new_sys = fk.get("new_system")
+    if new_sys is not None and request_sys_hash(request) == fk.get("edit_sys_hash"):
+        _wire_set_system(request, new_sys)
+    model = fk.get("model")
     if model and model != "keep" and "generatecontent" not in path.lower():
         request["model"] = model            # Gemini's model is in the URL, leave it
-    if first and edits.get("append"):
-        _wire_append_user(request, str(edits["append"]))
+    if is_inject and fk.get("append"):
+        _wire_append_user(request, str(fk["append"]))
     return request
 
 
@@ -174,6 +231,7 @@ class WireRecorder:
     def __init__(self):
         self.log: list[EffectEntry] = []
         self.wire: list[dict] = []  # raw responses, for byte-identical replay
+        self.request_keys: list[str] = []  # per-exchange request fingerprint (for fork matching)
         self.shield_events: list[dict] = []  # firewall decisions, in order
         self.episodes: list[str] = []
         self.model = ""
@@ -202,6 +260,7 @@ class WireRecorder:
             self._absorb_request(request)
             self._absorb_response(response)
         self.wire.append(response)
+        self.request_keys.append(request_fingerprint(request))
 
     def _fingerprint(self, request: dict, *, dialect: str) -> dict:
         """A per-model-call agent fingerprint recovered from the wire request.
@@ -215,8 +274,6 @@ class WireRecorder:
         The three wire dialects (Anthropic, OpenAI, Gemini) carry the same three
         facts in different shapes; we normalize them here so everything
         downstream (infer_agents, the debugger, the firewall) is dialect-blind."""
-        import hashlib
-
         if dialect == "openai":
             system = ""
             for m in request.get("messages", []):
@@ -952,24 +1009,29 @@ class _Handler(BaseHTTPRequestHandler):
                 self._send_json(200, response)
             return
 
-        # Fork mode: serve the recorded prefix (0..at-1) for free, then rewrite
-        # the request and forward LIVE from the fork point on. Every exchange is
-        # recorded, so the proxy's recorder becomes the branch trace.
+        # Fork mode: match this request against the recorded prefix BY CONTENT
+        # (order-independent, robust to a framework that re-runs its calls in a
+        # different order); serve the recorded response for free if it matches an
+        # unused prefix exchange, else forward LIVE with the edits. Every exchange
+        # is recorded, so the proxy's recorder becomes the branch trace.
         fk = self.server.fork
         if fk is not None:
+            key = request_fingerprint(request)
             with self.server.lock:
-                idx = fk["served"]
-                fk["served"] += 1
-            if idx < fk["at"] and idx < len(fk["wire"]):
-                response = fk["wire"][idx]           # deterministic recorded prefix
-                self.server.persist(request, response, [])
+                pool = fk["prefix"].get(key)
+                replayed = fk["prefix"][key].pop(0) if pool else None
+                is_inject = key == fk.get("inject_key") and not fk.get("_injected")
+                if is_inject:
+                    fk["_injected"] = True
+            if replayed is not None and not is_inject:
+                self.server.persist(request, replayed, [])   # recorded prefix, free
                 if wants_stream:
-                    self._send_sse(_synth_for(response)(response))
+                    self._send_sse(_synth_for(replayed)(replayed))
                 else:
-                    self._send_json(200, response)
+                    self._send_json(200, replayed)
                 return
-            # fork point reached: apply the edits, then fall through to forward LIVE
-            request = _apply_fork_edits(request, fk["edits"], first=(idx == fk["at"]), path=self.path)
+            # diverged / the fork-point call: apply edits, fall through to forward LIVE
+            request = _apply_fork_edits(request, fk, is_inject=is_inject, path=self.path)
 
         # Taint tripwires: results of the last round's tool calls ride in this
         # request -- the earliest moment the wire can see what a tool returned.
