@@ -215,6 +215,32 @@ def request_fingerprint(request: dict) -> str:
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
 
 
+def _override_tool_results(request: dict, overrides: dict) -> None:
+    """Replace a tool RESULT in a request (by its original text) -- fault
+    injection: 'what if this tool had returned X?'. Dialect-aware, in place."""
+    if _wire_dialect(request) == "gemini":
+        for m in request.get("contents") or []:
+            for p in (m.get("parts") or []) if isinstance(m, dict) else []:
+                fr = isinstance(p, dict) and p.get("functionResponse")
+                if fr:
+                    cur = _gemini_result(fr.get("response", fr))
+                    if cur in overrides:
+                        fr["response"] = {"result": overrides[cur]}
+        return
+    for m in request.get("messages") or []:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "tool" and _flatten(m.get("content", "")) in overrides:   # openai
+            m["content"] = overrides[_flatten(m["content"])]
+        c = m.get("content")
+        if isinstance(c, list):                                                        # anthropic
+            for b in c:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    cur = _flatten(b.get("content", ""))
+                    if cur in overrides:
+                        b["content"] = overrides[cur]
+
+
 def _apply_fork_edits(request: dict, fk: dict, *, is_inject: bool, path: str) -> dict:
     """Rewrite a request that is going LIVE past the fork point: swap the edited
     agent's system prompt (identified by its sys_hash, so peers keep theirs),
@@ -1032,6 +1058,11 @@ class _Handler(BaseHTTPRequestHandler):
         # is recorded, so the proxy's recorder becomes the branch trace.
         fk = self.server.fork
         if fk is not None:
+            if fk.get("result_overrides"):
+                # fault injection: swap a recorded tool result for a fake one
+                # wherever it rides in as a tool_result (the request then diverges
+                # from the prefix and goes live, so the model reacts to the fake).
+                _override_tool_results(request, fk["result_overrides"])
             key = request_fingerprint(request)
             with self.server.lock:
                 pool = fk["prefix"].get(key)

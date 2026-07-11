@@ -114,6 +114,7 @@ class LiveSession:
             "new_system": edits.get("new_system"),
             "append": edits.get("append"),
             "model": edits.get("model", "keep"),
+            "result_overrides": edits.get("result_overrides") or {},
             "_injected": False,
         }
         threading.Thread(target=fproxy.serve_forever, daemon=True).start()

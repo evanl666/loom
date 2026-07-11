@@ -573,7 +573,8 @@ class DebugSession:
         recording proxy replays the prefix and re-runs the tail live with edits.
         """
         if self.agent is None and self.live is not None and getattr(self.live, "can_proxy_fork", False):
-            return self._fork_external(at, append=append, model=model, system=system)
+            return self._fork_external(at, append=append, model=model, system=system,
+                                       set_results=set_results)
         from .trace import Run
 
         agent = self._agent_for(model, system, tools)
@@ -607,7 +608,7 @@ class DebugSession:
         return payload
 
     def _fork_external(self, at: int, append: str = "", model: str = "keep",
-                       system: "str | None" = None) -> dict:
+                       system: "str | None" = None, set_results: "dict | None" = None) -> dict:
         """Proxy-fork an external agent (LangGraph / Claude-SDK / ...): re-run it
         with the recorded prefix replayed and the tail live + edited."""
         from .cost import analyze_cost
@@ -615,6 +616,17 @@ class DebugSession:
         from .multiagent import infer_agents
 
         base = self.data
+        # FAULT INJECTION for an external agent: a tool's result reaches the model
+        # as a tool_result in the NEXT request, so rewrite it there by its original
+        # text -> the fake ("what if this tool had returned X?").
+        result_overrides = {}
+        if set_results:
+            want = {str(k): v for k, v in set_results.items()}
+            for e in (base.get("log") or []):
+                if str(e.get("seq")) in want and str(e.get("kind", "")).startswith("tool:"):
+                    orig = e.get("result")
+                    key = orig if isinstance(orig, str) else json.dumps(orig)
+                    result_overrides[key] = str(want[str(e.get("seq"))])
         # Rewrite only the EDITED agent's calls (peers keep theirs): identify it
         # by the sys_hash of the agent making the fork-point call -- the same wire
         # identity infer_agents uses. For an external proxy trace every model call
@@ -629,10 +641,12 @@ class DebugSession:
             if 0 <= at < len(models):
                 edit_sys_hash = ahash.get(sa.get(str(models[at].get("seq")))) or None
         edits = {"new_system": system, "edit_sys_hash": edit_sys_hash,
-                 "append": append.strip() or None, "model": model}
+                 "append": append.strip() or None, "model": model,
+                 "result_overrides": result_overrides or None}
         bdata = self.live.fork_external(at, edits)
         payload = _branch_payload(base, bdata, at)
         label = (append[:40] or (f"system: {system[:24]}" if system else "")
+                 or (f"fault@{','.join(map(str, sorted(set_results)))}" if set_results else "")
                  or (f"model: {model}" if model != "keep" else "re-run"))
         node = {"id": len(self.branches) + 1, "at": at, "label": label,
                 "model": model, "output": bdata.get("output", "")[:120],
