@@ -92,7 +92,11 @@ def steps_for(data: dict) -> list[dict]:
         nest = d.get("nest", 0)
         obs = (d.get("observation") or {}).get("text") or ""
         if obs.startswith("(delegated to sub-agent"):
-            d["is_delegation"] = True
+            # a real hand-off is followed by a DEEPER agent; if the run is flat
+            # (a peer group chat), this was just a leaf tool whose result wasn't
+            # recorded -- not a delegation.
+            if any(x.get("nest", 0) > nest for x in out):
+                d["is_delegation"] = True
             continue
         req = d.get("requested_at", -1)
         if req >= 0 and any(x.get("type") in ("reason", "answer", "call")

@@ -43,6 +43,31 @@ _SPECIFIC = re.compile(
     r"supervisor|coder|engineer|manager|expert|assistant\b", re.I)
 
 
+# Tokens too generic to link a delegation call to its sub-agent.
+_STEM_STOP = {"the", "and", "ask", "for", "delegate", "task", "work", "agent",
+              "sub", "call", "lead", "team", "coworker", "assistant", "specialist",
+              "return", "result", "using", "then", "with", "this"}
+# Arg keys on a delegation tool-call that name/describe the target sub-agent.
+_DELEG_ARG_KEYS = ("subagent_type", "type", "name", "agent", "task",
+                   "description", "query", "prompt", "instruction", "goal", "input")
+
+
+def stem_tokens(*parts) -> set:
+    """5-char stems of the meaningful words in ``parts``.
+
+    Stemming to 5 chars lets a delegation tool ('ask_research', 'calculator')
+    match its sub-agent's role/tools ('Research Specialist', 'calculate')
+    across the naming gap. Used both to name agents and, in ``infer_agents``,
+    to attach each sub-agent to the parent whose tool call actually spawned it
+    (correct even when a parent fans out several siblings in ONE turn)."""
+    out: set = set()
+    for p in parts:
+        for w in re.findall(r"[a-z]{4,}", str(p).lower()):
+            if w not in _STEM_STOP:
+                out.add(w[:5])
+    return out
+
+
 def _clean_role(phrase: str) -> str:
     phrase = re.sub(r"\s+", " ", phrase or "").strip(" -.,'\"")
     words = [w for w in phrase.split(" ") if w.lower() not in _STOP]
@@ -113,6 +138,13 @@ def infer_agents(data: dict) -> dict:
     # a chain), which trace-order hand-offs got wrong.
     stack: list[tuple] = []   # agents awaiting a delegation result, root-first
     last_agent: "tuple | None" = None
+    pending_tools: list = []  # (tool_name, agent_key) FIFO -> attribute a result
+                              # to the agent that actually requested it (correct even
+                              # when a peer's turn is interleaved -- e.g. AutoGen group chat)
+    open_calls: dict = {}     # agent_key -> [ {name, stems} ] tool calls awaiting a
+                              # result; used to attach a fresh sub-agent to the parent
+                              # whose call actually spawned it (siblings, not a chain)
+    peers: set = set()        # agents classified as group-chat peers (never nested)
 
     def _ident(meta: dict, depth: int) -> tuple:
         nonlocal source
@@ -147,35 +179,87 @@ def infer_agents(data: dict) -> dict:
             elif meta.get("tools") and not rec["tools"]:
                 rec["tools"] = list(meta.get("tools", []))
             rec["calls"] += 1
-            has_tc = bool((e.get("result") or {}).get("tool_calls")) if isinstance(e.get("result"), dict) else False
+            res = e.get("result") if isinstance(e.get("result"), dict) else {}
+            tcs = res.get("tool_calls") or []
+            has_tc = bool(tcs)
+            for tc in tcs:                   # remember who requested each tool
+                nm = tc.get("name", "")
+                pending_tools.append((nm, key))
+                args = tc.get("input") or tc.get("args") or {}
+                arg_vals = [args.get(k) for k in _DELEG_ARG_KEYS] if isinstance(args, dict) else []
+                open_calls.setdefault(key, []).append(
+                    {"name": nm, "stems": stem_tokens(nm, *[v for v in arg_vals if v])})
+            msgs = meta.get("msgs")
+            is_peer = key in peers           # peer-ness is sticky across turns
             if key in stack:                 # this agent is resuming: pop those it called
                 while stack and stack[-1] != key:
                     stack.pop()
-            else:                            # first appearance: child of the awaiting top
-                parent = stack[-1] if stack else None
-                depth_of[key] = (depth_of[parent] + 1) if parent is not None else 0
-                if parent is not None:
-                    _add_edge(parent, key, seq)
-            if has_tc:                       # awaiting a delegation/tool result
+            elif key in depth_of:            # reappearing (was popped) -- keep its depth
+                pass
+            else:                            # genuine first appearance -- attach to a parent
+                # This sub-agent's own naming signal (its role + tool set).
+                child_stems = stem_tokens(
+                    rec.get("sys_role") or _label_from_system(rec.get("sys_head", "")) or "",
+                    *rec.get("tools", []))
+                # Prefer the ancestor whose OPEN tool call actually spawned this
+                # agent -- matched by name/args, so a parent that fans out several
+                # siblings in ONE turn attaches them all to itself (not a chain),
+                # and a genuine grandchild attaches to the deeper parent.
+                m_parent, m_call, m_score = None, None, 0
+                for a in reversed(stack):    # deeper agents win ties
+                    for call in open_calls.get(a, []):
+                        sc = len(child_stems & call["stems"])
+                        if sc > m_score:
+                            m_parent, m_call, m_score = a, call, sc
+                if m_parent is not None:     # spawned by a matched delegation call
+                    depth_of[key] = depth_of.get(m_parent, 0) + 1
+                    _add_edge(m_parent, key, seq)
+                    open_calls[m_parent].remove(m_call)
+                else:
+                    parent = stack[-1] if stack else None
+                    # No name match. A FRESH context (msgs<=1) under an awaiting
+                    # parent is still a sequential delegation child; a call that
+                    # already carries the shared conversation (msgs>=2) is a PEER
+                    # turn -- a group chat (e.g. AutoGen), not a child.
+                    is_peer = parent is not None and isinstance(msgs, int) and msgs >= 2
+                    if is_peer:
+                        peers.add(key)
+                        depth_of[key] = depth_of.get(parent, 0)
+                    else:
+                        depth_of[key] = (depth_of[parent] + 1) if parent is not None else 0
+                        if parent is not None:
+                            _add_edge(parent, key, seq)
+            # a peer does not create delegation nesting, so it never goes on the stack
+            if has_tc and not is_peer:
                 if not stack or stack[-1] != key:
                     stack.append(key)
-            else:                            # final answer: this agent returns
+            elif not has_tc:                 # final answer: this agent returns
                 if stack and stack[-1] == key:
                     stack.pop()
             last_agent = key
             if seq is not None:
                 step_agent[str(seq)] = key
         else:
-            # a tool / other effect belongs to the agent that REQUESTED it, NOT
-            # whoever acted last: its own meta.agent (native), else the agent
-            # still awaiting a result (stack top -- correct even for a delegation
-            # whose sub-agent has already returned and been popped), else the
-            # last agent to act.
+            # a tool / other effect belongs to the agent that REQUESTED it. Match
+            # the tool result to the pending tool call by NAME (precise, correct
+            # even when a peer's turn interleaves); fall back to native meta.agent,
+            # the awaiting stack top, then the last agent to act.
             m = e.get("meta") or {}
-            if m.get("agent") and ("name", m["agent"]) in agents:
-                key = ("name", m["agent"])
-            else:
-                key = (stack[-1] if stack else None) or last_agent
+            key = None
+            if kind.startswith("tool:"):
+                tname = kind[5:]
+                idx = next((i for i, (n, _a) in enumerate(pending_tools) if n == tname), None)
+                if idx is not None:
+                    key = pending_tools.pop(idx)[1]
+                    oc = open_calls.get(key) or []   # this call was a leaf, not a delegation
+                    hit = next((c for c in oc if c["name"] == tname), None)
+                    if hit is not None:
+                        oc.remove(hit)
+            if key is None:
+                if m.get("agent") and ("name", m["agent"]) in agents:
+                    key = ("name", m["agent"])
+                else:
+                    key = (stack[-1] if stack else None) or last_agent
             if key is not None and seq is not None:
                 step_agent[str(seq)] = key
 

@@ -171,3 +171,83 @@ def test_parallel_delegations_mapped_to_children_semantically():
     # matched by role token overlap, NOT by positional order (support ran first)
     assert m.get("ask_research") == "Research Lead"
     assert m.get("ask_support") == "Support Lead"
+
+
+def _wire(system, tools, tcs=None, text=None, seq=0, msgs=None):
+    role = system.replace("You are the ", "").replace("You are a ", "").rstrip(".")
+    meta = {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+            "sys_head": system, "sys_role": role, "tools": tools, "model": "m"}
+    if msgs is not None:
+        meta["msgs"] = msgs
+    res = {"stop_reason": "tool_use", "tool_calls": tcs} if tcs else {"text": text or "", "stop_reason": "end_turn"}
+    return {"seq": seq, "kind": "model", "depth": 0, "meta": meta, "result": res}
+
+
+def test_parallel_siblings_attach_to_parent_not_a_chain():
+    """A coordinator that fans out TWO sub-agents from one turn, whose calls then
+    interleave on the wire, must produce two SIBLINGS under the coordinator -- not
+    a chain (research -> math). General across frameworks (mirrors PydanticAI)."""
+    data = {"recorded_via": "proxy", "model": "m", "output": "990", "tools": {}, "log": [
+        _wire("You are the Coordinator.", ["ask_research", "ask_calculator"], seq=0, msgs=1,
+              tcs=[{"id": "1", "name": "ask_research", "input": {"task": "Eiffel height"}},
+                   {"id": "2", "name": "ask_calculator", "input": {"task": "multiply 330"}}]),
+        _wire("You are a Research Specialist.", ["web_search"], seq=1, msgs=1,
+              tcs=[{"id": "3", "name": "web_search", "input": {"q": "eiffel"}}]),
+        _wire("You are a Math Specialist.", ["calculate"], seq=2, msgs=1,
+              tcs=[{"id": "4", "name": "calculate", "input": {"e": "330*3"}}]),
+        _wire("You are a Research Specialist.", ["web_search"], seq=4, msgs=3, text="330m"),
+        _wire("You are a Math Specialist.", ["calculate"], seq=5, msgs=3, text="990"),
+        _wire("You are the Coordinator.", ["ask_research", "ask_calculator"], seq=6, msgs=3, text="done"),
+    ]}
+    ia = infer_agents(data)
+    lvl = {a["label"]: a["level"] for a in ia["agents"]}
+    assert lvl["Coordinator"] == 0
+    assert lvl["Research Specialist"] == 1 and lvl["Math Specialist"] == 1  # siblings
+    edges = {(e["from"], e["to"]) for e in ia["edges"]}
+    ids = {a["label"]: a["id"] for a in ia["agents"]}
+    assert (ids["Coordinator"], ids["Research Specialist"]) in edges
+    assert (ids["Coordinator"], ids["Math Specialist"]) in edges
+    # NOT a chain: math is not a child of research
+    assert (ids["Research Specialist"], ids["Math Specialist"]) not in edges
+
+
+def test_grandchild_nesting_attaches_to_deeper_parent():
+    """A three-level delegation (coordinator -> research lead -> data analyst) must
+    nest the analyst under the LEAD, not the coordinator -- matched by name/args."""
+    data = {"recorded_via": "proxy", "model": "m", "output": "9", "tools": {}, "log": [
+        _wire("You are the Coordinator.", ["ask_research"], seq=0, msgs=1,
+              tcs=[{"id": "1", "name": "ask_research", "input": {"task": "analyze data"}}]),
+        _wire("You are the Research Lead.", ["ask_data_analyst"], seq=1, msgs=1,
+              tcs=[{"id": "2", "name": "ask_data_analyst", "input": {"task": "compute"}}]),
+        _wire("You are the Data Analyst.", ["calculate"], seq=2, msgs=1,
+              tcs=[{"id": "3", "name": "calculate", "input": {"e": "3*3"}}]),
+        _wire("You are the Data Analyst.", ["calculate"], seq=4, msgs=3, text="9"),
+        _wire("You are the Research Lead.", ["ask_data_analyst"], seq=5, msgs=3, text="9"),
+        _wire("You are the Coordinator.", ["ask_research"], seq=6, msgs=3, text="9"),
+    ]}
+    ia = infer_agents(data)
+    lvl = {a["label"]: a["level"] for a in ia["agents"]}
+    assert lvl["Coordinator"] == 0 and lvl["Research Lead"] == 1 and lvl["Data Analyst"] == 2
+    ids = {a["label"]: a["id"] for a in ia["agents"]}
+    edges = {(e["from"], e["to"]) for e in ia["edges"]}
+    assert (ids["Research Lead"], ids["Data Analyst"]) in edges  # analyst under the lead
+
+
+def test_peer_group_chat_is_flat_not_delegation():
+    """A round-robin group chat (AutoGen): peers share ONE growing conversation and
+    take turns. The msgs signal (context already large on a peer's first turn)
+    keeps them flat -- same level, no delegation edges, no false sub-agent flags."""
+    from loom.debugger import steps_for
+    data = {"recorded_via": "proxy", "model": "m", "output": "990", "tools": {}, "log": [
+        _wire("You are a Research Specialist.", ["web_search"], seq=0, msgs=1,
+              tcs=[{"id": "1", "name": "web_search", "input": {"q": "eiffel"}}]),
+        _wire("You are a Math Specialist.", ["calculate"], seq=1, msgs=2,
+              tcs=[{"id": "2", "name": "calculate", "input": {"e": "330*3"}}]),
+        _wire("You are a Research Specialist.", ["web_search"], seq=3, msgs=4, text="330m"),
+        _wire("You are a Math Specialist.", ["calculate"], seq=4, msgs=5, text="990 DONE"),
+    ]}
+    ia = infer_agents(data)
+    lvl = {a["label"]: a["level"] for a in ia["agents"]}
+    assert lvl["Research Specialist"] == 0 and lvl["Math Specialist"] == 0  # flat peers
+    assert ia["edges"] == []                                                # no delegation
+    assert not any(s.get("is_delegation") for s in steps_for(data))         # no false flags

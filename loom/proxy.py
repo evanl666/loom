@@ -114,6 +114,10 @@ class WireRecorder:
             "sys_head": system[:160],
             "tools": [t for t in tools if t],
             "model": request.get("model", self.model),
+            # how much conversation this call carried -- a FRESH sub-agent starts
+            # small (just its task), a shared-conversation PEER (a group chat)
+            # starts large. Lets infer_agents tell delegation from peer turns.
+            "msgs": len(request.get("messages") or []),
         }
         role = best_role(system)  # scan the FULL prompt for the specific role
         if role:
