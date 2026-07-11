@@ -1180,6 +1180,8 @@ label.tk{font-size:12px;color:#cfcfd6;display:flex;align-items:center;gap:5px;cu
 #fork textarea,#fork select{margin-top:2px}
 button.fault{background:#3a2f1a;border-color:#5c4a2c;color:#ffe0a0;margin-top:8px}
 button.fault:hover{background:#4a3c22}
+button.openbr{background:#12261a;border-color:#2f7a45;color:#7ee0a0;margin:8px 0;font-weight:600;width:100%}
+button.openbr:hover{background:#1a3a28}
 #faultval{background:#161311;border-color:#3a2f1a}
 .bnode{border:1px solid #24242a;border-radius:8px;padding:8px 11px;margin:6px 0;font-size:12.5px}
 .bmeta{color:#7fc3ff;font-size:11px;margin-left:6px}
@@ -1852,11 +1854,17 @@ async function doFork(){
     const div=res.diverge;
     const bs=res.branch_steps.map((b,i)=>{
       const cls=(div!=null&&i>=div)?"branchstep div":(i>=(div??1e9)?"branchstep new":"branchstep");
-      return `<div class="${cls}"><span class="muted">${b.step}</span> <b>${E(b.tool||b.type)}</b> ${E((b.intent||"").slice(0,60))}</div>`;
+      const kind=stepKind(b);
+      const txt=(b.intent||(b.observation||{}).text||"");
+      return `<div class="${cls}"><span class="badge ${kind.cls}">${kind.label}</span>`+
+             (b.tool?` <b>${E(b.tool)}</b>`:"")+` <span class="muted">${E(txt.slice(0,70))}</span></div>`;
     }).join("");
-    bx.innerHTML=`<div class="branchhead">✅ new branch${div!=null?` · diverges at step ${div}`:""}</div>`+
-                 `<div class="fl">output</div><pre>${E(res.branch_output)}</pre>`+
-                 `<div class="fl">branch steps</div>${bs}`;
+    bx.innerHTML=`<div class="branchhead">✅ new branch #${res.branch_id}${div!=null?` · diverges at step ${div}`:""}</div>`+
+                 `<button id="openbranch" class="openbr">🔍 open this branch as a full trace →</button>`+
+                 `<div class="fl">final output</div><pre>${E(res.branch_output)}</pre>`+
+                 `<div class="fl">branch steps <span class="muted">(preview — click above for full detail, tool calls &amp; context)</span></div>${bs}`;
+    const ob=document.getElementById("openbranch");
+    if(ob)ob.onclick=()=>{closeDrawer&&closeDrawer();viewBranch(res.branch_id);};
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
   finally{btn.disabled=false; btn.innerHTML="▶ Fork &amp; Run live";}
 }
