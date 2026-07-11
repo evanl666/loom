@@ -130,6 +130,12 @@ def steps_for(data: dict) -> list[dict]:
             if c is not None and id(c) not in before:
                 before[id(c)] = d
                 move_ids.add(id(d))
+                # record which sub-agent this hand-off spawned, so the context
+                # panel can show that agent's delegated task (reliable for a
+                # late-returning delegation; parallel drain hand-offs stay
+                # unmapped -- their child is structurally ambiguous on the wire).
+                if c.get("agent_id"):
+                    d["delegates_to"] = c["agent_id"]
     if move_ids:
         reordered = []
         for d in out:
@@ -1606,13 +1612,44 @@ async function loadContext(){
   const s=steps[cur], box=document.getElementById("ctx");
   document.getElementById("ctxbtn").remove();
   box.innerHTML='<span class="muted">loading…</span>';
-  const r = STATIC ? {frame:(SD.context_all||[]).filter(m=>m.step<=s.step)}
-                   : await (await fetch("/api/context?step="+s.step)).json();
-  box.innerHTML=r.frame.map(m=>{
-    const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human"}[m.role]||m.role;
-    const cur=m.step===s.step?" curframe":"";
-    return `<div class="frame${cur}"><span class="rl">${role}</span><pre>${E((m.content||"").slice(0,1500))}</pre></div>`;
+  let frame;
+  if(s.agent_id){
+    // MULTI-AGENT: show only THIS agent's own sub-conversation (it never saw the
+    // other agents' work), strictly BEFORE this step (its own output isn't input).
+    frame=agentFrame(s);
+  } else {
+    // single agent: the whole prior conversation, strictly before this step.
+    frame = STATIC ? (SD.context_all||[]).filter(m=>m.step<s.step)
+                   : (await (await fetch("/api/context?step="+(s.step-1))).json()).frame;
+  }
+  if(!frame.length){box.innerHTML='<span class="muted">(only the user request — this is the first model call)</span>';return;}
+  box.innerHTML=frame.map(m=>{
+    const role={user:"👤 user",assistant:"🤖 model",tool:"🔧 "+(m.tool||"tool"),human:"🧑 human",task:"📩 delegated task"}[m.role]||m.role;
+    return `<div class="frame"><span class="rl">${role}</span><pre>${E((m.content||"").slice(0,1500))}</pre></div>`;
   }).join("");
+}
+function agentFrame(s){
+  const aid=s.agent_id;
+  const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
+  const frame=[];
+  if(aid===rootId){
+    frame.push({role:"user",content:RUN.prompt||"",step:-1});
+  } else {
+    const deleg=steps.find(x=>x.type==="call"&&x.delegates_to===aid);
+    const task=deleg&&deleg.input?(deleg.input.task||J(deleg.input)):"";
+    frame.push({role:"task",content:task||"(this sub-agent's task was delegated by its parent)",step:-1});
+  }
+  for(let j=0;j<cur;j++){            // this agent's OWN prior steps, in order
+    const x=steps[j];
+    if(x.agent_id!==aid) continue;
+    if((x.type==="reason"||x.type==="answer")&&x.intent) frame.push({role:"assistant",content:x.intent,step:x.step});
+    else if(x.type==="call"){
+      frame.push({role:"assistant",content:"→ call "+x.tool+"("+J(x.input||{})+")",step:x.step});
+      const o=x.observation||{};
+      if(o.text&&!o.text.startsWith("(delegated")) frame.push({role:"tool",tool:x.tool,content:o.text,step:x.step});
+    }
+  }
+  return frame;
 }
 async function faultInject(){
   const s=steps[cur];
