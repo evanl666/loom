@@ -410,6 +410,8 @@ def test_gemini_dialect_records_a_loom_trace(tmp_path):
         data = json.load(f)
     assert data["model"] == "gemini-2.0-flash"          # recovered from the URL
     assert data["system"] == sys_prompt
+    # the FULL system prompt is kept once per agent (for display + fork editing)
+    assert sys_prompt in data["systems"].values()
     assert data["episodes"] == ["Weather in Berlin?"]
     assert [e["kind"] for e in data["log"]] == ["model", "tool:get_weather", "model"]
     assert data["log"][0]["result"]["tool_calls"][0]["input"] == {"city": "Berlin"}

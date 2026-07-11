@@ -171,7 +171,7 @@ def infer_agents(data: dict) -> dict:
             rec = agents.get(key)
             if rec is None:
                 rec = {"key": key, "label": None, "sys_head": meta.get("sys_head", ""),
-                       "sys_role": meta.get("sys_role", ""),
+                       "sys_role": meta.get("sys_role", ""), "sys_hash": meta.get("sys_hash", ""),
                        "model": meta.get("model", "") or data.get("model", ""),
                        "tools": list(meta.get("tools", [])), "calls": 0, "depth": depth}
                 agents[key] = rec
@@ -264,6 +264,7 @@ def infer_agents(data: dict) -> dict:
                 step_agent[str(seq)] = key
 
     # assign readable labels + ids, stable in first-appearance order
+    systems = data.get("systems") if isinstance(data.get("systems"), dict) else {}
     id_of: dict[tuple, str] = {}
     used: set[str] = set()
     out_agents: list[dict] = []
@@ -279,10 +280,20 @@ def infer_agents(data: dict) -> dict:
         used.add(label)
         aid = f"a{i + 1}"
         id_of[key] = aid
+        # The agent's full system prompt (stored once per sys_hash by the proxy);
+        # the root of a native run falls back to the trace-level system, and any
+        # agent from an older trace without the map falls back to its 160-char head.
+        system = systems.get(rec.get("sys_hash", ""))
+        if not system and i == 0:
+            system = data.get("system", "")
+        if not system:
+            system = rec.get("sys_head", "")
+        system = system or ""
         out_agents.append({
             "id": aid, "label": label, "model": rec["model"],
             "tools": rec["tools"], "calls": rec["calls"],
             "is_root": i == 0, "color": i % 8,
+            "system": system, "sys_head": rec.get("sys_head", ""),
         })
 
     # Delegation-tree depth per agent comes straight from the call-stack

@@ -173,6 +173,36 @@ def test_parallel_delegations_mapped_to_children_semantically():
     assert m.get("ask_support") == "Support Lead"
 
 
+def test_infer_agents_surfaces_the_full_system_prompt_per_agent():
+    """Each agent carries its FULL system prompt (resolved from the trace's
+    per-sys_hash `systems` map the proxy records), so the debugger can show and
+    edit it; a sys_head fallback covers older traces without the map."""
+    LONG = "You are the Coordinator. " + "Delegate to the research specialist. " * 12
+    RES = "You are a Research Specialist. Use web_search. Be terse."
+    hc = hashlib.sha1(LONG.encode()).hexdigest()[:12]
+    hr = hashlib.sha1(RES.encode()).hexdigest()[:12]
+
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+                "sys_head": system[:160], "sys_role": system.split(".")[0].replace("You are the ", "").replace("You are a ", ""),
+                "tools": tools, "model": "m"}
+    data = {"recorded_via": "proxy", "model": "m", "system": LONG,
+            "systems": {hc: LONG, hr: RES}, "output": "x", "tools": {}, "log": [
+        {"seq": 0, "kind": "model", "meta": fp(LONG, ["ask_research"]),
+         "result": {"tool_calls": [{"id": "1", "name": "ask_research", "input": {"task": "t"}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "model", "meta": fp(RES, ["web_search"]),
+         "result": {"text": "done", "stop_reason": "end_turn"}}]}
+    ags = {a["label"]: a for a in infer_agents(data)["agents"]}
+    assert ags["Coordinator"]["system"] == LONG      # full, not the 160-char head
+    assert len(ags["Coordinator"]["system"]) > 160
+    assert ags["Research Specialist"]["system"] == RES
+
+    # older trace without a `systems` map: fall back to the recorded head
+    data.pop("systems")
+    ags2 = {a["label"]: a for a in infer_agents(data)["agents"]}
+    assert ags2["Research Specialist"]["system"] == RES[:160]
+
+
 def _wire(system, tools, tcs=None, text=None, seq=0, msgs=None):
     role = system.replace("You are the ", "").replace("You are a ", "").rstrip(".")
     meta = {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],

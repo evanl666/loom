@@ -113,6 +113,7 @@ class WireRecorder:
         self.model = ""
         self.system = ""
         self.output = ""
+        self.systems: dict[str, str] = {}  # sys_hash -> full system prompt (once per agent)
         self._tool_names: dict[str, str] = {}  # tool_use_id -> tool name
         self._seen_messages = 0
         self._pending_fp: dict = {}  # agent fingerprint for the model call being recorded
@@ -172,8 +173,13 @@ class WireRecorder:
         system = system or ""
         from .multiagent import best_role
 
+        sys_hash = hashlib.sha1(system.encode()).hexdigest()[:12]
+        # Keep the FULL system prompt once per distinct agent (not per call -- the
+        # same prompt repeats every turn) so the debugger can show and edit it.
+        if system and sys_hash not in self.systems:
+            self.systems[sys_hash] = system
         fp = {
-            "sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12],
+            "sys_hash": sys_hash,
             "sys_head": system[:160],
             "tools": [t for t in tools if t],
             "model": request.get("model") or self.model,
@@ -350,6 +356,7 @@ class WireRecorder:
             "recorded_via": "proxy",
             "model": self.model,
             "system": self.system,
+            "systems": self.systems,   # sys_hash -> full system prompt, per agent
             "prompt": self.episodes[0] if self.episodes else "",
             "episodes": self.episodes or [""],
             "output": self.output,

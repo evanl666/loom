@@ -1125,6 +1125,10 @@ pre.mdcode{background:#0c0c0f;border:1px solid #26262b;border-radius:8px;padding
 .forkrow>label.fl{margin:8px 0 0}
 .fdet{flex:1;min-width:220px}.fdet summary{cursor:pointer;color:#8a8a92;font-size:12px;padding:6px 0;user-select:none}
 .fdet summary:hover{color:#e6e6e6}
+.sysdet{margin:8px 0;border:1px solid #24242a;border-radius:8px;background:#131316}
+.sysdet summary{cursor:pointer;padding:8px 12px;font-size:12px;color:#b9b9c2;user-select:none}
+.sysdet summary:hover{color:#e6e6e6}
+.sysdet pre.sysp{margin:0;border:0;border-top:1px solid #24242a;border-radius:0 0 8px 8px;max-height:260px;font-size:12px;color:#c9c9d2}
 #toolbox{display:flex;flex-wrap:wrap;gap:4px 12px}
 label.tk{font-size:12px;color:#cfcfd6;display:flex;align-items:center;gap:5px;cursor:pointer}
 #run{margin-top:12px;background:#1d3a5c;border-color:#2c5a8c;color:#dbeaff;font-weight:600;padding:6px 14px}
@@ -1391,11 +1395,15 @@ function codeFields(inp){
   const rest={}; for(const k in inp) if(!["path","file_path","filename","file","notebook_path","content","new_str","old_str","code"].includes(k)) rest[k]=inp[k];
   return {path, code:String(code), verb, rest:Object.keys(rest).length?J(rest):""};
 }
-let RUN=null, steps=[], cur=0, canFork=false, CAN_CHAT=false;
+let RUN=null, steps=[], cur=0, canFork=false, CAN_CHAT=false, AGENTS={};
 
 async function load(){
   RUN = STATIC ? SD.run : await (await fetch("/api/run")).json();
   steps=RUN.steps; canFork=RUN.can_fork; CAN_CHAT=RUN.can_chat;
+  try{ // the per-agent system prompts (for display + per-agent fork seeding)
+    const ia = STATIC ? SD.agents : await (await fetch("/api/agents")).json();
+    AGENTS={}; (ia&&ia.agents||[]).forEach(a=>AGENTS[a.id]=a);
+  }catch(e){ AGENTS={}; }
   if(STATIC){ // hide server-only controls; this is a frozen, shareable snapshot
     ["copilot","assertbtn","export","brk"].forEach(id=>{const e=document.getElementById(id); if(e)e.style.display="none";});
     const b=document.querySelector("header b"); if(b)b.textContent="🔬 Loom Studio";
@@ -1586,7 +1594,10 @@ function renderDetail(){
   } else if(s.type==="user"){
     h+=`<div class="k">user request</div><pre>${E(s.intent||o.text||"")}</pre>`;
   } else {
-    // a model turn: its text, then the tool calls it decided to make
+    // a model turn: its SYSTEM PROMPT (what shapes this agent), then its text,
+    // then the tool calls it decided to make
+    const sysp=agentSystem(s);
+    if(sysp) h+=`<details class="sysdet"><summary>⚙ system prompt${s.agent?" · "+E(s.agent):""} <span class="muted">(${sysp.length} chars — edit &amp; re-run in the Fork panel below)</span></summary><pre class="sysp">${E(sysp)}</pre></details>`;
     if(s.intent) h+=`<div class="k">${s.type==="answer"?"final answer":"reasoning"}</div><pre>${E(s.intent)}</pre>`;
     const cj=callsOfModel(cur);
     if(cj.length) h+=`<div class="k">→ decided to call</div>`+cj.map(j=>{
@@ -1627,8 +1638,8 @@ function renderDetail(){
         <option value="claude-sonnet-5">claude-sonnet-5</option>
         <option value="claude-opus-4-8">claude-opus-4-8</option></select>
       <details class="fdet"><summary>⚙ system + tools</summary>
-        <label class="fl">system prompt</label>
-        <textarea id="sysp" rows="3">${E(RUN.system||"")}</textarea>
+        <label class="fl">system prompt <span class="muted">(${E(s.agent||"this agent")}) — edit to A/B test behavior</span></label>
+        <textarea id="sysp" rows="4">${E(agentSystem(s)||"")}</textarea>
         <label class="fl">tools available to the fork</label>
         <div id="toolbox">${(RUN.all_tools||[]).map(t=>`<label class="tk"><input type="checkbox" class="tchk" value="${E(t)}" checked> ${E(t)}</label>`).join("")}</div>
       </details>
@@ -1713,6 +1724,10 @@ async function loadContext(){
     return `<div class="frame"><span class="rl">${role}</span><pre>${E((m.content||"").slice(0,1500))}</pre></div>`;
   }).join("");
 }
+function agentSystem(s){  // the full system prompt of THIS step's agent
+  const a = s && s.agent_id && AGENTS[s.agent_id];
+  return (a && a.system) || (a && a.sys_head) || RUN.system || "";
+}
 function agentFrame(s){
   const aid=s.agent_id;
   const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
@@ -1783,7 +1798,8 @@ async function doFork(){
   try{
     const sysEl=document.getElementById("sysp");
     const payload={at,append:document.getElementById("append").value,model:document.getElementById("model").value};
-    if(sysEl && sysEl.value!==(RUN.system||"")) payload.system=sysEl.value;
+    // send the system prompt only if the user edited it away from this agent's own
+    if(sysEl && sysEl.value!==(agentSystem(s)||"")) payload.system=sysEl.value;
     const chks=[...document.querySelectorAll(".tchk")];
     const on=chks.filter(c=>c.checked).map(c=>c.value);
     if(chks.length && on.length!==chks.length) payload.tools=on;   // only send if a subset
