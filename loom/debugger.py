@@ -925,6 +925,7 @@ class _Handler(BaseHTTPRequestHandler):
                 "steps": steps_for(sess.data),
                 "can_fork": sess.agent is not None
                 or bool(sess.live and getattr(sess.live, "can_proxy_fork", False)),
+                "can_dryrun": sess.agent is not None,   # needs the native tool functions
                 "can_chat": bool(sess.copilot_model),
                 "live": sess.live is not None,
                 "running": bool(sess.live and sess.live.running),
@@ -999,8 +1000,8 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(200, context_delta(sess.data, step))
         elif self.path.startswith("/api/autofix"):
             from urllib.parse import parse_qs, urlparse
-            if sess.agent is None:
-                self._json(400, {"error": "auto-fix needs --agent"})
+            if sess.agent is None and not (sess.live and getattr(sess.live, "can_proxy_fork", False)):
+                self._json(400, {"error": "auto-fix needs --agent or a live external session"})
                 return
             try:
                 at = int(parse_qs(urlparse(self.path).query).get("at", ["0"])[0])
@@ -1826,7 +1827,7 @@ async function loadPanels(step){
   const r = STATIC ? {panels: SD.panels[step]||[]} : await (await fetch("/api/panels?step="+step)).json();
   let h=r.panels.map(p=>`<div class="k">🧩 ${E(p.title)}</div>`+(p.code!=null?`<pre class="code">${E(p.code)}</pre>`:`<div>${E(p.text||"")}</div>`)).join("");
   const s=steps[cur];
-  if(s.type==="call"&&canFork) h+=`<div class="k">▷ dry-run <span class="muted">— run just this tool with edited args (no model call)</span></div>
+  if(s.type==="call"&&RUN.can_dryrun) h+=`<div class="k">▷ dry-run <span class="muted">— run just this tool with edited args (no model call)</span></div>
     <textarea id="dryargs" rows="2">${E(J(s.input||{}))}</textarea><button id="dryrunbtn" class="mini">▷ run tool</button><div id="dryout"></div>`;
   box.innerHTML=h;
   const dp=document.getElementById("dryrunbtn"); if(dp)dp.onclick=doDryRun;
