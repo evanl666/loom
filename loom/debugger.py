@@ -546,7 +546,12 @@ class DebugSession:
         replayed prefix serves the fake value, so the live tail reacts to "what
         if this tool had returned X?" -- an error, empty, or hostile output --
         without touching the agent's code.
+
+        With no native agent but an external live session, this proxy-forks: the
+        recording proxy replays the prefix and re-runs the tail live with edits.
         """
+        if self.agent is None and self.live is not None and getattr(self.live, "can_proxy_fork", False):
+            return self._fork_external(at, append=append, model=model, system=system)
         from .trace import Run
 
         agent = self._agent_for(model, system, tools)
@@ -569,6 +574,43 @@ class DebugSession:
         label = (append[:40] or (f"system: {system[:24]}" if system else "")
                  or (f"tools: {','.join(tools)}" if tools else "")
                  or (f"fault@{','.join(map(str, sorted(set_results)))}" if set_results else "")
+                 or (f"model: {model}" if model != "keep" else "re-run"))
+        node = {"id": len(self.branches) + 1, "at": at, "label": label,
+                "model": model, "output": bdata.get("output", "")[:120],
+                "score": score_breakdown(bdata)["overall"],
+                "tokens": analyze_cost(bdata)["total_tokens"],
+                "diverge": payload["diverge"], "_data": bdata}
+        self.branches.append(node)
+        payload["branch_id"] = node["id"]
+        return payload
+
+    def _fork_external(self, at: int, append: str = "", model: str = "keep",
+                       system: "str | None" = None) -> dict:
+        """Proxy-fork an external agent (LangGraph / Claude-SDK / ...): re-run it
+        with the recorded prefix replayed and the tail live + edited."""
+        from .cost import analyze_cost
+        from .diff import score_breakdown
+        from .multiagent import infer_agents
+
+        base = self.data
+        # Only rewrite the EDITED agent's calls (leave its peers alone): match on
+        # that agent's original system prompt at the fork turn. For an external
+        # proxy trace every model call is a depth-0 turn, so turn == model index.
+        base_system = None
+        if system is not None:
+            ia = infer_agents(base)
+            sa = ia.get("step_agent", {})
+            asys = {a["id"]: a.get("system", "") for a in ia.get("agents", [])}
+            models = [e for e in (base.get("log") or [])
+                      if isinstance(e, dict) and e.get("kind") == "model"]
+            if 0 <= at < len(models):
+                seq = models[at].get("seq")
+                base_system = asys.get(sa.get(str(seq)), "") or None
+        edits = {"system": system, "base_system": base_system,
+                 "append": append.strip() or None, "model": model}
+        bdata = self.live.fork_external(at, edits)
+        payload = _branch_payload(base, bdata, at)
+        label = (append[:40] or (f"system: {system[:24]}" if system else "")
                  or (f"model: {model}" if model != "keep" else "re-run"))
         node = {"id": len(self.branches) + 1, "at": at, "label": label,
                 "model": model, "output": bdata.get("output", "")[:120],
@@ -806,7 +848,8 @@ class _Handler(BaseHTTPRequestHandler):
                 "output": sess.data.get("output", ""),
                 "model": sess.data.get("model", ""),
                 "steps": steps_for(sess.data),
-                "can_fork": sess.agent is not None,
+                "can_fork": sess.agent is not None
+                or bool(sess.live and getattr(sess.live, "can_proxy_fork", False)),
                 "can_chat": bool(sess.copilot_model),
                 "live": sess.live is not None,
                 "running": bool(sess.live and sess.live.running),

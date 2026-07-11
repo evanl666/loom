@@ -41,11 +41,14 @@ def start_proxy(target: str = "https://api.anthropic.com"):
 
 class LiveSession:
     def __init__(self, agent: Any = None, func: "Callable[[str], Any] | None" = None,
-                 target: str = "https://api.anthropic.com", proxy: Any = None):
+                 target: str = "https://api.anthropic.com", proxy: Any = None,
+                 spec: str = ""):
         if (agent is None) == (func is None):
             raise ValueError("LiveSession needs exactly one of agent= or func=")
         self.agent = agent
         self.func = func
+        self.spec = spec          # "module:attr" -- lets an external agent be re-run to fork
+        self.target = target
         self.running = False
         self.error = ""
         self.output = ""
@@ -71,6 +74,50 @@ class LiveSession:
     @property
     def can_ask(self) -> bool:
         return not self.running
+
+    @property
+    def can_proxy_fork(self) -> bool:
+        """An external adapter with a re-runnable spec can be proxy-forked:
+        replay its recorded prefix, then re-run the tail live with edits."""
+        return (self.func is not None and bool(self.spec)
+                and self._proxy is not None and bool(self._proxy.recorder.wire))
+
+    def fork_external(self, at: int, edits: dict) -> dict:
+        """Fork an EXTERNAL agent at model-turn ``at``: a fresh proxy replays the
+        recorded prefix (0..at-1) for free, then rewrites the request (edited
+        system / injected message / model) and forwards LIVE from ``at`` on. The
+        adapter is re-run in a SUBPROCESS so its model client picks up the fork
+        proxy's base_url (frameworks bake it at import). Returns the branch trace."""
+        import subprocess
+        import sys
+
+        if not self.can_proxy_fork:
+            raise RuntimeError(
+                "proxy-fork needs an external adapter started with "
+                "`loom live --agent module:attr` and at least one recorded turn")
+        from .proxy import ProxyServer
+
+        orig_wire = [dict(r) for r in self._proxy.recorder.wire]
+        prompt = self._episodes[0] if self._episodes else ""
+        fproxy = ProxyServer(port=0, target=self.target, save_path=None)
+        fproxy.fork = {"at": int(at), "wire": orig_wire, "served": 0, "edits": edits}
+        threading.Thread(target=fproxy.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{fproxy.server_address[1]}"
+        module_name, _, attr = self.spec.partition(":")
+        env = {**os.environ, "ANTHROPIC_BASE_URL": base, "ANTHROPIC_API_BASE": base,
+               "OPENAI_BASE_URL": base + "/v1", "LOOM_FORK_PROMPT": prompt,
+               "PYTHONPATH": os.getcwd() + os.pathsep + os.environ.get("PYTHONPATH", "")}
+        runner = ("import importlib,os,sys;sys.path.insert(0, os.getcwd());"
+                  f"getattr(importlib.import_module({module_name!r}), {attr!r})"
+                  "(os.environ['LOOM_FORK_PROMPT'])")
+        try:
+            proc = subprocess.run([sys.executable, "-c", runner], env=env,
+                                  capture_output=True, text=True, timeout=600)
+            if not fproxy.recorder.wire and proc.returncode != 0:
+                raise RuntimeError(f"fork re-run failed: {proc.stderr[-500:] or proc.stdout[-500:]}")
+        finally:
+            fproxy.shutdown()
+        return fproxy.recorder.to_dict()
 
     # -- driving the agent --------------------------------------------------
     def ask(self, prompt: str) -> bool:

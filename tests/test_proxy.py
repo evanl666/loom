@@ -1,6 +1,7 @@
 """loom proxy: record any Anthropic-API agent's traffic into a loom trace."""
 
 import json
+import os
 import threading
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -647,3 +648,126 @@ def test_upstream_that_drops_the_connection_is_a_502_not_a_crash(monkeypatch):
     finally:
         proxy.shutdown()
         srv.close()
+
+
+# --- proxy-level fork for external agents (replay prefix, live+edited tail) ---
+class _EchoUpstream(ThreadingHTTPServer):
+    """A lenient fake API: echoes the system it received, never runs out."""
+
+    def __init__(self):
+        self.seen = []
+        super().__init__(("127.0.0.1", 0), _EchoHandler)
+
+    def server_bind(self):
+        import socketserver
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+
+class _EchoHandler(BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def do_POST(self):
+        n = int(self.headers.get("content-length", 0))
+        req = json.loads(self.rfile.read(n) or b"{}")
+        self.server.seen.append(req)
+        body = json.dumps({"content": [{"type": "text", "text": f"LIVE:{req.get('system')}"}],
+                           "stop_reason": "end_turn", "usage": {"input_tokens": 1, "output_tokens": 1}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _rec(t):
+    return {"content": [{"type": "text", "text": t}], "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1}}
+
+
+def test_proxy_fork_replays_prefix_then_lives_with_edited_system():
+    up = _serve(_EchoUpstream())
+    proxy = ProxyServer(port=0, target=f"http://127.0.0.1:{up.server_address[1]}", save_path=None)
+    proxy.fork = {"at": 1, "served": 0, "wire": [_rec("PREFIX0"), _rec("PREFIX1"), _rec("PREFIX2")],
+                  "edits": {"system": "NEW", "base_system": "OLD", "append": None, "model": "keep"}}
+    _serve(proxy)
+
+    def post(system):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{proxy.port}/v1/messages",
+            data=json.dumps({"model": "claude", "system": system,
+                             "messages": [{"role": "user", "content": "hi"}]}).encode(),
+            headers={"content-type": "application/json", "x-api-key": "k"}, method="POST")
+        return json.loads(urllib.request.urlopen(req, timeout=5).read())
+
+    r0, r1, r2 = post("OLD"), post("OLD"), post("OLD")   # the re-run sends its ORIGINAL system
+    assert r0["content"][0]["text"] == "PREFIX0"          # prefix served from the recording (free)
+    assert r1["content"][0]["text"] == "LIVE:NEW"         # fork point: live with the EDITED system
+    assert r2["content"][0]["text"] == "LIVE:NEW"
+    assert len(up.seen) == 2                              # only the tail hit the live API
+    assert [s.get("system") for s in up.seen] == ["NEW", "NEW"]
+    branch = proxy.recorder.to_dict()
+    assert [e["result"]["text"] for e in branch["log"] if e["kind"] == "model"] == \
+        ["PREFIX0", "LIVE:NEW", "LIVE:NEW"]
+    proxy.shutdown()
+    up.shutdown()
+
+
+def test_fork_wire_edits_across_dialects():
+    from loom.proxy import _apply_fork_edits, _wire_read_system
+
+    a = {"system": "OLD", "messages": [{"role": "user", "content": "hi"}]}
+    _apply_fork_edits(a, {"system": "NEW", "base_system": "OLD", "append": "more"}, first=True, path="/v1/messages")
+    assert a["system"] == "NEW" and a["messages"][-1] == {"role": "user", "content": "more"}
+
+    o = {"messages": [{"role": "system", "content": "OLD"}, {"role": "user", "content": "hi"}]}
+    _apply_fork_edits(o, {"system": "NEW", "base_system": "OLD"}, first=False, path="/v1/chat/completions")
+    assert _wire_read_system(o) == "NEW"
+
+    g = {"systemInstruction": {"parts": [{"text": "OLD"}]}, "contents": [{"role": "user", "parts": [{"text": "hi"}]}]}
+    _apply_fork_edits(g, {"system": "NEW", "base_system": "OLD", "append": "more", "model": "other"},
+                      first=True, path="/v1beta/models/gemini:streamGenerateContent")
+    assert _wire_read_system(g) == "NEW"
+    assert g["contents"][-1]["parts"][0]["text"] == "more"
+    assert "model" not in g                               # Gemini's model lives in the URL
+
+    peer = {"system": "PEER", "messages": []}             # a different agent -> left untouched
+    _apply_fork_edits(peer, {"system": "NEW", "base_system": "OLD"}, first=False, path="/v1/messages")
+    assert peer["system"] == "PEER"
+
+
+def test_fork_external_reruns_adapter_in_a_subprocess(tmp_path, monkeypatch):
+    import time
+    from loom.livesession import LiveSession, start_proxy
+
+    (tmp_path / "fk_agent.py").write_text(
+        "import json, os, urllib.request\n"
+        "def run(prompt):\n"
+        "    outs=[]\n"
+        "    for i in range(3):\n"
+        "        base=os.environ['ANTHROPIC_BASE_URL']\n"
+        "        req=urllib.request.Request(base+'/v1/messages',\n"
+        "            data=json.dumps({'model':'claude','system':'ORIG','messages':[{'role':'user','content':f'{prompt}{i}'}]}).encode(),\n"
+        "            headers={'content-type':'application/json','x-api-key':'k'}, method='POST')\n"
+        "        outs.append(json.loads(urllib.request.urlopen(req,timeout=10).read())['content'][0]['text'])\n"
+        "    return ' '.join(outs)\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+    up = _serve(_EchoUpstream())
+    target = f"http://127.0.0.1:{up.server_address[1]}"
+    proxy = start_proxy(target)
+    import fk_agent
+    sess = LiveSession(func=fk_agent.run, proxy=proxy, spec="fk_agent:run", target=target)
+    sess.ask("go")
+    for _ in range(200):
+        if not sess.running:
+            break
+        time.sleep(0.02)
+    assert not sess.running and len(proxy.recorder.wire) == 3
+
+    branch = sess.fork_external(1, {"system": "EDIT", "base_system": "ORIG", "append": None, "model": "keep"})
+    outs = [e["result"]["text"] for e in branch["log"] if e["kind"] == "model"]
+    assert outs[0] == "LIVE:ORIG"                          # recorded prefix (turn 0)
+    assert outs[1:] == ["LIVE:EDIT", "LIVE:EDIT"]          # tail re-ran live with the edit
+    up.shutdown()

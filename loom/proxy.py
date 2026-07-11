@@ -94,6 +94,72 @@ def _gemini_result(resp) -> str:
     return str(resp)
 
 
+def _wire_dialect(request: dict) -> str:
+    """Which wire dialect a request is in (for fork edits)."""
+    if "contents" in request:
+        return "gemini"
+    if "system" in request:
+        return "anthropic"
+    return "openai"
+
+
+def _wire_read_system(request: dict) -> str:
+    """The system prompt of a request, dialect-aware."""
+    d = _wire_dialect(request)
+    if d == "gemini":
+        return _gemini_system(request)
+    if d == "anthropic":
+        return _flatten(request.get("system", ""))
+    for m in request.get("messages", []):
+        if m.get("role") == "system":
+            return _flatten(m.get("content", ""))
+    return ""
+
+
+def _wire_set_system(request: dict, system: str) -> None:
+    """Replace the system prompt of a request in place, dialect-aware."""
+    d = _wire_dialect(request)
+    if d == "gemini":
+        request["systemInstruction"] = {"role": "system", "parts": [{"text": system}]}
+        request.pop("system_instruction", None)
+    elif d == "anthropic":
+        request["system"] = system
+    else:
+        msgs = request.get("messages") or []
+        for m in msgs:
+            if m.get("role") == "system":
+                m["content"] = system
+                break
+        else:
+            request["messages"] = [{"role": "system", "content": system}, *msgs]
+
+
+def _wire_append_user(request: dict, text: str) -> None:
+    """Append a user message to a request, dialect-aware (injected context)."""
+    if _wire_dialect(request) == "gemini":
+        request.setdefault("contents", []).append({"role": "user", "parts": [{"text": text}]})
+    else:
+        request.setdefault("messages", []).append({"role": "user", "content": text})
+
+
+def _apply_fork_edits(request: dict, edits: dict, *, first: bool, path: str) -> dict:
+    """Rewrite a request at/after the fork point: swap the edited agent's system
+    prompt (only where it matches the original, so peers keep theirs), inject a
+    message at the fork turn, and/or override the model."""
+    new_sys = edits.get("system")
+    if new_sys is not None:
+        base = edits.get("base_system")
+        cur = _wire_read_system(request)
+        if not base or cur.strip() == str(base).strip():
+            _wire_set_system(request, new_sys)
+    model = edits.get("model")
+    if model and model != "keep" and "generatecontent" not in path.lower():
+        request["model"] = model            # Gemini's model is in the URL, leave it
+    if first and edits.get("append"):
+        _wire_append_user(request, str(edits["append"]))
+    return request
+
+
 def _model_from_path(path: str) -> str:
     """Gemini puts the model in the URL (``/v1beta/models/gemini-x:generateContent``)."""
     if "/models/" not in path:
@@ -701,6 +767,12 @@ class ProxyServer(ThreadingHTTPServer):
         self.lock = threading.Lock()
         self.replay_wire: "list[dict] | None" = None
         self.replay_index = 0
+        # Fork mode: serve recorded responses for exchanges 0..at-1 (a free,
+        # deterministic prefix), then rewrite the request (edited system / an
+        # injected message / a different model) and forward LIVE from `at` on,
+        # recording the divergent tail. Lets an EXTERNAL agent be forked without
+        # Loom driving its loop -- see loom.livesession.fork_external.
+        self.fork: "dict | None" = None   # {"at": int, "wire": [...], "edits": {...}, "served": int}
         # Persistence: every exchange is APPENDED to <save>.wirelog (flushed)
         # before the client gets its answer -- O(1), crash-safe. The readable
         # trace is written through for the first `eager_saves` exchanges (small
@@ -879,6 +951,25 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 self._send_json(200, response)
             return
+
+        # Fork mode: serve the recorded prefix (0..at-1) for free, then rewrite
+        # the request and forward LIVE from the fork point on. Every exchange is
+        # recorded, so the proxy's recorder becomes the branch trace.
+        fk = self.server.fork
+        if fk is not None:
+            with self.server.lock:
+                idx = fk["served"]
+                fk["served"] += 1
+            if idx < fk["at"] and idx < len(fk["wire"]):
+                response = fk["wire"][idx]           # deterministic recorded prefix
+                self.server.persist(request, response, [])
+                if wants_stream:
+                    self._send_sse(_synth_for(response)(response))
+                else:
+                    self._send_json(200, response)
+                return
+            # fork point reached: apply the edits, then fall through to forward LIVE
+            request = _apply_fork_edits(request, fk["edits"], first=(idx == fk["at"]), path=self.path)
 
         # Taint tripwires: results of the last round's tool calls ride in this
         # request -- the earliest moment the wire can see what a tool returned.

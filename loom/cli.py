@@ -1898,7 +1898,8 @@ def _cmd_live(args: argparse.Namespace) -> int:
         live = LiveSession(agent=obj)          # a native loom.Agent
         kind = "loom.Agent"
     elif callable(obj):
-        live = LiveSession(func=obj, proxy=proxy)  # external adapter(prompt)
+        # spec + target let an external agent be proxy-forked (re-run with edits)
+        live = LiveSession(func=obj, proxy=proxy, spec=args.agent, target=args.target)
         kind = "external adapter (proxied)"
     else:
         raise CLIError(f"{args.agent!r} is neither a loom.Agent nor a callable(prompt)")
