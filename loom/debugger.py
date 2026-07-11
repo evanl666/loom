@@ -1590,7 +1590,7 @@ function renderSteps(){
     if(isHidden(s)) return "";
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
     const k=stepKind(s), lbl=s.tool?E(s.tool):"";
-    const ind=s.depth?`<span class="depth">${"› ".repeat(s.depth)}</span>`:"";
+    const ind=(s.nest||0)?`<span class="depth">${"› ".repeat(s.nest)}</span>`:"";
     return `<div class="step${i===cur?' cur':''}" data-i="${i}"><span class="muted">${s.step}</span>`+
       `<span class="badge ${k.cls}">${k.label}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
   }).join("");
@@ -2016,8 +2016,15 @@ async function runAssert(){
 // ---- command palette (⌘K) ----
 let PAL=[], PALSEL=0;
 function paletteItems(){
-  const items=steps.map((s,i)=>({kind:s.type,label:(s.type==="call"?"🔧 "+s.tool:s.type==="answer"?"✅ final answer":"💭 reasoning"),
-    meta:"call "+((s.replay||{}).turn??s.step)+(s.risk?" ⚠"+s.risk:""),run:()=>select(i)}));
+  const items=steps.map((s,i)=>[s,i]).filter(([s])=>!isHidden(s)).map(([s,i])=>{
+    const k=stepKind(s);
+    const label=s.type==="user"?"👤 "+(s.intent||"user request").slice(0,50)
+      :s.type==="call"?"🔧 "+s.tool
+      :s.type==="answer"?"✅ "+(s.intent||"final answer").slice(0,50)
+      :"💭 "+(s.intent||"reasoning").slice(0,50);
+    const meta=(s.agent&&s.agent!=="you"?s.agent+" · ":"")+"step "+s.step+(s.risk?" ⚠"+s.risk:"");
+    return {kind:k.label,label,meta,run:()=>select(i)};
+  });
   const cmds=[
     {kind:"cmd",label:"🎯 jump to root cause",meta:"first bad step",run:gotoRootCause},
     {kind:"cmd",label:"🕸 agents",meta:"multi-agent map",run:showAgents},
