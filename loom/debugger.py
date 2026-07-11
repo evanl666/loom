@@ -83,20 +83,27 @@ def steps_for(data: dict) -> list[dict]:
             out.append(_user_node(episodes[ep_i])); ep_i += 1
 
     # A fork's INJECTED message ("inject into context") is a real user turn the
-    # model saw at the fork point -- surface it as a node right before that turn's
-    # model step so it shows in the branch's step list AND its context.
-    injections = data.get("fork_injections") if isinstance(data.get("fork_injections"), dict) else {}
-    for turn_s, text in injections.items():
-        try:
-            turn = int(turn_s)
-        except (TypeError, ValueError):
-            continue
-        pos = next((i for i, d in enumerate(out)
-                    if d.get("type") in ("reason", "answer")
-                    and (d.get("replay") or {}).get("turn") == turn), None)
-        if pos is None:
-            continue
-        anchor = out[pos]
+    # model saw at the fork point -- surface it as a node right before the fork-
+    # point AGENT's first step so it shows in the branch's step list AND its
+    # context. Attribute it by the agent's sys_hash (a re-run's turn NUMBERS
+    # differ from the original, so the turn index alone lands on the wrong agent).
+    inj = data.get("fork_injections") if isinstance(data.get("fork_injections"), dict) else {}
+    if inj.get("text"):
+        hash_to_id = {a.get("sys_hash"): a["id"] for a in ia["agents"] if a.get("sys_hash")}
+        target_aid = hash_to_id.get(inj.get("agent_hash"))
+        pos = None
+        if target_aid:   # the first step of the fork-point agent
+            pos = next((i for i, d in enumerate(out)
+                        if d.get("agent_id") == target_aid and d.get("type") in ("reason", "answer")), None)
+        if pos is None and inj.get("at") is not None:   # fallback: the turn index
+            pos = next((i for i, d in enumerate(out)
+                        if d.get("type") in ("reason", "answer")
+                        and (d.get("replay") or {}).get("turn") == inj["at"]), None)
+        anchor = out[pos] if pos is not None else None
+    else:
+        anchor = None
+    if anchor is not None:
+        text = inj["text"]
         node = _user_node(str(text))
         node["injected"] = True
         if anchor.get("agent_id"):   # nest it under the agent that saw it
@@ -618,7 +625,8 @@ class DebugSession:
         branch = base.fork(at=at, edit=edit)
         bdata = branch.to_dict()
         if append.strip():   # so the injected message shows in the branch's context
-            bdata["fork_injections"] = {str(at): append.strip()}
+            # native re-runs preserve order, so the turn index attributes it fine
+            bdata["fork_injections"] = {"text": append.strip(), "at": at, "agent_hash": ""}
         payload = _branch_payload(self.data, bdata, at)
         # record the branch in the tree (Git-branch-style experiment history)
         from .cost import analyze_cost
@@ -656,25 +664,25 @@ class DebugSession:
                     orig = e.get("result")
                     key = orig if isinstance(orig, str) else json.dumps(orig)
                     result_overrides[key] = str(want[str(e.get("seq"))])
-        # Rewrite only the EDITED agent's calls (peers keep theirs): identify it
-        # by the sys_hash of the agent making the fork-point call -- the same wire
-        # identity infer_agents uses. For an external proxy trace every model call
-        # is a depth-0 turn, so turn == model index.
-        edit_sys_hash = None
-        if system is not None:
-            ia = infer_agents(base)
-            sa = ia.get("step_agent", {})
-            ahash = {a["id"]: a.get("sys_hash", "") for a in ia.get("agents", [])}
-            models = [e for e in (base.get("log") or [])
-                      if isinstance(e, dict) and e.get("kind") == "model"]
-            if 0 <= at < len(models):
-                edit_sys_hash = ahash.get(sa.get(str(models[at].get("seq")))) or None
+        # The AGENT making the fork-point call, by its sys_hash (the same wire
+        # identity infer_agents uses). For an external proxy trace every model
+        # call is a depth-0 turn, so turn == model index.
+        ia = infer_agents(base)
+        sa = ia.get("step_agent", {})
+        ahash = {a["id"]: a.get("sys_hash", "") for a in ia.get("agents", [])}
+        models = [e for e in (base.get("log") or [])
+                  if isinstance(e, dict) and e.get("kind") == "model"]
+        fork_agent_hash = (ahash.get(sa.get(str(models[at].get("seq")))) or "") \
+            if 0 <= at < len(models) else ""
+        edit_sys_hash = fork_agent_hash or None if system is not None else None
         edits = {"new_system": system, "edit_sys_hash": edit_sys_hash,
                  "append": append.strip() or None, "model": model,
                  "result_overrides": result_overrides or None}
         bdata = self.live.fork_external(at, edits)
-        if append.strip():   # so the injected message shows in the branch's context
-            bdata["fork_injections"] = {str(at): append.strip()}
+        if append.strip():   # attribute the injected message to the fork-point AGENT
+            # (a re-run's turn NUMBERS differ from the original, so the turn index
+            # alone would land the node on the wrong agent).
+            bdata["fork_injections"] = {"text": append.strip(), "at": at, "agent_hash": fork_agent_hash}
         payload = _branch_payload(base, bdata, at)
         label = (append[:40] or (f"system: {system[:24]}" if system else "")
                  or (f"fault@{','.join(map(str, sorted(set_results)))}" if set_results else "")

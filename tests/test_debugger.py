@@ -253,7 +253,8 @@ def test_fork_injected_message_shows_as_a_node_in_the_branch():
         return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12], "sys_head": system,
                 "sys_role": system.split(".")[0].replace("You are the ", ""), "tools": tools, "model": "m"}
     data = {"recorded_via": "proxy", "model": "m", "output": "hi", "tools": {},
-            "fork_injections": {"0": "please say good morning"}, "log": [
+            "fork_injections": {"text": "please say good morning", "at": 0,
+                                "agent_hash": fp("You are the Coordinator.", ["ask_x"])["sys_hash"]}, "log": [
         {"seq": 0, "kind": "model", "meta": fp("You are the Coordinator.", ["ask_x"]),
          "result": {"tool_calls": [{"id": "1", "name": "ask_x", "input": {}}], "stop_reason": "tool_use"}},
         {"seq": 1, "kind": "model", "meta": fp("You are the Worker.", []),
