@@ -312,6 +312,21 @@ def test_grandchild_nesting_attaches_to_deeper_parent():
     assert (ids["Research Lead"], ids["Data Analyst"]) in edges  # analyst under the lead
 
 
+def test_generic_subagent_labeled_from_handoff_subagent_type():
+    """When a sub-agent's OWN system prompt is too generic to name it (the Claude
+    Agent SDK gives every call a 'You are Claude Code' preamble), label it from
+    the explicit target its hand-off carried (Task tool subagent_type)."""
+    GEN = "You are Claude Code, an AI assistant."   # generic -> no role
+    data = {"recorded_via": "proxy", "model": "m", "output": "x", "tools": {}, "log": [
+        _wire(GEN, ["Task"], seq=0, msgs=1,
+              tcs=[{"id": "1", "name": "Task", "input": {"subagent_type": "researcher", "prompt": "find X"}}]),
+        {"seq": 1, "kind": "tool:Task", "result": "found"},
+        _wire(GEN, [], seq=2, msgs=1, text="330m"),   # the sub-agent: generic prompt, no tools
+    ]}
+    labels = [a["label"] for a in infer_agents(data)["agents"]]
+    assert "Researcher" in labels   # named from subagent_type, not "agent 2"
+
+
 def test_handoff_with_early_result_still_creates_an_edge():
     """A CONTROL-TRANSFER handoff (OpenAI Agents SDK / Semantic Kernel) emits its
     transfer_to_X result BEFORE the target agent takes over, and the target

@@ -145,6 +145,9 @@ def infer_agents(data: dict) -> dict:
                               # result; used to attach a fresh sub-agent to the parent
                               # whose call actually spawned it (siblings, not a chain)
     peers: set = set()        # agents classified as group-chat peers (never nested)
+    named_by: dict = {}       # agent_key -> explicit name its hand-off gave it
+                              # (e.g. Task tool subagent_type='researcher'), used to
+                              # label a sub-agent whose own system prompt is generic
 
     def _ident(meta: dict, depth: int) -> tuple:
         nonlocal source
@@ -187,8 +190,14 @@ def infer_agents(data: dict) -> dict:
                 pending_tools.append((nm, key))
                 args = tc.get("input") or tc.get("args") or {}
                 arg_vals = [args.get(k) for k in _DELEG_ARG_KEYS] if isinstance(args, dict) else []
+                # an explicit target name the hand-off carries (Task subagent_type,
+                # a handoff's agent/name) -- authoritative when the child's own
+                # system prompt is too generic to name it.
+                target = next((str(args[k]) for k in ("subagent_type", "name", "agent", "type")
+                               if isinstance(args, dict) and args.get(k)), "")
                 open_calls.setdefault(key, []).append(
-                    {"name": nm, "stems": stem_tokens(nm, *[v for v in arg_vals if v])})
+                    {"name": nm, "target": target,
+                     "stems": stem_tokens(nm, *[v for v in arg_vals if v])})
             msgs = meta.get("msgs")
             is_peer = key in peers           # peer-ness is sticky across turns
             if key in stack:                 # this agent is resuming: pop those it called
@@ -214,6 +223,8 @@ def infer_agents(data: dict) -> dict:
                 if m_parent is not None:     # spawned by a matched delegation call
                     depth_of[key] = depth_of.get(m_parent, 0) + 1
                     _add_edge(m_parent, key, seq)
+                    if m_call.get("target"):
+                        named_by[key] = m_call["target"]
                     open_calls[m_parent].remove(m_call)
                 else:
                     parent = stack[-1] if stack else None
@@ -229,6 +240,13 @@ def infer_agents(data: dict) -> dict:
                         depth_of[key] = (depth_of[parent] + 1) if parent is not None else 0
                         if parent is not None:
                             _add_edge(parent, key, seq)
+                            # the child couldn't be name-matched (generic prompt, no
+                            # tools). Consume the parent's oldest un-consumed hand-off
+                            # that named a target, in order, so it can still be labeled.
+                            nc = next((c for c in open_calls.get(parent, []) if c.get("target")), None)
+                            if nc is not None:
+                                named_by[key] = nc["target"]
+                                open_calls[parent].remove(nc)
             # a peer does not create delegation nesting, so it never goes on the stack
             if has_tc and not is_peer:
                 if not stack or stack[-1] != key:
@@ -274,6 +292,12 @@ def infer_agents(data: dict) -> dict:
             label = key[1]
         else:
             label = rec.get("sys_role") or _label_from_system(rec["sys_head"]) or f"agent {i + 1}"
+            # if the agent's OWN prompt was too generic to name it, fall back to the
+            # explicit name its hand-off gave it (Task subagent_type='researcher').
+            base_l = re.sub(r"\s*\(\d+\)$", "", str(label)).strip().lower()
+            if key in named_by and (base_l in _GENERIC or base_l.startswith("agent ")
+                                    or base_l in ("claude agent", "claude code")):
+                label = named_by[key].replace("_", " ").replace("-", " ").strip().title()
         base, n = label, 2
         while label in used:  # disambiguate collisions
             label = f"{base} ({n})"; n += 1

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -53,6 +54,18 @@ def _flatten(content) -> str:
             b.get("text", "") if isinstance(b, dict) else str(b) for b in content
         )
     return str(content)
+
+
+_VOLATILE_META = re.compile(
+    r"\b[\w-]*(?:version|build|revision|commit|request[_-]?id|trace[_-]?id)[\w-]*\s*[=:]\s*[\w.\-+/]+",
+    re.I)
+
+
+def _norm_system(system: str) -> str:
+    """Drop volatile build/version/request-id tokens from a system prompt so the
+    same logical agent hashes the same across calls (a CLI that stamps a changing
+    version into the prompt would otherwise look like a new agent every turn)."""
+    return _VOLATILE_META.sub("", system or "")
 
 
 def _gemini_parts_text(parts) -> str:
@@ -297,9 +310,11 @@ class WireRecorder:
         system = system or ""
         from .multiagent import best_role
 
-        sys_hash = hashlib.sha1(system.encode()).hexdigest()[:12]
-        # Keep the FULL system prompt once per distinct agent (not per call -- the
-        # same prompt repeats every turn) so the debugger can show and edit it.
+        # Hash on a system prompt with volatile build/version metadata stripped, so
+        # the SAME logical agent isn't split into many fingerprints by a per-call
+        # version token (e.g. the Claude CLI prepends `cc_version=2.1.206.xxx`).
+        sys_hash = hashlib.sha1(_norm_system(system).encode()).hexdigest()[:12]
+        # Keep the FULL (original) system prompt once per agent for the debugger.
         if system and sys_hash not in self.systems:
             self.systems[sys_hash] = system
         fp = {
