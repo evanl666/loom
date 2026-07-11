@@ -172,6 +172,38 @@ def steps_for(data: dict) -> list[dict]:
                 reordered.append(anchor_for[id(d)])  # the hand-off, right before the child
             reordered.append(d)
         out = reordered
+
+    # Group each agent's steps CONTIGUOUSLY, depth-first over the delegation tree,
+    # so a sub-agent's messages are never split by a parallel sibling's. The wire
+    # interleaves concurrent branches (Research Lead and Support Lead take turns),
+    # but the tree should read one whole agent at a time; a child's subtree nests
+    # inline at the delegation that spawned it. Step NUMBERS still show true order.
+    if ia["multi"]:
+        by_agent: dict = {}
+        for d in out:
+            if d.get("type") != "user":
+                by_agent.setdefault(d.get("agent_id"), []).append(d)
+        user_nodes = [d for d in out if d.get("type") == "user"]
+        seen_agents: set = set()
+        grouped: list = list(user_nodes[:1])  # the root prompt opens the dialogue
+
+        def _emit_agent(aid):
+            if aid in seen_agents:
+                return
+            seen_agents.add(aid)
+            for d in by_agent.get(aid, []):
+                grouped.append(d)
+                if d.get("is_delegation") and d.get("delegates_to"):
+                    _emit_agent(d["delegates_to"])
+
+        root = next((d.get("agent_id") for d in out if d.get("type") != "user"), None)
+        if root is not None:
+            _emit_agent(root)
+        for aid in by_agent:            # any agent not reached via an edge (defensive)
+            _emit_agent(aid)
+        grouped.extend(user_nodes[1:])  # follow-up turns, if any
+        if len(grouped) == len(out):    # only adopt it if no step was dropped
+            out = grouped
     return out
 
 
