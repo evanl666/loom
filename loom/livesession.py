@@ -107,10 +107,17 @@ class LiveSession:
         rec = self._proxy.recorder
         keys, wire = list(rec.request_keys), [dict(r) for r in rec.wire]
         at = max(0, min(int(at), len(keys)))
+        # The fork point belongs to a specific ask (a multi-turn session re-runs the
+        # WHOLE adapter per ask). Re-run THAT ask's prompt -- not always the first --
+        # and replay only that ask's own prior calls, so forking a turn-2 response
+        # actually re-runs turn 2, not the turn-1 conversation.
+        ep_start, prompt = 0, (self._episodes[0] if self._episodes else "")
+        for widx, p in self._user_turns:
+            if int(widx) <= at:
+                ep_start, prompt = int(widx), str(p)
         prefix: dict = {}                      # content key -> [recorded responses]
-        for i in range(at):                    # everything BEFORE the fork point replays
+        for i in range(ep_start, at):          # this ask's calls BEFORE the fork point replay
             prefix.setdefault(keys[i], []).append(wire[i])
-        prompt = self._episodes[0] if self._episodes else ""
         fproxy = ProxyServer(port=0, target=self.target, save_path=None)
         fproxy.fork = {
             "prefix": prefix,
