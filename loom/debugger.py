@@ -359,6 +359,53 @@ def explain_step(data: dict, step: int, model, base_url: "str | None" = None) ->
         return {"error": f"explain error: {type(e).__name__}: {e}"}
 
 
+def ai_root_cause(data: dict, model, base_url: "str | None" = None) -> dict:
+    """AI root cause: an LLM reads the WHOLE run and points at the step where it
+    first went wrong. Unlike the rule-based first_bad_step() (firewall/taint/error
+    signals), this catches SEMANTIC failures -- a wrong answer, the wrong tool, a
+    misunderstood task, an output that contradicts the data -- that no rule can see.
+    Returns {found, step, tool, confidence, reply} or {found:False,...} / {error}."""
+    import re as _re
+
+    from .action import actions
+    from .judge import _resolve, run_summary
+
+    acts = [a for a in actions(data) if a.step >= 0]
+    valid = [a.step for a in acts]
+    if not valid:
+        return {"found": False, "reply": "the run has no steps to analyze"}
+    system = (
+        "You are a debugging copilot for AI-agent runs. Read the whole run and find "
+        "the EARLIEST step where it first went wrong -- the ROOT CAUSE, not a later "
+        "symptom of it. Look beyond crashes and errors: judge SEMANTICS too -- a wrong "
+        "answer, the wrong tool for the job, a misunderstood task, a bad assumption, a "
+        "step whose output contradicts the data it was given. If the run looks correct, "
+        "say so honestly.\nReply in EXACTLY this format, nothing else:\n"
+        "STEP: <the step number, or NONE if the run looks fine>\n"
+        "CONFIDENCE: <low|medium|high>\n"
+        "WHY: <1-2 sentences: what went wrong at that step and what should have happened>")
+    user = f"Valid step numbers you may cite: {valid}\n\nTHE RUN, action by action:\n{run_summary(data)}"
+    try:
+        provider = _resolve(model, base_url=base_url)
+        resp = provider.complete(system, [{"role": "user", "content": user}], [])
+        text = (resp.text or "").strip()
+    except Exception as e:  # noqa: BLE001
+        return {"error": f"ai root cause error: {type(e).__name__}: {e}"}
+    conf = _re.search(r"CONFIDENCE:\s*(\w+)", text, _re.I)
+    why = _re.search(r"WHY:\s*(.+)", text, _re.S)
+    reply = (why.group(1).strip() if why else text)[:700]
+    confidence = (conf.group(1).lower() if conf else "")
+    m = _re.search(r"STEP:\s*(\d+)", text)
+    if not m or _re.search(r"STEP:\s*NONE", text, _re.I):
+        return {"found": False, "confidence": confidence, "reply": reply}
+    step = int(m.group(1))
+    if step not in valid:                       # snap a hallucinated number to a real step
+        step = min(valid, key=lambda s: abs(s - step))
+    tgt = next((a for a in acts if a.step == step), None)
+    return {"found": True, "step": step, "tool": (tgt.tool if tgt else ""),
+            "confidence": confidence, "reply": reply}
+
+
 def context_delta(data: dict, step: int) -> dict:
     """What CHANGED in the model's context at this step vs the previous model call.
 
@@ -1191,6 +1238,12 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(400, {"error": "no copilot model -- start with --copilot-model MODEL or --agent"})
                 return
             self._json(200, explain_step(sess.data, step, sess.meta_provider or sess.copilot_model))
+            return
+        if self.path == "/api/ai_rootcause":
+            if not sess.copilot_model:
+                self._json(400, {"error": "no copilot model -- start with --copilot-model MODEL or --agent"})
+                return
+            self._json(200, ai_root_cause(sess.data, sess.meta_provider or sess.copilot_model))
             return
         if self.path != "/api/fork":
             self._json(404, {"error": "not found"})
@@ -2338,15 +2391,39 @@ document.addEventListener("click",e=>{
   if(box&&!box.classList.contains("hidden")&&!box.contains(e.target)&&e.target.id!=="brkbtn") closeBrk();
 });
 async function gotoRootCause(){
+  const p=openDrawer("rootcause","🎯 Root cause");
   const r = STATIC ? SD.rootcause : await (await fetch("/api/rootcause")).json();
-  if(!r.found){alert("no root-cause signal — the run looks clean");return;}
-  const i=steps.findIndex(s=>s.step===r.step);
-  if(i>=0)select(i);
-  const p=document.getElementById("copilotpanel"); p.classList.remove("hidden");
-  p.innerHTML=`<div class="cop-sum">🎯 first bad step: <b>${r.step} ${E(r.tool)}</b></div>`+
-    `<div class="k">why</div><div>${r.signals.map(E).join("<br>")}</div>`+
-    `<div class="k">cascade</div>${r.cascade.map(c=>`<span class="chip jump" data-step="${c.step}">[${c.step}] ${E(c.tool)}</span>`).join("")}`;
+  let h;
+  if(r.found){
+    const i=steps.findIndex(s=>s.step===r.step); if(i>=0)select(i);
+    h=`<div class="cop-sum">🎯 <b>rule-based</b> — first bad step <b>${r.step} ${E(r.tool)}</b></div>`+
+      `<div class="k">why</div><div>${r.signals.map(E).join("<br>")}</div>`+
+      `<div class="k">cascade</div>${r.cascade.map(c=>`<span class="chip jump" data-step="${c.step}">[${c.step}] ${E(c.tool)}</span>`).join("")}`;
+  } else {
+    h=`<div class="cop-sum">🎯 <b>rule-based</b> — no signal (no firewall block / taint path / tool error / loop).</div>`;
+  }
+  // AI deep-dive: catches semantic / logic failures the rules can't see.
+  if(CAN_CHAT) h+=`<div class="k">🧠 AI deep-dive <span class="muted">— finds wrong-answer / wrong-tool / misunderstood-task errors rules miss</span></div>`+
+    `<button id="airc" class="accent">🧠 find the root cause with AI</button><div id="aircout"></div>`;
+  p.innerHTML=h;
   p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{const i=steps.findIndex(s=>s.step===+c.dataset.step);if(i>=0)select(i);});
+  const ab=document.getElementById("airc"); if(ab) ab.onclick=aiRootCause;
+}
+async function aiRootCause(){
+  const btn=document.getElementById("airc"), out=document.getElementById("aircout");
+  btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> AI reading the whole run…';
+  try{
+    const r=await (await fetch("/api/ai_rootcause",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).json();
+    if(r.error){out.innerHTML=`<div class="muted">${E(r.error)}</div>`;return;}
+    const conf=r.confidence?` <span class="chip">${E(r.confidence)} confidence</span>`:"";
+    if(r.found){
+      const i=steps.findIndex(s=>s.step===r.step); if(i>=0)select(i);
+      out.innerHTML=`<div class="cop-sum">🧠 AI — step <b>${r.step} ${E(r.tool||"")}</b>${conf}</div><div>${md(r.reply||"")}</div>`;
+    } else {
+      out.innerHTML=`<div class="cop-sum">🧠 AI — the run looks correct${conf}</div><div>${md(r.reply||"")}</div>`;
+    }
+  }catch(e){out.innerHTML=`<div class="muted">${E(e)}</div>`;}
+  finally{btn.disabled=false; btn.innerHTML="🧠 find the root cause with AI";}
 }
 async function showBranches(){
   if(drawerOpen("branches")){closeDrawer();return;}

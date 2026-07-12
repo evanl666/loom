@@ -330,3 +330,35 @@ def test_context_shows_every_follow_up_user_turn_with_full_history():
     # the follow-up message comes after the earlier turn's history
     assert frame.index({"role": "user", "content": "what is 2+2?", "step": 3}) > \
         next(i for i, m in enumerate(frame) if m["content"] == "all done")
+
+
+def test_ai_root_cause_finds_semantic_error_and_snaps_to_valid_step():
+    """AI root cause: an LLM reads the whole run and points at the first step that
+    went wrong -- including SEMANTIC errors (wrong answer/tool) the rule-based
+    first_bad_step can't see. It parses STEP/CONFIDENCE/WHY and snaps a hallucinated
+    step number to a real one; 'STEP: NONE' means the run looks fine."""
+    from loom.debugger import ai_root_cause
+    from loom.providers import ModelResponse
+
+    class _M:
+        model = "mock"
+        def __init__(self, text):
+            self._t = text
+        def complete(self, system, messages, tools):
+            return ModelResponse(text=self._t)
+
+    data = {"prompt": "multiply 330 by 3", "output": "3300", "tools": {"calc": []}, "log": [
+        {"seq": 0, "kind": "model", "result": {"tool_calls": [{"id": "a", "name": "calc", "input": {"x": "330*10"}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "tool:calc", "result": "3300"},
+        {"seq": 2, "kind": "model", "result": {"text": "The answer is 3300", "stop_reason": "end_turn"}}]}
+
+    r = ai_root_cause(data, _M("STEP: 1\nCONFIDENCE: high\nWHY: called calc with 330*10 instead of 330*3."))
+    assert r["found"] and r["step"] == 1 and r["confidence"] == "high" and "instead of" in r["reply"]
+
+    # a hallucinated step number snaps to the nearest valid one
+    r2 = ai_root_cause(data, _M("STEP: 99\nCONFIDENCE: low\nWHY: something"))
+    assert r2["found"] and r2["step"] in (0, 1, 2)
+
+    # 'NONE' -> the run looks fine
+    r3 = ai_root_cause(data, _M("STEP: NONE\nCONFIDENCE: high\nWHY: looks correct"))
+    assert r3["found"] is False
