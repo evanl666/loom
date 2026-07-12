@@ -2076,7 +2076,11 @@ async function faultInject(){
         return `<div class="branchstep${div!=null&&i>=div?' div':''}"><span class="badge ${kind.cls}">${kind.label}</span>`+
           (b.tool?` <b>${E(b.tool)}</b>`:"")+(txt?` <span class="muted">${E(txt.slice(0,60))}</span>`:"")+`</div>`;
       }).join("");
-      bx.innerHTML=`<div class="branchhead">✅ how the agent reacts to the injected result</div><div class="fl">output</div><pre>${E(res.branch_output)}</pre>${bs}`;
+      bx.innerHTML=`<div class="branchhead">✅ how the agent reacts to the injected result${res.branch_id!=null?` — branch #${res.branch_id}`:""}</div>`+
+        (res.branch_id!=null?`<button id="openfaultbranch" class="openbr">🔍 open this branch full-screen (side-by-side vs the original) →</button>`:"")+
+        `<div class="fl">output</div><pre>${E(res.branch_output)}</pre>${bs}`;
+      const ob=document.getElementById("openfaultbranch");
+      if(ob)ob.onclick=()=>{closeDrawer&&closeDrawer();viewBranch(res.branch_id);};
     }
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
   finally{btn.disabled=false; btn.innerHTML="🧪 Inject &amp; re-run from here";}
