@@ -1908,7 +1908,6 @@ function renderDetail(){
   // a user message is an INPUT to the model, not something the model "saw" here.
   const isModelTurn=(s.type==="reason"||s.type==="answer");
   if(isModelTurn) h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
-  if(CAN_CHAT) h+=`<button id="explainbtn" title="ask the copilot to explain this step">🔎 Explain this step</button><div id="explainout"></div>`;
   if(s.type==="call"&&!STATIC) h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
   h+=`<div id="dynpanels"></div>`;  // pack-contributed panels (SQL plan, file, screenshot…)
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
@@ -1954,7 +1953,6 @@ function renderDetail(){
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
   const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
   const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
-  const eb=document.getElementById("explainbtn"); if(eb) eb.onclick=()=>explainStep(s.step);
   loadPanels(s.step);
   if(s.type==="call"&&canFork){const dp=document.getElementById("dryrunbtn"); if(dp)dp.onclick=doDryRun;}
 }
@@ -2135,15 +2133,6 @@ function openDrawer(view,title){const d=document.getElementById("drawer");d.clas
   document.getElementById("drawertitle").innerHTML=title;return document.getElementById("copilotpanel");}
 function closeDrawer(){document.getElementById("drawer").classList.add("hidden");}
 // ---- explain this step (copilot) ----
-async function explainStep(step){
-  const out=document.getElementById("explainout"); if(!out)return;
-  out.innerHTML='<div class="muted">asking the copilot…</div>';
-  try{
-    const r=await (await fetch("/api/explain",{method:"POST",headers:{"content-type":"application/json"},
-      body:JSON.stringify({step})})).json();
-    out.innerHTML=r.error?`<div class="muted">${E(r.error)}</div>`:`<div class="cop-sum">${md(r.reply||"")}</div>`;
-  }catch(_){out.innerHTML='<div class="muted">explain failed</div>';}
-}
 // ---- agents overview (multi-agent map) ----
 async function showAgents(){
   if(drawerOpen("agents")){closeDrawer();return;}
