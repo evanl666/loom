@@ -255,12 +255,16 @@ def infer_agents(data: dict) -> dict:
                 child_stems = stem_tokens(
                     rec.get("sys_role") or _label_from_system(rec.get("sys_head", "")) or "",
                     *rec.get("tools", []))
-                # Prefer the ancestor whose OPEN tool call actually spawned this
-                # agent -- matched by name/args, so a parent that fans out several
+                # Attach to whichever agent's OPEN tool call actually spawned this
+                # one -- matched by name/args, so a parent that fans out several
                 # siblings in ONE turn attaches them all to itself (not a chain),
-                # and a genuine grandchild attaches to the deeper parent.
+                # and a genuine grandchild attaches to the deeper parent. Search
+                # the awaiting stack FIRST (deeper wins ties) then ANY agent with an
+                # unresolved delegation, so a LATE-returning grandchild still finds
+                # its real parent after that parent popped off the stack.
                 m_parent, m_call, m_score = None, None, 0
-                for a in reversed(stack):    # deeper agents win ties
+                cands = list(reversed(stack)) + [a for a in open_calls if a not in stack and a != key]
+                for a in cands:
                     for call in open_calls.get(a, []):
                         sc = len(child_stems & call["stems"])
                         if sc > m_score:

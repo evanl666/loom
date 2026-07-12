@@ -424,3 +424,35 @@ def test_claude_cli_markers_orchestrator_subagents_no_title_gen():
     edges = {(e["from"], e["to"]) for e in ia["edges"]}
     assert (ids["Orchestrator"], ids["Landmark Researcher"]) in edges
     assert (ids["Orchestrator"], ids["Summary Writer"]) in edges
+
+
+def test_late_returning_grandchild_attaches_to_its_real_parent():
+    """A grandchild whose first call appears AFTER its parent already returned
+    (popped off the stack) -- an interleaving a fork's re-run can produce -- must
+    still nest under its REAL parent, not fall back to the root. Regression for
+    Data Analyst showing at the Coordinator's level instead of under Research
+    Lead in a branch view."""
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12], "sys_head": system,
+                "sys_role": system.split(".")[0].replace("You are the ", ""), "tools": tools, "model": "m"}
+
+    def model(system, tools, seq, tcs=None, text=None):
+        res = {"tool_calls": tcs, "stop_reason": "tool_use"} if tcs else {"text": text or "", "stop_reason": "end_turn"}
+        return {"seq": seq, "kind": "model", "meta": fp(system, tools), "result": res}
+
+    def tc(n):
+        return {"id": n, "name": n, "input": {}}
+    C, R, D = "You are the Coordinator.", "You are the Research Lead.", "You are the Data Analyst."
+    data = {"recorded_via": "proxy", "model": "m", "output": "x", "tools": {}, "log": [
+        model(C, ["ask_research"], 0, tcs=[tc("ask_research")]),
+        model(R, ["ask_data_analyst"], 1, tcs=[tc("ask_data_analyst")]),
+        model(R, ["ask_data_analyst"], 2, text="done"),          # RL returns before Data Analyst runs
+        model(D, ["calculate"], 3, tcs=[tc("calculate")]),       # Data Analyst appears LATE
+        {"seq": 4, "kind": "tool:calculate", "result": "9"},
+        model(D, ["calculate"], 5, text="9"),
+        model(C, ["ask_research"], 6, text="all done")]}
+    ia = infer_agents(data)
+    lvl = {a["label"]: a["level"] for a in ia["agents"]}
+    assert lvl["Data Analyst"] == 2   # under Research Lead, not the Coordinator
+    ids = {a["label"]: a["id"] for a in ia["agents"]}
+    assert (ids["Research Lead"], ids["Data Analyst"]) in {(e["from"], e["to"]) for e in ia["edges"]}
