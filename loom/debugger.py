@@ -1227,6 +1227,9 @@ header b{font-size:14px}.muted{color:#8a8a92}
 .b-call{background:#2d2438;color:#c79bff}.b-answer{background:#1f3a2a;color:#7ee0a0}.b-reason{background:#25333f;color:#7fc3ff}
 .b-blocked,.b-ask-human{background:#3a2323;color:#ff9b9b}
 .risky{color:#ff6b6b}.depth{color:#6a6a72}
+.step .num{min-width:15px;text-align:right;font-size:11px;flex:none;font-variant-numeric:tabular-nums}
+.step .rowl{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rtext{color:#9a9ca3;font-weight:400;font-size:12px}
 #detail{flex:1;overflow:auto;padding:16px 20px}
 #tlbar{border-top:1px solid #26262b;background:#131316;padding:6px 10px;display:flex;gap:8px;align-items:flex-end;position:sticky;bottom:0}
 #tlbar #play{padding:2px 9px;font-size:13px}#tlbar #play.on{background:#3a2c1a;border-color:#7a5a2a}
@@ -1444,6 +1447,7 @@ pre.code{background:#f8fafc;border-color:#e2e8f0;color:#0f172a}
 .frame.curframe{border-color:#2563eb}.frame.curframe .rl{background:#e8f0fe;color:#2563eb}
 .frame pre{background:#fbfbfc}
 .risky{color:#e5484d}.depth{color:#b6bcc4}
+.rtext{color:#6b7280}
 /* badges: model / tool / subagent / you -- soft pastel + darker ink */
 .badge{border:1px solid transparent}
 .b-answer{background:#e8f0fe;color:#1d4fd7}     /* model */
@@ -1690,17 +1694,39 @@ function callsOfModel(i){
   return out;
 }
 function agentTag(s){return s.agent?`<span class="atag c${s.agent_color||0}" title="agent: ${E(s.agent)}">${E(s.agent)}</span>`:"";}
+// Number rows 1..N in READING order (top to bottom) rather than by raw wire
+// index -- grouping the tree by agent makes the wire index jump around
+// (1,3,4,5,8,2…), which reads as broken. Raw s.step is still used for logic.
+let ORD={};
+function computeOrd(){ORD={}; let n=0; steps.forEach((s,i)=>{if(!isHidden(s))ORD[i]=++n;});}
+function ordOf(i){return ORD[i]!=null?ORD[i]:(steps[i]||{}).step;}
+function modelCallNames(s){
+  if(s.step==null) return [];
+  const out=[]; for(const x of steps){ if(x.type==="call"&&x.requested_at===s.step&&x.tool) out.push(x.tool); }
+  return out;
+}
+// A short, human snippet for a step row so NO row is a bare badge: the tool
+// name, the model's own words, or (for a wordless model turn) the tools it
+// decided to call.
+function rowLabel(s){
+  if(s.tool) return `<b class="rowl">${E(s.tool)}</b>`;
+  const t=(s.intent||(s.observation||{}).text||"").trim().replace(/\s+/g," ");
+  if(t) return `<span class="rowl rtext">${E(t.slice(0,90))}</span>`;
+  if(s.type!=="user"){ const c=modelCallNames(s); if(c.length) return `<span class="rowl rtext">→ ${E(c.join(", "))}</span>`; }
+  return "";
+}
 let COLLAPSED={};  // tree: collapsed agent segments, by segment index
 function renderSteps(){
   const el=document.getElementById("steps");
+  computeOrd();
   if(TREE){renderTree(el);return;}
   el.innerHTML=steps.map((s,i)=>{
     if(isHidden(s)) return "";
     const risky=s.risk?` <span class="risky" title="${E(s.risk)}">⚠</span>`:"";
-    const k=stepKind(s), lbl=s.tool?E(s.tool):(s.injected?E((s.intent||"").slice(0,50)):"");
+    const k=stepKind(s);
     const ind=(s.nest||0)?`<span class="depth">${"› ".repeat(s.nest)}</span>`:"";
-    return `<div class="step${i===cur?' cur':''}" data-i="${i}"><span class="muted">${s.step}</span>`+
-      `<span class="badge ${k.cls}">${k.label}</span>${agentTag(s)}${ind}<span>${lbl}</span>${risky}</div>`;
+    return `<div class="step${i===cur?' cur':''}" data-i="${i}"><span class="muted num">${ordOf(i)}</span>`+
+      `<span class="badge ${k.cls}">${k.label}</span>${agentTag(s)}${ind}${rowLabel(s)}${risky}</div>`;
   }).join("");
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
 }
@@ -1738,20 +1764,20 @@ function renderTree(el){
     const nsteps=node.content.filter(c=>c.step!=null).length;
     const head=`<div class="treehead" style="padding-left:${pad}px" data-seg="${node.si}">${guide}`+
       `<span class="tw">${col?"▸":"▾"}</span>${sub}<span class="atag c${node.color}">${E(node.agent)}</span>`+
-      `<span class="muted" style="font-size:10px">${nsteps}</span></div>`;
+      `<span class="muted" style="font-size:10px" title="${nsteps} step${nsteps===1?"":"s"} by this agent">${nsteps}</span></div>`;
     if(col) return head;
     const body=node.content.map(c=>{
       if(c.child) return render(c.child);
-      const idx=c.step, s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):(s.injected?E((s.intent||"").slice(0,50)):"");
+      const idx=c.step, s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s);
       return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad+18}px">`+
-        `<span class="muted">${s.step}</span><span class="badge ${k.cls}">${k.label}</span> <span>${lbl}</span>${risky}</div>`;
+        `<span class="muted num">${ordOf(idx)}</span><span class="badge ${k.cls}">${k.label}</span> ${rowLabel(s)}${risky}</div>`;
     }).join("");
     return head+body;
   }
   function row(idx,pad){
-    const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s), lbl=s.tool?E(s.tool):"";
+    const s=steps[idx], risky=s.risk?` <span class="risky">⚠</span>`:"", k=stepKind(s);
     return `<div class="step tstep${idx===cur?' cur':''}" data-i="${idx}" style="padding-left:${pad}px">`+
-      `<span class="muted">${s.step}</span><span class="badge ${k.cls}">${k.label}</span> <span>${lbl}</span>${risky}</div>`;
+      `<span class="muted num">${ordOf(idx)}</span><span class="badge ${k.cls}">${k.label}</span> ${rowLabel(s)}${risky}</div>`;
   }
   el.innerHTML=roots.map(r=>r.userRow!=null?row(r.userRow,10):render(r)).join("");
   el.querySelectorAll(".treehead").forEach(d=>d.onclick=()=>{const i=+d.dataset.seg;COLLAPSED[i]=!COLLAPSED[i];renderSteps();});
@@ -1769,7 +1795,7 @@ function renderTimeline(){
     if(isHidden(s)) return "";
     const h=6+Math.round(28*toks[i]/mx);
     const cls=s.risk?"tk risky":(s.type==="call"?"tk call":s.type==="answer"?"tk answer":"tk reason");
-    return `<span class="${cls}${i===cur?" cur":""}" data-i="${i}" style="height:${h}px" title="step ${s.step} ${E(s.tool||s.type)} · ${toks[i]} tok${s.risk?" ⚠"+E(s.risk):""}"></span>`;
+    return `<span class="${cls}${i===cur?" cur":""}" data-i="${i}" style="height:${h}px" title="step ${ordOf(i)} ${E(s.tool||s.type)} · ${toks[i]} tok${s.risk?" ⚠"+E(s.risk):""}"></span>`;
   }).join("");
   tl.querySelectorAll("span").forEach(d=>d.onclick=()=>select(+d.dataset.i));
   const total=toks.reduce((a,b)=>a+b,0), vis=steps.filter(s=>!isHidden(s)).length;
@@ -1802,7 +1828,7 @@ function renderDetail(){
   const k=stepKind(s);
   let h=`<span class="badge ${k.cls}">${k.label}</span> `+
         (s.tool?`<b>${E(s.tool)}</b>`:"")+
-        ` <span class="muted">step ${s.step}${s.agent?" · "+E(s.agent):""}</span>`;
+        ` <span class="muted">step ${ordOf(cur)}${s.agent?" · "+E(s.agent):""}</span>`;
   if(s.type==="call"){
     // a tool / sub-agent call: INPUT and OUTPUT only (no model reasoning here)
     const cf=codeFields(s.input);
