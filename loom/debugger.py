@@ -1894,7 +1894,7 @@ function renderDetail(){
     }).join("");
     if(o.text&&!s.intent) h+=`<div class="k">output</div><pre>${E(o.text.slice(0,4000))}</pre>`;
   }
-  if(s.type==="call"&&o.text!=null&&canFork&&steps.some(x=>x.step>s.step&&(x.replay||{}).forkable)){
+  if(s.type==="call"&&o.text!=null&&canFork&&!VIEWING&&steps.some(x=>x.step>s.step&&(x.replay||{}).forkable)){
     h+=`<div class="k">🧪 fault injection <span class="muted">— what if this tool had returned something else?</span></div>
       <textarea id="faultval" rows="2" placeholder="a different tool result to test error handling / edge cases / hostile output">${E((o.text||"").slice(0,2000))}</textarea>
       <button id="faultrun" class="fault">🧪 Inject &amp; re-run from here</button><div id="faultbranch"></div>`;
@@ -1917,7 +1917,7 @@ function renderDetail(){
   if(o.tokens&&(o.tokens.input_tokens||o.tokens.output_tokens)) h+=`<div class="k">tokens</div><span class="chip">in ${o.tokens.input_tokens||0}</span><span class="chip">out ${o.tokens.output_tokens||0}</span>`;
   const forkable=(s.replay||{}).forkable;
   const mc=(s.replay||{}).turn;
-  h+=`<div id="fork" class="${forkable&&canFork?"":"hidden"}">
+  h+=`<div id="fork" class="${forkable&&canFork&&!VIEWING?"":"hidden"}">
     <div class="forkhead">🍴 Fork from model call #${mc} <span class="muted">— replay up to here, change something, run the rest live</span></div>
     <label class="fl">inject into context</label>
     <textarea id="append" rows="2" placeholder="a message for the model at this point — e.g. “handle n &lt; 2 correctly” or “do NOT issue the refund”"></textarea>
@@ -1939,6 +1939,9 @@ function renderDetail(){
     <div id="branch"></div>
   </div>`;
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
+  // Fork only ONE level deep: while viewing a branch, forking is off (a tree of
+  // branches-of-branches gets confusing) -- go back to the original run to fork again.
+  if(VIEWING&&forkable&&canFork) h+=`<div class="k muted">🔒 you're viewing a branch — forking is disabled here. Click <b>← back to original run</b> above to fork again.</div>`;
   d.innerHTML=h;
   d.querySelectorAll(".callrow").forEach(r=>r.onclick=()=>{
     const j=+r.dataset.j;
@@ -2068,17 +2071,9 @@ async function faultInject(){
     const res=await r.json();
     if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
     else{
-      const div=res.diverge;
-      const bs=res.branch_steps.map((b,i)=>{
-        if(b.is_delegation) return "";
-        const kind=stepKind(b), o=b.observation||{};
-        const txt = b.type==="call" ? (o.text||"") : (b.intent||o.text||"");
-        return `<div class="branchstep${div!=null&&i>=div?' div':''}"><span class="badge ${kind.cls}">${kind.label}</span>`+
-          (b.tool?` <b>${E(b.tool)}</b>`:"")+(txt?` <span class="muted">${E(txt.slice(0,60))}</span>`:"")+`</div>`;
-      }).join("");
       bx.innerHTML=`<div class="branchhead">✅ how the agent reacts to the injected result${res.branch_id!=null?` — branch #${res.branch_id}`:""}</div>`+
         (res.branch_id!=null?`<button id="openfaultbranch" class="openbr">🔍 open this branch full-screen (side-by-side vs the original) →</button>`:"")+
-        `<div class="fl">output</div><pre>${E(res.branch_output)}</pre>${bs}`;
+        `<div class="fl">output</div><pre>${E(res.branch_output)}</pre>`;
       const ob=document.getElementById("openfaultbranch");
       if(ob)ob.onclick=()=>{closeDrawer&&closeDrawer();viewBranch(res.branch_id);};
     }
@@ -2116,20 +2111,9 @@ async function doFork(){
     const res=await r.json();
     if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"fork failed")}</pre>`;return;}
     const div=res.diverge;
-    const bs=res.branch_steps.map((b,i)=>{
-      if(b.is_delegation) return "";   // a hand-off is shown on its model node, not a row
-      const cls=(div!=null&&i>=div)?"branchstep div":(i>=(div??1e9)?"branchstep new":"branchstep");
-      const kind=stepKind(b), o=b.observation||{};
-      // MODEL turn -> its reasoning/answer; TOOL -> its OUTPUT (not the model's
-      // reasoning, which belongs to the model row above it); user/injected -> the message
-      const txt = b.type==="call" ? (o.text||"") : (b.intent||o.text||"");
-      return `<div class="${cls}"><span class="badge ${kind.cls}">${kind.label}</span>`+
-             (b.tool?` <b>${E(b.tool)}</b>`:"")+(txt?` <span class="muted">${E(txt.slice(0,70))}</span>`:"")+`</div>`;
-    }).join("");
     bx.innerHTML=`<div class="branchhead">✅ new branch #${res.branch_id}${div!=null?` · diverges at step ${div}`:""}</div>`+
                  `<button id="openbranch" class="openbr">🔍 open this branch as a full trace →</button>`+
-                 `<div class="fl">final output</div><pre>${E(res.branch_output)}</pre>`+
-                 `<div class="fl">branch steps <span class="muted">(preview — click above for full detail, tool calls &amp; context)</span></div>${bs}`;
+                 `<div class="fl">final output</div><pre>${E(res.branch_output)}</pre>`;
     const ob=document.getElementById("openbranch");
     if(ob)ob.onclick=()=>{closeDrawer&&closeDrawer();viewBranch(res.branch_id);};
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
