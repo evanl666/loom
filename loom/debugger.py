@@ -2022,9 +2022,7 @@ function agentFrame(s){
   const aid=s.agent_id;
   const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
   const frame=[];
-  if(aid===rootId){
-    frame.push({role:"user",content:RUN.prompt||"",step:-1});
-  } else {
+  if(aid!==rootId){
     const deleg=steps.find(x=>x.type==="call"&&x.delegates_to===aid);
     // the delegated task lives under different keys across frameworks (task /
     // description / query / prompt / input); take the first string one.
@@ -2035,6 +2033,12 @@ function agentFrame(s){
   }
   for(let j=0;j<cur;j++){            // this agent's OWN prior steps, in order
     const x=steps[j];
+    // A dialogue turn (a plain user node) belongs to the ROOT agent's
+    // conversation -- including every FOLLOW-UP ask, not just the opening prompt.
+    if(x.type==="user"&&!x.injected){
+      if(aid===rootId) frame.push({role:"user",content:x.intent||"",step:x.step});
+      continue;
+    }
     if(x.agent_id!==aid) continue;
     if(x.type==="user"&&x.injected) frame.push({role:"injected",content:x.intent||"",step:x.step});
     else if((x.type==="reason"||x.type==="answer")&&x.intent) frame.push({role:"assistant",content:x.intent,step:x.step});

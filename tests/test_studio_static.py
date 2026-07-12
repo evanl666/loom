@@ -129,3 +129,15 @@ def test_static_context_filter_matches_server_frame():
     allc = static_data(data)["context_all"]
     for st in (0, 3, 11):
         assert [m for m in allc if m["step"] <= st] == context_at(data, st)
+
+
+def test_agent_frame_includes_follow_up_dialogue_turns_for_the_root():
+    """The multi-agent context panel builds the frame client-side in agentFrame().
+    It must fold EVERY plain user node (each follow-up ask), not only RUN.prompt,
+    into the root agent's frame -- otherwise a live follow-up ('good morning!')
+    never shows in the latest model turn's context. Lock the handling in place."""
+    html = static_page(_multi_agent_trace())
+    assert "function agentFrame" in html
+    # the root agent adopts dialogue turns (plain, non-injected user nodes)
+    assert 'x.type==="user"&&!x.injected' in html
+    assert 'if(aid===rootId) frame.push({role:"user"' in html
