@@ -65,3 +65,41 @@ def test_steps_for_interleaves_all_user_turns():
         ModelResponse(text="two.", stop_reason="end_turn")]), tools=[], name="a")
     steps = steps_for(agent.run(["first?", "second?"]).to_dict())
     assert [s["intent"] for s in steps if s["type"] == "user"] == ["first?", "second?"]
+
+
+def test_native_multi_agent_multi_turn_context_shows_follow_up():
+    """A NATIVE multi-agent live session's follow-up ask must show in the context
+    frame, not just the step list. Regression: the per-ask boundary counted every
+    model entry, but a trace's `turn` counts only DEPTH-0 model calls (sub-agent
+    calls keep the parent's turn), so on a multi-agent run the boundary overshot
+    and context_at never inserted the follow-up user message."""
+    from loom import tool
+    from loom.action import actions
+    from loom.debugger import context_at
+    from loom.providers import ToolCall
+
+    @tool
+    def calc(x: int) -> int:
+        "calc"
+        return x * 2
+
+    worker = Agent(model=ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("w", "calc", {"x": 5})], stop_reason="tool_use"),
+        ModelResponse(text="worker done", stop_reason="end_turn")]), tools=[calc], name="Worker")
+    coord = Agent(model=ScriptedProvider([
+        ModelResponse(tool_calls=[ToolCall("d", "ask_worker", {"task": "t"})], stop_reason="tool_use"),
+        ModelResponse(text="turn1 summary", stop_reason="end_turn"),
+        ModelResponse(text="READY-turn2", stop_reason="end_turn")]),
+        tools=[worker.as_tool(name="ask_worker")], name="Coordinator")
+
+    sess = LiveSession(agent=coord)
+    sess.ask("do the task")
+    while sess.running:
+        time.sleep(0.02)
+    sess.ask("now say READY")
+    while sess.running:
+        time.sleep(0.02)
+    tr = sess.trace()
+    mx = max(a.step for a in actions(tr))
+    users = [m["content"] for m in context_at(tr, mx) if m["role"] == "user"]
+    assert users == ["do the task", "now say READY"]   # both turns, in order, in the frame

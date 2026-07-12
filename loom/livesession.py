@@ -148,8 +148,18 @@ class LiveSession:
                 return False
             self.running = True
             self.error = ""
-            if self._proxy is not None:   # mark where this ask's wire begins
-                self._user_turns.append([len(self._proxy.recorder.wire), str(prompt)])
+            # mark where this ask's model calls begin (wire index for the proxy
+            # path, cumulative model-call count in the log for the native path) so
+            # every follow-up turn shows in the step list AND the context frame.
+            if self._proxy is not None:
+                idx = len(self._proxy.recorder.wire)
+            else:
+                # a trace's "turn" counts only DEPTH-0 model calls (sub-agent calls
+                # keep the parent's turn), so the boundary must match -- counting
+                # every model entry over-shoots on a multi-agent run and never lands.
+                idx = sum(1 for e in self._log
+                          if getattr(e, "kind", "") == "model" and getattr(e, "depth", 0) == 0)
+            self._user_turns.append([idx, str(prompt)])
         threading.Thread(target=self._run, args=(str(prompt),), daemon=True).start()
         return True
 
@@ -198,7 +208,7 @@ class LiveSession:
             caps = sorted(getattr(t, "capabilities", []) or [])
             if caps:
                 tools[name] = caps
-        return {
+        d = {
             "log": [e.to_dict() for e in log],
             "prompt": self._episodes[0] if self._episodes else "",
             "episodes": list(self._episodes) or [""],
@@ -208,6 +218,9 @@ class LiveSession:
             "system": getattr(self.agent, "system", ""),
             "tools": tools,
         }
+        if len(self._user_turns) > 1:   # multi-turn native run: split by ask
+            d["user_turns"] = [list(t) for t in self._user_turns]
+        return d
 
     def snapshot(self) -> dict:
         from .debugger import steps_for
