@@ -1355,6 +1355,7 @@ header b{font-size:13.5px;letter-spacing:.2px}
 #toolbar #pos{font-size:11px;white-space:nowrap}
 #toolbar #brk{width:250px;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:6px 10px;font-size:12px}
 #toolbar #brk:focus{outline:none;border-color:#3a6ea5}
+#toolbar #brk.hidden{display:none}
 button{background:#1c1d21;border:1px solid #2a2c33;border-radius:7px;padding:5px 11px;transition:background .1s,border-color .1s}
 button:hover{background:#26282e;border-color:#34363e}
 #toolbar .tgroup button{border:0;background:transparent;padding:5px 9px;border-radius:6px}
@@ -1398,12 +1399,19 @@ pre{background:#0e0f11;border-color:#212228;border-radius:9px}
 .step.tstep{border-bottom:1px solid #141518}
 .b-user{background:#3a2a16;color:#ffcf8f}
 .step .b-user+*{color:#e8c98a}
-/* live session bar */
-#livebar{display:flex;gap:8px;align-items:center;padding:8px 14px;border-bottom:1px solid #202228;background:#101418}
+/* live session: a compact popup, opened from the toolbar's 💬 Ask button */
+#askbtn.hidden{display:none}
+#askbtn.busy{opacity:.7}
+#livebar{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;justify-content:center;align-items:flex-start;z-index:50}
 #livebar.hidden{display:none}
-#livebar #askin{flex:1;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:8px 11px;color:#e7e8ea;font:inherit}
+#livebox{margin-top:12vh;width:min(520px,92vw);box-sizing:border-box;background:#17171b;border:1px solid #3a3a44;border-radius:12px;box-shadow:0 18px 60px rgba(0,0,0,.6);padding:14px}
+#livehd{display:flex;gap:8px;align-items:center;margin-bottom:11px;font-size:13px}
+#livehd #livestat{font-size:11px}
+#livehd #askx{margin-left:auto;border:0;background:transparent;color:#8b8d94;cursor:pointer;font-size:15px;padding:0 2px}
+#livebar #askin{width:100%;box-sizing:border-box;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:10px 12px;color:#e7e8ea;font:inherit}
 #livebar #askin:focus{outline:none;border-color:#3a6ea5}
 #livebar #askin:disabled{opacity:.5}
+#askrow{display:flex;gap:10px;align-items:center;justify-content:flex-end;margin-top:11px}
 .livedot{width:9px;height:9px;border-radius:50%;background:#2f9d6b;flex:none}
 .livedot.busy{background:#e5a54a;animation:pulse 1s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.35}}
@@ -1467,8 +1475,10 @@ pre.mdcode{background:#f8fafc;border-color:#e2e8f0}
 /* timeline + live bar */
 #tlbar{background:#fff;border-top:1px solid #e6e8eb}
 #tlinfo,#livestat{color:#8a9099}
-#livebar{background:#f0f7ff;border-bottom:1px solid #d8e6fb}
+#livebar{background:rgba(20,25,35,.34)}
+#livebox{background:#fff;border:1px solid #e0e3e8;box-shadow:0 20px 60px rgba(20,25,35,.22)}
 #livebar #askin{background:#fff;border:1px solid #cdd8e8;color:#1f2328}
+#livehd #askx{color:#9aa0a8}
 /* command palette */
 #palbox{background:#fff;border:1px solid #e0e3e8;box-shadow:0 20px 60px rgba(20,25,35,.22)}
 #palin{background:#fff;color:#1f2328;border-bottom:1px solid #eef0f2}
@@ -1489,6 +1499,7 @@ button.fault{background:#fff6e6;border:1px solid #f3dca6;color:#b26a00}button.fa
   <div id="steps"></div>
   <div id="main">
     <div id="toolbar">
+      <button id="askbtn" class="accent hidden" title="ask the agent — it runs live (⌘/)">💬 Ask</button>
       <div class="tgroup">
         <button id="first" class="ico" title="first (Home)">⏮</button>
         <button id="prev" class="ico" title="prev (←)">◀</button>
@@ -1496,7 +1507,8 @@ button.fault{background:#fff6e6;border:1px solid #f3dca6;color:#b26a00}button.fa
         <button id="last" class="ico" title="last (End)">⏭</button>
       </div>
       <span class="muted" id="pos"></span>
-      <input id="brk" placeholder="⏹ breakpoint — tool:send_email · cap:network" title="conditional breakpoint">
+      <button id="brkbtn" class="ico" title="set a conditional breakpoint">⏹</button>
+      <input id="brk" class="hidden" placeholder="breakpoint — tool:send_email · cap:network · Enter to set" title="conditional breakpoint">
       <span class="tspring"></span>
       <div class="tgroup">
         <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
@@ -1512,10 +1524,14 @@ button.fault{background:#fff6e6;border:1px solid #f3dca6;color:#b26a00}button.fa
       </div>
     </div>
     <div id="livebar" class="hidden">
-      <span class="livedot"></span>
-      <input id="askin" placeholder="ask the agent — it runs live, steps stream in below…">
-      <button id="asksend" class="accent">▶ run</button>
-      <span class="muted" id="livestat"></span>
+      <div id="livebox">
+        <div id="livehd"><span class="livedot"></span><b>Ask the agent</b>
+          <span class="muted" id="livestat"></span>
+          <button id="askx" title="close (Esc)">✕</button></div>
+        <input id="askin" placeholder="type a message — the agent runs live, steps stream into the trace…">
+        <div id="askrow"><span class="muted" style="font-size:11px">↵ to run</span>
+          <button id="asksend" class="accent">▶ Run</button></div>
+      </div>
     </div>
     <div id="detail"></div>
     <div id="tlbar"><button id="play" title="watch the run animate">▶</button>
@@ -1571,7 +1587,7 @@ async function load(){
     AGENTS={}; (ia&&ia.agents||[]).forEach(a=>AGENTS[a.id]=a);
   }catch(e){ AGENTS={}; }
   if(STATIC){ // hide server-only controls; this is a frozen, shareable snapshot
-    ["copilot","assertbtn","export","brk"].forEach(id=>{const e=document.getElementById(id); if(e)e.style.display="none";});
+    ["copilot","assertbtn","export","brk","brkbtn"].forEach(id=>{const e=document.getElementById(id); if(e)e.style.display="none";});
     const b=document.querySelector("header b"); if(b)b.textContent="🔬 Loom Studio";
   }
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
@@ -1581,13 +1597,18 @@ async function load(){
   const pb=document.getElementById("play"); if(pb) pb.onclick=togglePlay;
   LIVE=RUN.live;
   if(LIVE){
-    document.getElementById("livebar").classList.remove("hidden");
+    const ab=document.getElementById("askbtn"); ab.classList.remove("hidden"); ab.onclick=openAsk;
+    document.getElementById("askx").onclick=closeAsk;
+    document.getElementById("livebar").addEventListener("click",e=>{if(e.target.id==="livebar")closeAsk();});
     const s=document.getElementById("asksend"), inp=document.getElementById("askin");
     s.onclick=askAgent; inp.onkeydown=e=>{if(e.key==="Enter")askAgent();};
     setLiveStat(steps.length?(steps.length+" steps"):"ready — ask the agent something");
     if(RUN.running) startPolling();
   }
 }
+function openAsk(){const b=document.getElementById("livebar");b.classList.remove("hidden");
+  const i=document.getElementById("askin"); if(i&&!i.disabled)setTimeout(()=>i.focus(),0);}
+function closeAsk(){document.getElementById("livebar").classList.add("hidden");}
 function autoTree(){  // turn on the tree when a real hierarchy appears
   const ags=new Set(steps.filter(s=>s.agent_id&&s.agent_id!=="user").map(s=>s.agent_id));
   if(ags.size>1&&!TREE){TREE=true; document.getElementById("swim").classList.add("on");}
@@ -1596,7 +1617,7 @@ function autoTree(){  // turn on the tree when a real hierarchy appears
 let LIVE=false, POLL=null;
 async function askAgent(){
   const inp=document.getElementById("askin"), q=inp.value.trim(); if(!q)return;
-  inp.value="";
+  inp.value=""; closeAsk();
   const r=await (await fetch("/api/ask",{method:"POST",headers:{"content-type":"application/json"},
     body:JSON.stringify({prompt:q})})).json();
   if(r.error){setLiveStat("⚠ "+r.error);return;}
@@ -1618,6 +1639,8 @@ function setBusy(b){
   const d=document.querySelector(".livedot"); if(d)d.classList.toggle("busy",b);
   const i=document.getElementById("askin"),s=document.getElementById("asksend");
   if(i)i.disabled=b; if(s)s.disabled=b;
+  const ab=document.getElementById("askbtn");
+  if(ab){ab.classList.toggle("busy",b); ab.textContent=b?"⏳ running…":"💬 Ask";}
 }
 function setLiveStat(t){const e=document.getElementById("livestat"); if(e)e.textContent=t;}
 function typeClass(t){return "b-"+t}
@@ -2037,7 +2060,9 @@ async function doFork(){
 }
 document.addEventListener("keydown",e=>{
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openPalette();return;}
+  if(LIVE&&(e.metaKey||e.ctrlKey)&&e.key==="/"){e.preventDefault();openAsk();return;}
   if(!document.getElementById("palette").classList.contains("hidden")){paletteKey(e);return;}
+  if(e.key==="Escape"&&!document.getElementById("livebar").classList.contains("hidden")){closeAsk();return;}
   if(e.key==="Escape"&&!document.getElementById("drawer").classList.contains("hidden")){closeDrawer();return;}
   if(e.target.tagName==="TEXTAREA"||e.target.tagName==="INPUT")return;
   if(e.key==="ArrowLeft")select(nextVisible(cur-1,-1)); else if(e.key==="ArrowRight")select(nextVisible(cur+1,1));
@@ -2230,6 +2255,10 @@ async function setBreak(){
   if(tgt!=null){const i=steps.findIndex(s=>s.step===tgt); if(i>=0)select(i);}
 }
 document.getElementById("brk").onkeydown=e=>{if(e.key==="Enter")setBreak();};
+{const bb=document.getElementById("brkbtn"); if(bb)bb.onclick=()=>{
+  const el=document.getElementById("brk"); el.classList.toggle("hidden");
+  bb.classList.toggle("on",!el.classList.contains("hidden"));
+  if(!el.classList.contains("hidden"))el.focus();};}
 async function gotoRootCause(){
   const r = STATIC ? SD.rootcause : await (await fetch("/api/rootcause")).json();
   if(!r.found){alert("no root-cause signal — the run looks clean");return;}
