@@ -138,6 +138,8 @@ def test_agent_frame_includes_follow_up_dialogue_turns_for_the_root():
     never shows in the latest model turn's context. Lock the handling in place."""
     html = static_page(_multi_agent_trace())
     assert "function agentFrame" in html
-    # the root agent adopts dialogue turns (plain, non-injected user nodes)
+    # a top-level agent (root OR peer) adopts dialogue turns; a delegated sub-agent
+    # sees only its task -- keyed on "was delegated to", so peers show the dialogue.
     assert 'x.type==="user"&&!x.injected' in html
-    assert 'if(aid===rootId) frame.push({role:"user"' in html
+    assert 'if(!isSub) frame.push({role:"user"' in html
+    assert "const isSub=!!deleg;" in html

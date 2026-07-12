@@ -2020,23 +2020,27 @@ function agentSystem(s){  // the full system prompt of THIS step's agent
 }
 function agentFrame(s){
   const aid=s.agent_id;
-  const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
+  // Was this agent DELEGATED to (a sub-agent), or is it a top-level participant
+  // (the root, or a peer in a group chat)? A sub-agent sees its delegated task; a
+  // top-level agent sees the USER dialogue -- including every follow-up ask. Keying
+  // on "was delegated to" (not "== rootId") makes PEER agents show the dialogue too.
+  const deleg=steps.find(x=>x.type==="call"&&x.delegates_to===aid);
+  const isSub=!!deleg;
   const frame=[];
-  if(aid!==rootId){
-    const deleg=steps.find(x=>x.type==="call"&&x.delegates_to===aid);
+  if(isSub){
     // the delegated task lives under different keys across frameworks (task /
     // description / query / prompt / input); take the first string one.
-    const inp=(deleg&&deleg.input)||{};
+    const inp=deleg.input||{};
     const task=["task","description","query","prompt","input","instruction","goal"]
       .map(k=>inp[k]).find(v=>typeof v==="string"&&v.trim());
     frame.push({role:"task",content:task||"(this sub-agent's task was delegated by its parent)",step:-1});
   }
   for(let j=0;j<cur;j++){            // this agent's OWN prior steps, in order
     const x=steps[j];
-    // A dialogue turn (a plain user node) belongs to the ROOT agent's
+    // A dialogue turn (a plain user node) belongs to every TOP-LEVEL agent's
     // conversation -- including every FOLLOW-UP ask, not just the opening prompt.
     if(x.type==="user"&&!x.injected){
-      if(aid===rootId) frame.push({role:"user",content:x.intent||"",step:x.step});
+      if(!isSub) frame.push({role:"user",content:x.intent||"",step:x.step});
       continue;
     }
     if(x.agent_id!==aid) continue;
