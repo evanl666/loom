@@ -299,3 +299,34 @@ def test_live_multi_turn_shows_each_ask_as_its_own_dialogue_turn():
     a2 = next(i for i, s in enumerate(steps) if s.get("intent") == "2+2 = 4")
     w = next(i for i, s in enumerate(steps) if s.get("agent") == "Worker")
     assert w < u2 < a2   # Worker stays in turn 1; the 2nd ask's answer is under the 2nd user node
+
+
+def test_context_shows_every_follow_up_user_turn_with_full_history():
+    """context_at must interleave EVERY real user turn (via user_turns), not just
+    the opening prompt, so a follow-up ask's model turn shows the new message AND
+    all prior history. Regression: only episodes[0] was ever inserted, so a live
+    follow-up's context was missing the message the user just typed."""
+    import hashlib
+    from loom.debugger import context_at
+
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12], "sys_head": system,
+                "sys_role": system.split(".")[0].replace("You are the ", ""), "tools": tools, "model": "m"}
+
+    def model(system, tools, seq, tcs=None, text=None):
+        res = {"tool_calls": tcs, "stop_reason": "tool_use"} if tcs else {"text": text or "", "stop_reason": "end_turn"}
+        return {"seq": seq, "kind": "model", "meta": fp(system, tools), "result": res}
+    C, W = "You are the Coordinator.", "You are the Worker."
+    data = {"recorded_via": "proxy", "model": "m", "output": "x", "tools": {},
+            "user_turns": [[0, "do the task"], [3, "what is 2+2?"]], "log": [
+        model(C, ["ask_worker"], 0, tcs=[{"id": "1", "name": "ask_worker", "input": {}}]),
+        model(W, [], 1, text="worker done"),
+        model(C, ["ask_worker"], 2, text="all done"),
+        model(C, ["ask_worker"], 3, text="2+2 = 4")]}
+    frame = context_at(data, 2)   # what the 2nd ask's model turn (step 3) saw -> context at step 2
+    users = [m["content"] for m in frame if m["role"] == "user"]
+    assert users == ["do the task", "what is 2+2?"]                     # both turns, opening first
+    assert any(m["content"] == "all done" for m in frame)              # prior history preserved
+    # the follow-up message comes after the earlier turn's history
+    assert frame.index({"role": "user", "content": "what is 2+2?", "step": 3}) > \
+        next(i for i, m in enumerate(frame) if m["content"] == "all done")

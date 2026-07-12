@@ -273,11 +273,33 @@ def context_at(data: dict, step: int, acts=None) -> list[dict]:
     precomputed ``actions(data)`` to avoid re-parsing (see static_data)."""
     from .action import actions
 
-    prompt = (data.get("episodes") or [data.get("prompt", "")])[0]
-    frame: list[dict] = [{"role": "user", "content": str(prompt), "step": -1}]
-    for a in (actions(data) if acts is None else acts):
+    acts_list = list(actions(data) if acts is None else acts)
+    # Every REAL user turn, not just the opening prompt: a multi-turn live session
+    # records the wire index each ask() began at, so a follow-up message (and all
+    # the history before it) shows in the frame. `arrival[k]` = the log-seq of ask
+    # k's first model turn, so the message lands right before that turn.
+    uturns = data.get("user_turns") if isinstance(data.get("user_turns"), list) else None
+    if uturns:
+        boundaries = [(int(w), str(p)) for w, p in uturns]
+    else:
+        boundaries = [(0, str((data.get("episodes") or [data.get("prompt", "")])[0]))]
+    arrival: dict[int, int] = {}
+    for a in acts_list:
+        t = a.replay.turn if a.replay else None
+        if t is None:
+            continue
+        for k in range(1, len(boundaries)):
+            if k not in arrival and t >= boundaries[k][0]:
+                arrival[k] = a.step
+
+    frame: list[dict] = [{"role": "user", "content": boundaries[0][1], "step": -1}]
+    nb = 1
+    for a in acts_list:
         if a.step > step:
             break
+        while nb < len(boundaries) and nb in arrival and arrival[nb] <= a.step:
+            frame.append({"role": "user", "content": boundaries[nb][1], "step": arrival[nb]})
+            nb += 1
         if a.type in ("reason", "answer") and a.intent:
             frame.append({"role": "assistant", "content": a.intent, "step": a.step})
         elif a.type == "call":
@@ -291,6 +313,11 @@ def context_at(data: dict, step: int, acts=None) -> list[dict]:
         elif a.type == "ask-human":
             frame.append({"role": "human", "content": (a.observation.text if a.observation else ""),
                           "step": a.step})
+    # A follow-up ask whose first model turn is the very next step: its message
+    # WAS in that turn's context, so show it when viewing that turn (step-1).
+    while nb < len(boundaries) and nb in arrival and arrival[nb] <= step + 1:
+        frame.append({"role": "user", "content": boundaries[nb][1], "step": arrival[nb]})
+        nb += 1
     return frame
 
 
