@@ -51,7 +51,6 @@ def test_static_page_gates_off_every_server_only_feature():
     for bid in ("copilot", "assertbtn", "export", "brk", "rootcause", "branches",
                 "agentsbtn", "palettebtn", "swim", "play", "prompt", "model"):
         assert f'id="{bid}"' in html, f"#{bid} is wired at load but missing from the HTML"
-    assert "!STATIC" in html                 # memory blame is gated off when static
 
 
 def test_static_page_is_self_contained_and_is_the_debugger():

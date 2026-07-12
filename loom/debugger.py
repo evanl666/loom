@@ -1908,7 +1908,6 @@ function renderDetail(){
   // a user message is an INPUT to the model, not something the model "saw" here.
   const isModelTurn=(s.type==="reason"||s.type==="answer");
   if(isModelTurn) h+=`<div class="k">🧠 context the model saw here <button id="ctxbtn" class="mini">show</button></div><div id="ctx"></div>`;
-  if(s.type==="call"&&!STATIC) h+=`<div class="k">🩸 memory blame <button id="blamebtn" class="mini">what influenced this?</button></div><div id="blame"></div>`;
   h+=`<div id="dynpanels"></div>`;  // pack-contributed panels (SQL plan, file, screenshot…)
   if(s.capabilities&&s.capabilities.length) h+=`<div class="k">capabilities</div>`+s.capabilities.map(c=>`<span class="chip">${E(c)}</span>`).join("");
   if(s.risk) h+=`<div class="k">risk</div><span class="chip risk">⚠ ${E(s.risk)}</span>`;
@@ -1951,7 +1950,6 @@ function renderDetail(){
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
   const af=document.getElementById("autofix"); if(af) af.onclick=doAutoFix;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
-  const bb=document.getElementById("blamebtn"); if(bb) bb.onclick=loadBlame;
   const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
   loadPanels(s.step);
   if(s.type==="call"&&canFork){const dp=document.getElementById("dryrunbtn"); if(dp)dp.onclick=doDryRun;}
@@ -1974,18 +1972,6 @@ async function doDryRun(){
   const res=await r.json();
   if(!r.ok){out.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
   else out.innerHTML=`<div class="fl">result (${res.ms}ms)${res.error?" · ERROR":""}</div><pre class="code">${E(res.error||res.result)}</pre>`;
-}
-async function loadBlame(){
-  const s=steps[cur], box=document.getElementById("blame");
-  document.getElementById("blamebtn").remove();
-  box.innerHTML='<span class="muted">tracing…</span>';
-  const r=await (await fetch("/api/blame?step="+s.step)).json();
-  let h=`<div class="sub2">${E(r.note)}</div>`;
-  if(r.influences.length){
-    h+=r.influences.map(m=>`<div class="frame${m.poisoned?' poison':''}"><span class="rl">🧠 memory recall @${m.step}${m.poisoned?' ⚠ POISONED':''}</span><pre>${E(m.preview)}</pre></div>`).join("");
-    if(r.verify) h+=`<div class="cop-edit">verify causation: <code>${E(r.verify)}</code></div>`;
-  }
-  box.innerHTML=h;
 }
 function diffHtml(t){
   return E(t).split("\n").map(l=>{
