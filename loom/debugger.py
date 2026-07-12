@@ -1389,7 +1389,14 @@ header b{font-size:13.5px;letter-spacing:.2px}
 #toolbar .tgroup{display:flex;gap:4px;align-items:center;background:#17181b;border:1px solid #24262c;border-radius:9px;padding:3px}
 #toolbar .tspring{flex:1}
 #toolbar #pos{font-size:11px;white-space:nowrap}
-#toolbar #brk{width:250px;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:6px 10px;font-size:12px}
+#brkbox{position:fixed;z-index:60;width:min(340px,92vw);background:#17171b;border:1px solid #3a3a44;border-radius:11px;box-shadow:0 16px 50px rgba(0,0,0,.55);padding:11px}
+#brkbox.hidden{display:none}
+#brkbox .brkhd{font-size:11px;color:#8b8d94;margin-bottom:8px}
+#brkchips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:9px;max-height:160px;overflow:auto}
+.brkchip{font-size:12px;padding:3px 9px;border-radius:14px;background:#22242b;border:1px solid #33363f;color:#cdd0d6;cursor:pointer;white-space:nowrap}
+.brkchip:hover{background:#2f333c;border-color:#4a6e9e;color:#dbe6f5}
+#brkbox #brk{width:100%;box-sizing:border-box;background:#0e0f11;border:1px solid #24262c;border-radius:8px;padding:6px 10px;font-size:12px;color:#e7e8ea}
+#brkbox #brk:focus{outline:none;border-color:#3a6ea5}
 #toolbar #brk:focus{outline:none;border-color:#3a6ea5}
 #toolbar #brk.hidden{display:none}
 button{background:#1c1d21;border:1px solid #2a2c33;border-radius:7px;padding:5px 11px;transition:background .1s,border-color .1s}
@@ -1464,7 +1471,11 @@ header b{color:#1f2328}
 #toolbar .tgroup{background:#f3f4f6;border:1px solid #e6e8eb}
 #toolbar .tgroup button{background:transparent;color:#3a4048}
 #toolbar .tgroup button:hover{background:#e6e8eb}
-#toolbar #brk{background:#fff;border:1px solid #d6d9de;color:#1f2328}
+#brkbox{background:#fff;border:1px solid #e0e3e8;box-shadow:0 16px 50px rgba(20,25,35,.18)}
+#brkbox .brkhd{color:#6b7280}
+.brkchip{background:#f3f4f6;border:1px solid #e0e3e8;color:#3a4048}
+.brkchip:hover{background:#e8f0fe;border-color:#bcd2fb;color:#2563eb}
+#brkbox #brk{background:#fff;border:1px solid #d6d9de;color:#1f2328}
 button{background:#fff;border:1px solid #d6d9de;color:#2a2f36}
 button:hover{background:#f0f2f5;border-color:#c4c8ce}
 button.accent,#toolbar .tgroup button.accent{background:#2563eb;border-color:#2563eb;color:#fff}
@@ -1544,8 +1555,12 @@ button.fault{background:#fff6e6;border:1px solid #f3dca6;color:#b26a00}button.fa
         <button id="last" class="ico" title="last (End)">⏭</button>
       </div>
       <span class="muted" id="pos"></span>
-      <button id="brkbtn" class="ico" title="set a conditional breakpoint">⏹</button>
-      <input id="brk" class="hidden" placeholder="breakpoint — tool:send_email · cap:network · Enter to set" title="conditional breakpoint">
+      <button id="brkbtn" class="ico" title="jump to a step by condition">⏹</button>
+      <div id="brkbox" class="hidden">
+        <div class="brkhd">⏹ jump to the first step that matches — click one:</div>
+        <div id="brkchips"></div>
+        <input id="brk" placeholder="or type a condition — e.g. tool:send_email · Enter" title="conditional breakpoint">
+      </div>
       <span class="tspring"></span>
       <div class="tgroup">
         <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
@@ -1624,7 +1639,7 @@ async function load(){
     AGENTS={}; (ia&&ia.agents||[]).forEach(a=>AGENTS[a.id]=a);
   }catch(e){ AGENTS={}; }
   if(STATIC){ // hide server-only controls; this is a frozen, shareable snapshot
-    ["copilot","assertbtn","export","brk","brkbtn"].forEach(id=>{const e=document.getElementById(id); if(e)e.style.display="none";});
+    ["copilot","assertbtn","export","brkbox","brkbtn"].forEach(id=>{const e=document.getElementById(id); if(e)e.style.display="none";});
     const b=document.querySelector("header b"); if(b)b.textContent="🔬 Loom Studio";
   }
   document.getElementById("prompt").textContent=RUN.prompt.slice(0,120);
@@ -2107,6 +2122,7 @@ document.addEventListener("keydown",e=>{
   if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==="k"){e.preventDefault();openPalette();return;}
   if(LIVE&&(e.metaKey||e.ctrlKey)&&e.key==="/"){e.preventDefault();openAsk();return;}
   if(!document.getElementById("palette").classList.contains("hidden")){paletteKey(e);return;}
+  if(e.key==="Escape"&&!document.getElementById("brkbox").classList.contains("hidden")){closeBrk();return;}
   if(e.key==="Escape"&&!document.getElementById("livebar").classList.contains("hidden")){closeAsk();return;}
   if(e.key==="Escape"&&!document.getElementById("drawer").classList.contains("hidden")){closeDrawer();return;}
   if(e.target.tagName==="TEXTAREA"||e.target.tagName==="INPUT")return;
@@ -2289,12 +2305,38 @@ async function setBreak(){
   const nxt=BREAKS.find(st=>{const i=steps.findIndex(s=>s.step===st);return i>=cur;});
   const tgt=nxt!=null?nxt:BREAKS[0];
   if(tgt!=null){const i=steps.findIndex(s=>s.step===tgt); if(i>=0)select(i);}
+  closeBrk();
 }
-document.getElementById("brk").onkeydown=e=>{if(e.key==="Enter")setBreak();};
+document.getElementById("brk").onkeydown=e=>{if(e.key==="Enter")setBreak(); else if(e.key==="Escape")closeBrk();};
+// Discoverable breakpoints: the ⏹ button opens a panel of the conditions that
+// actually exist in THIS trace (each tool, each capability) as clickable chips,
+// so you jump to a step without knowing the tool:/cap: syntax.
+function brkChips(){
+  const tools=[...new Set(steps.filter(s=>s.tool&&!s.is_delegation).map(s=>s.tool))];
+  const caps=[...new Set(steps.flatMap(s=>s.capabilities||[]))];
+  const out=tools.map(t=>["tool:"+t,"🔧 "+t]).concat(caps.map(c=>["cap:"+c,"🔑 "+c]));
+  if(steps.some(s=>s.risk)) out.push(["risky","⚠ risky steps"]);
+  if(steps.some(s=>(s.policy||{}).action==="deny")) out.push(["blocked","🛑 blocked"]);
+  return out;
+}
+function openBrk(){
+  const box=document.getElementById("brkbox"), btn=document.getElementById("brkbtn");
+  const r=btn.getBoundingClientRect();
+  box.style.left=Math.min(window.innerWidth-352,Math.max(8,r.left-30))+"px";
+  box.style.top=(r.bottom+6)+"px";
+  const chips=brkChips(), cw=document.getElementById("brkchips");
+  cw.innerHTML=chips.length?chips.map(([c,l])=>`<span class="brkchip" data-cond="${E(c)}">${E(l)}</span>`).join("")
+    :'<span class="muted" style="font-size:12px">no tools recorded in this run</span>';
+  cw.querySelectorAll(".brkchip").forEach(ch=>ch.onclick=()=>{document.getElementById("brk").value=ch.dataset.cond; setBreak();});
+  box.classList.remove("hidden"); btn.classList.add("on");
+}
+function closeBrk(){const b=document.getElementById("brkbox"); if(b)b.classList.add("hidden"); const t=document.getElementById("brkbtn"); if(t)t.classList.remove("on");}
 {const bb=document.getElementById("brkbtn"); if(bb)bb.onclick=()=>{
-  const el=document.getElementById("brk"); el.classList.toggle("hidden");
-  bb.classList.toggle("on",!el.classList.contains("hidden"));
-  if(!el.classList.contains("hidden"))el.focus();};}
+  document.getElementById("brkbox").classList.contains("hidden")?openBrk():closeBrk();};}
+document.addEventListener("click",e=>{
+  const box=document.getElementById("brkbox");
+  if(box&&!box.classList.contains("hidden")&&!box.contains(e.target)&&e.target.id!=="brkbtn") closeBrk();
+});
 async function gotoRootCause(){
   const r = STATIC ? SD.rootcause : await (await fetch("/api/rootcause")).json();
   if(!r.found){alert("no root-cause signal — the run looks clean");return;}
