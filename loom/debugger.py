@@ -1836,6 +1836,7 @@ function renderSteps(){
       `<span class="badge ${k.cls}">${k.label}</span>${agentTag(s)}${ind}${rowLabel(s)}${risky}</div>`;
   }).join("");
   el.querySelectorAll(".step").forEach(d=>d.onclick=()=>select(+d.dataset.i));
+  if(typeof BREAKS!=="undefined"&&BREAKS.length)applyBreaks();
 }
 function renderTree(el){
   // Build a NESTED tree: a sub-agent is one node containing its own steps AND,
@@ -1889,6 +1890,7 @@ function renderTree(el){
   el.innerHTML=roots.map(r=>r.userRow!=null?row(r.userRow,10):render(r)).join("");
   el.querySelectorAll(".treehead").forEach(d=>d.onclick=()=>{const i=+d.dataset.seg;COLLAPSED[i]=!COLLAPSED[i];renderSteps();});
   el.querySelectorAll(".tstep").forEach(d=>d.onclick=()=>select(+d.dataset.i));
+  if(typeof BREAKS!=="undefined"&&BREAKS.length)applyBreaks();
 }
 function stepTokens(s){
   const o=s.observation||{};
@@ -2347,13 +2349,22 @@ function adoptFork(turn,edit){
   setTimeout(()=>{const t=document.getElementById("append"); if(t){t.value=edit; document.getElementById("run").scrollIntoView({block:"center"});}},50);
 }
 let BREAKS=[];
+// Paint the ⏹ marker on the ROWS whose real step is a breakpoint. Match by the
+// row's data-i (its index into `steps`), NOT the DOM enumeration order -- hidden
+// delegation rows and tree headers make those two disagree, so the old code put
+// the marker on the wrong row.
+function applyBreaks(){
+  document.querySelectorAll(".step").forEach(d=>{
+    const st=steps[+d.dataset.i];
+    d.classList.toggle("brk", !!st && BREAKS.includes(st.step));
+  });
+}
 async function setBreak(){
   const cond=document.getElementById("brk").value.trim();
-  document.querySelectorAll(".step").forEach(d=>d.classList.remove("brk"));
-  if(!cond){BREAKS=[];return;}
+  if(!cond){BREAKS=[]; applyBreaks(); return;}
   const r=await (await fetch("/api/breaks?cond="+encodeURIComponent(cond))).json();
   BREAKS=r.steps||[];
-  document.querySelectorAll(".step").forEach((d,i)=>d.classList.toggle("brk",BREAKS.includes(steps[i].step)));
+  applyBreaks();
   // jump to the next breakpoint at/after the current step
   const nxt=BREAKS.find(st=>{const i=steps.findIndex(s=>s.step===st);return i>=cur;});
   const tgt=nxt!=null?nxt:BREAKS[0];
