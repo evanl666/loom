@@ -577,10 +577,14 @@ class DebugSession:
     def __init__(self, trace_path: "str | None" = None, agent: Any = None,
                  copilot_model: str = "", live: Any = None):
         self.trace_path = trace_path
-        self.agent = agent
+        # A native live session holds its loom.Agent inside `live`; surface it so
+        # fork / dry-run / autofix work on a live native run too (an external live
+        # session has no .agent -> stays None -> proxy-fork path).
+        self.agent = agent if agent is not None else (
+            getattr(live, "agent", None) if live is not None else None)
         self.live = live  # a LiveSession -> self.data streams from a running agent
         # model the chat copilot talks to; falls back to the fork agent's model
-        self.copilot_model = copilot_model or (getattr(agent, "model", "") if agent else "")
+        self.copilot_model = copilot_model or (getattr(self.agent, "model", "") if self.agent else "")
         self.branches: list[dict] = []  # a tree of experiments (Git-branch-style)
         self.comments: list[dict] = []  # step annotations / root-cause labels
         self.macro: list[dict] = []     # recorded human debug actions -> a recipe
@@ -668,7 +672,9 @@ class DebugSession:
         from .trace import Run
 
         agent = self._agent_for(model, system, tools)
-        base = Run.load(self.trace_path, agent=agent)
+        # a live native run has no file on disk: fork its in-memory trace directly
+        base = (Run.from_dict(self.data, agent=agent) if self.live is not None
+                else Run.load(self.trace_path, agent=agent))
         if set_results:
             want = {int(k): v for k, v in set_results.items()}
             for e in base.log:
@@ -1729,7 +1735,13 @@ function computeOrd(){ORD={}; let n=0; steps.forEach((s,i)=>{if(!isHidden(s))ORD
 function ordOf(i){return ORD[i]!=null?ORD[i]:(steps[i]||{}).step;}
 function modelCallNames(s){
   if(s.step==null) return [];
-  const out=[]; for(const x of steps){ if(x.type==="call"&&x.requested_at===s.step&&x.tool) out.push(x.tool); }
+  const out=[];
+  for(const x of steps){
+    if(x.type!=="call"||!x.tool) continue;
+    // matched by requester, OR (older/handoff traces w/o requested_at) a call
+    // recorded at the SAME step as this model turn -- so no model row is blank.
+    if(x.requested_at===s.step || (x.requested_at==null && x.step===s.step)) out.push(x.tool);
+  }
   return out;
 }
 // A short, human snippet for a step row so NO row is a bare badge: the tool

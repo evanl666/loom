@@ -316,6 +316,31 @@ class Run:
         return run
 
     @classmethod
+    def from_dict(cls, data: dict, agent: "Any | None" = None) -> "Run":
+        """Build a Run from an in-memory trace dict (e.g. a live session's growing
+        trace) so it can be replayed/forked without round-tripping through a file.
+        The data is trusted (produced in-process), so no version/integrity check."""
+        log = [EffectEntry.from_dict(e) for e in (data.get("log") or []) if isinstance(e, dict)]
+        run = cls(
+            agent=agent,
+            recorder=Recorder.replay(log),
+            context=Context(),
+            prompt=data.get("prompt", ""),
+            output=data.get("output", ""),
+            truncated=data.get("truncated", False),
+            episodes=data.get("episodes"),
+            paused=data.get("paused", False),
+            pending=data.get("pending"),
+            pending_depth=data.get("pending_depth", 0),
+            stop_reason=data.get("stop_reason", ""),
+        )
+        run._loaded_tools = data.get("tools")
+        run._loaded_model = data.get("model")
+        run._loaded_system = data.get("system", "")
+        run.healed_by = data.get("healed_by")
+        return run
+
+    @classmethod
     def recover(
         cls,
         journal_path: str,
