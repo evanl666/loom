@@ -54,6 +54,11 @@ class LiveSession:
         self.output = ""
         self.turns = 0
         self._episodes: list[str] = []
+        # (wire_index_at_ask_start, prompt) per ask() on the proxy path, so a
+        # multi-turn live session shows each user message as its own dialogue
+        # turn (a proxy trace's raw "episodes" also holds internal tool-result
+        # turns, so it can't tell the real asks apart -- this can).
+        self._user_turns: list[list] = []
         self._log: list = []            # accumulated EffectEntry (native path)
         self._live_rec = None           # the Recorder/WireRecorder growing right now
         self._proxy = proxy
@@ -143,6 +148,8 @@ class LiveSession:
                 return False
             self.running = True
             self.error = ""
+            if self._proxy is not None:   # mark where this ask's wire begins
+                self._user_turns.append([len(self._proxy.recorder.wire), str(prompt)])
         threading.Thread(target=self._run, args=(str(prompt),), daemon=True).start()
         return True
 
@@ -181,7 +188,10 @@ class LiveSession:
     # -- the live trace + snapshot -----------------------------------------
     def trace(self) -> dict:
         if self._proxy is not None:
-            return self._proxy.recorder.to_dict()
+            d = self._proxy.recorder.to_dict()
+            if len(self._user_turns) > 1:   # multi-turn: let steps_for split by ask
+                d["user_turns"] = [list(t) for t in self._user_turns]
+            return d
         log = self._live_rec.log if self._live_rec is not None else self._log
         tools = {}
         for name, t in getattr(self.agent, "tools", {}).items():

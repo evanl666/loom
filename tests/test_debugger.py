@@ -268,3 +268,34 @@ def test_fork_injected_message_shows_as_a_node_in_the_branch():
     ci = next(i for i, s in enumerate(steps) if s.get("injected"))
     mi = next(i for i, s in enumerate(steps) if s.get("type") == "reason" and s.get("agent") == "Coordinator")
     assert ci < mi   # the injected turn comes before the model turn that saw it
+
+
+def test_live_multi_turn_shows_each_ask_as_its_own_dialogue_turn():
+    """A multi-turn live session records the wire index each ask() began at, so
+    steps_for splits the wire into one dialogue turn per ask -- every follow-up
+    user message shows AND its agents (same identity as turn 1) re-emit under it.
+    Regression: a follow-up ask's user message was dropped (episodes capped to
+    the first) and the whole run collapsed into one turn."""
+    import hashlib
+
+    def fp(system, tools):
+        return {"sys_hash": hashlib.sha1(system.encode()).hexdigest()[:12], "sys_head": system,
+                "sys_role": system.split(".")[0].replace("You are the ", ""), "tools": tools, "model": "m"}
+
+    def model(system, tools, seq, tcs=None, text=None):
+        res = {"tool_calls": tcs, "stop_reason": "tool_use"} if tcs else {"text": text or "", "stop_reason": "end_turn"}
+        return {"seq": seq, "kind": "model", "meta": fp(system, tools), "result": res}
+    C, W = "You are the Coordinator.", "You are the Worker."
+    data = {"recorded_via": "proxy", "model": "m", "output": "x", "tools": {},
+            "user_turns": [[0, "do the task"], [3, "what is 2+2?"]], "log": [
+        model(C, ["ask_worker"], 0, tcs=[{"id": "1", "name": "ask_worker", "input": {}}]),
+        model(W, [], 1, text="worker done"),
+        model(C, ["ask_worker"], 2, text="all done"),
+        model(C, ["ask_worker"], 3, text="2+2 = 4")]}
+    steps = steps_for(data)
+    users = [s for s in steps if s["type"] == "user"]
+    assert [u["intent"] for u in users] == ["do the task", "what is 2+2?"]   # both asks show
+    u2 = next(i for i, s in enumerate(steps) if s["type"] == "user" and "2+2" in s["intent"])
+    a2 = next(i for i, s in enumerate(steps) if s.get("intent") == "2+2 = 4")
+    w = next(i for i, s in enumerate(steps) if s.get("agent") == "Worker")
+    assert w < u2 < a2   # Worker stays in turn 1; the 2nd ask's answer is under the 2nd user node

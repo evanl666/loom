@@ -207,32 +207,61 @@ def steps_for(data: dict) -> list[dict]:
     # but the tree should read one whole agent at a time; a child's subtree nests
     # inline at the delegation that spawned it. Step NUMBERS still show true order.
     if ia["multi"]:
-        by_agent: dict = {}
-        for d in out:
-            # an injected user node belongs to its agent (nests inline); the root
-            # prompt / episode roots (plain user nodes) open the dialogue at top.
-            if d.get("type") != "user" or d.get("injected"):
+        work = [d for d in out if d.get("type") != "user" or d.get("injected")]
+
+        def _group(steps: list, opener: list) -> list:
+            """Depth-first: emit each agent's steps contiguously, a child's
+            subtree inline at the delegation that spawned it. ``opener`` is the
+            user turn(s) that head this segment."""
+            by_agent: dict = {}
+            for d in steps:
                 by_agent.setdefault(d.get("agent_id"), []).append(d)
-        user_nodes = [d for d in out if d.get("type") == "user" and not d.get("injected")]
-        seen_agents: set = set()
-        grouped: list = list(user_nodes[:1])  # the root prompt opens the dialogue
+            seen: set = set()
+            grouped = list(opener)
 
-        def _emit_agent(aid):
-            if aid in seen_agents:
-                return
-            seen_agents.add(aid)
-            for d in by_agent.get(aid, []):
-                grouped.append(d)
-                if d.get("is_delegation") and d.get("delegates_to"):
-                    _emit_agent(d["delegates_to"])
+            def _emit(aid):
+                if aid in seen or aid not in by_agent:
+                    return
+                seen.add(aid)
+                for d in by_agent[aid]:
+                    grouped.append(d)
+                    if d.get("is_delegation") and d.get("delegates_to"):
+                        _emit(d["delegates_to"])
 
-        root = next((d.get("agent_id") for d in out if d.get("type") != "user"), None)
-        if root is not None:
-            _emit_agent(root)
-        for aid in by_agent:            # any agent not reached via an edge (defensive)
-            _emit_agent(aid)
-        grouped.extend(user_nodes[1:])  # follow-up turns, if any
-        if len(grouped) == len(out):    # only adopt it if no step was dropped
+            root = next((d.get("agent_id") for d in steps), None)
+            if root is not None:
+                _emit(root)
+            for aid in by_agent:           # any agent not reached via an edge
+                _emit(aid)
+            return grouped
+
+        # A multi-turn LIVE session records the wire index where each ask()
+        # began; split the wire into one dialogue turn per ask so every follow-up
+        # user message shows AND its agents (same identity as turn 1) re-emit
+        # under it -- otherwise the whole run collapses into a single turn.
+        uturns = data.get("user_turns") if isinstance(data.get("user_turns"), list) else []
+        if len(uturns) > 1:
+            starts = [int(t[0]) for t in uturns]
+
+            def _seg(d):
+                turn = (d.get("replay") or {}).get("turn")
+                if turn is None:
+                    return 0
+                return max(k for k, s in enumerate(starts) if turn >= s) if turn >= starts[0] else 0
+
+            grouped = []
+            for k, t in enumerate(uturns):
+                seg = [d for d in work if _seg(d) == k]
+                grouped += _group(seg, [_user_node(str(t[1]))])
+            # adopt only if every work step survived (user-node COUNT differs:
+            # one prompt node in `out`, one per ask here).
+            ok = len([d for d in grouped if d.get("type") != "user" or d.get("injected")]) == len(work)
+        else:
+            user_nodes = [d for d in out if d.get("type") == "user" and not d.get("injected")]
+            grouped = _group(work, list(user_nodes[:1]))
+            grouped.extend(user_nodes[1:])   # follow-up turns, if any
+            ok = len(grouped) == len(out)    # no step dropped
+        if ok:
             out = grouped
     return out
 
