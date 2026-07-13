@@ -45,8 +45,15 @@ class RemoteAgentPack(Pack):
             reversible=False)
 
     def debugger_panels(self, action: Action, trace: dict) -> "list[dict]":
+        # Only for ACTUAL remote-agent calls -- the framework calls this hook for
+        # every step, so a pack must gate on the action it owns (otherwise the
+        # panel stamps "remote agent call" onto every ordinary tool step).
+        if not self.owns(action):
+            return []
         ep = trace.get("endpoint") or ""
-        transport = trace.get("transport") or "http"
+        # Don't fabricate a transport: show the declared one, else say so, rather
+        # than claiming "http" for a call whose transport we don't actually know.
+        transport = trace.get("transport") or "(not declared)"
         text = f"transport: {transport}" + (f"\nendpoint: {ep}" if ep else "")
         prompt = (action.input or {}).get("prompt") if isinstance(action.input, dict) else None
         if prompt:

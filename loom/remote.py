@@ -36,7 +36,7 @@ REMOTE_CAPS = ["network", "remote_agent"]
 
 class RemoteAgent:
     def __init__(self, name: str, call: "Callable[[str], str]",
-                 transport: str = "http", endpoint: str = ""):
+                 transport: str = "", endpoint: str = ""):
         self.name = name
         self._call = call
         self.transport = transport
@@ -58,7 +58,7 @@ class RemoteAgent:
             return call(prompt)
 
         _remote.description = (f"Delegate to the remote '{name}' agent over "
-                               f"{transport}{(' at ' + endpoint) if endpoint else ''}.")
+                               f"{transport or 'the network'}{(' at ' + endpoint) if endpoint else ''}.")
         return _remote
 
     def call(self, prompt: str) -> str:
