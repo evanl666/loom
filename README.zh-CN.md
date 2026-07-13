@@ -23,7 +23,8 @@ recorded 17 steps · 42k tokens → session.loom.json
 🔬 loom debug session.loom.json   # 单步走一遍,任意一步都能 fork 重跑
 ```
 
-<p align="center"><img src="docs/demo.gif" alt="Loom 15 秒:录制 → 溯源 → 根因 → 回放 → studio" width="840"></p>
+<p align="center"><img src="docs/demo.gif" alt="Loom 单步调试器:走一遍多智能体运行 —— 推理、工具、模型真实看到的上下文,任意一步 fork 重跑" width="900"></p>
+<p align="center"><i>单步走完任何 agent 的运行 —— 推理、工具调用、模型这一步真实看到的上下文,任意一步都能 fork 重跑。</i></p>
 
 ---
 
@@ -42,8 +43,6 @@ recorded 17 steps · 42k tokens → session.loom.json
 ## 调试器
 
 `loom debug run.loom.json`(或用 `loom live` 边跑边看)在浏览器里打开一个单步调试器:
-
-<p align="center"><img src="docs/debugger.png" alt="Loom 调试器:多智能体运行的步骤树" width="900"></p>
 
 - **单步**走每个动作 —— 模型的推理、工具调用 + 参数、世界差异(文件 / SQL 行 / DOM)、风险、token。
 - **上下文帧** —— 模型在这一步真实看到的对话:相当于调试器的**调用栈 & 变量**。
