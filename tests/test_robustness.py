@@ -63,3 +63,97 @@ def test_effectentry_from_dict_tolerates_missing_keys():
     for d in [{}, {"seq": 3}, {"kind": "model"}, {"result": {"text": "hi"}}]:
         e = EffectEntry.from_dict(d)  # must not raise
         assert isinstance(e.seq, int) and isinstance(e.kind, str)
+
+
+# --- complex / adversarial shapes (not just missing keys) --------------------
+def _m(seq, sys, tools, tcs=None, text=""):
+    import hashlib
+    return {"seq": seq, "kind": "model", "depth": 0,
+            "meta": {"sys_hash": hashlib.sha1(sys.encode()).hexdigest()[:12],
+                     "sys_head": sys, "tools": tools, "msgs": seq + 1},
+            "result": {"text": text, "tool_calls": tcs or [],
+                       "stop_reason": "tool_use" if tcs else "end_turn"}}
+
+
+def _parallel_same_name_out_of_order(n=10):
+    """n parallel Read calls whose results are recorded in REVERSE order -- the
+    tuid-attribution path at scale."""
+    calls = [{"id": f"t{i}", "name": "Read", "input": {"file": f"f{i}.py"}} for i in range(n)]
+    log = [_m(0, "agent", ["Read"], tcs=calls)]
+    for i in reversed(range(n)):   # results out of call order
+        log.append({"seq": len(log), "kind": "tool:Read", "depth": 0,
+                    "result": f"content-{i}", "meta": {"tuid": f"t{i}"}})
+    log.append(_m(len(log), "agent", ["Read"], text="done"))
+    return {"recorded_via": "proxy", "log": log, "episodes": ["do it"], "output": "done",
+            "systems": {}, "model": "m"}
+
+
+def _self_delegation():
+    """An agent whose tool call names ITSELF (circular) must not infinite-loop."""
+    return {"recorded_via": "proxy", "episodes": ["x"], "output": "y", "model": "m", "log": [
+        _m(0, "You are the Coordinator.", ["ask_coordinator"],
+           tcs=[{"id": "c1", "name": "ask_coordinator", "input": {}}]),
+        {"seq": 1, "kind": "tool:ask_coordinator", "depth": 0, "result": "looped"},
+        _m(2, "You are the Coordinator.", ["ask_coordinator"], text="done"),
+    ]}
+
+
+def _deep_nesting(depth=8):
+    """A chain of `depth` distinct sub-agents each delegating one level deeper."""
+    log = []
+    for i in range(depth):
+        log.append(_m(len(log), f"You are agent level {i}.", [f"ask_{i+1}"],
+                      tcs=[{"id": f"d{i}", "name": f"ask_{i+1}", "input": {}}]))
+        log.append({"seq": len(log), "kind": f"tool:ask_{i+1}", "depth": 0, "result": "ok"})
+    log.append(_m(len(log), f"You are agent level {depth}.", [], text="bottom"))
+    return {"recorded_via": "proxy", "episodes": ["go"], "output": "bottom", "systems": {}, "log": log, "model": "m"}
+
+
+def _unicode_and_control():
+    weird = "日本語 🔥\x00\x07\x1b[31m <script>alert(1)</script> " + "🎉" * 500
+    return {"recorded_via": "proxy", "episodes": [weird], "output": weird, "model": "m", "systems": {}, "log": [
+        _m(0, "agent", ["t"], tcs=[{"id": "u", "name": "t", "input": {"q": weird}}]),
+        {"seq": 1, "kind": "tool:t", "depth": 0, "result": weird, "meta": {"tuid": "u"}},
+        _m(2, "agent", ["t"], text=weird),
+    ]}
+
+
+def _orphan_tool_result():
+    """A tool_result whose tool_use_id matches no call must not crash attribution."""
+    return {"recorded_via": "proxy", "episodes": ["x"], "output": "d", "model": "m", "systems": {}, "log": [
+        _m(0, "agent", ["Read"], tcs=[{"id": "real", "name": "Read", "input": {}}]),
+        {"seq": 1, "kind": "tool:Read", "depth": 0, "result": "r", "meta": {"tuid": "GHOST"}},
+        _m(2, "agent", ["Read"], text="d"),
+    ]}
+
+
+COMPLEX = [_parallel_same_name_out_of_order(), _self_delegation(), _deep_nesting(),
+           _unicode_and_control(), _orphan_tool_result()]
+
+
+@pytest.mark.parametrize("data", COMPLEX)
+def test_debugger_surfaces_survive_complex_adversarial_traces(data):
+    """steps_for / infer_agents / context_at / static_page + every analyzer must
+    handle complex adversarial shapes without raising or hanging."""
+    from loom.debugger import context_at, static_page, steps_for
+    from loom.multiagent import infer_agents
+
+    steps = steps_for(data)
+    assert isinstance(steps, list)
+    ia = infer_agents(data)
+    assert isinstance(ia["agents"], list)
+    context_at(data, 0)
+    context_at(data, 10_000)
+    static_page(data)                    # must produce a page, not crash
+    for fn in ANALYZERS:
+        fn(data)
+
+
+def test_parallel_same_name_results_bind_by_id_at_scale():
+    """The 张冠李戴 fix holds at scale: 10 Reads, results reversed -> each binds to
+    its own file by tuid."""
+    from loom.action import actions
+    data = _parallel_same_name_out_of_order(10)
+    by_file = {a.input["file"]: a.observation.text
+               for a in actions(data) if a.type == "call"}
+    assert by_file == {f"f{i}.py": f"content-{i}" for i in range(10)}

@@ -37,7 +37,11 @@ def verify_trace(path: str) -> list[str]:
     if not data.get("paused"):
         model_entries = [e for e in log if e.get("kind") == "model"]
         if model_entries:
-            final = ModelResponse.from_dict(model_entries[-1]["result"]).text
+            # Match the recorder: output is the last NON-EMPTY model text. A run
+            # can end on a text-less call (a handoff hand-back, a terminal tool_use),
+            # which must not count as "the final answer".
+            texts = [ModelResponse.from_dict(e["result"]).text for e in model_entries]
+            final = next((t for t in reversed(texts) if t), "")
             if final != data.get("output", ""):
                 problems.append("stored output does not match the final model text")
 
