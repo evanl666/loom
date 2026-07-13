@@ -1053,6 +1053,10 @@ class _Handler(BaseHTTPRequestHandler):
                 "can_dryrun": sess.agent is not None,   # needs the native tool functions
                 "can_chat": bool(sess.copilot_model),
                 "live": sess.live is not None,
+                # an EXTERNAL live session re-runs the adapter fresh per ask (no .agent
+                # we hold), so the model does NOT carry history across turns -- the UI
+                # scopes "context the model saw" to the current turn for these.
+                "stateless": bool(sess.live is not None and sess.agent is None),
                 "running": bool(sess.live and sess.live.running),
                 "system": (getattr(sess.agent, "system", "") if sess.agent
                            else sess.data.get("system", "")),
@@ -2095,7 +2099,13 @@ function agentFrame(s){
       .map(k=>inp[k]).find(v=>typeof v==="string"&&v.trim());
     frame.push({role:"task",content:task||"(this sub-agent's task was delegated by its parent)",step:-1});
   }
-  for(let j=0;j<cur;j++){            // this agent's OWN prior steps, in order
+  // A STATELESS external agent re-runs fresh each ask -- it did NOT carry earlier
+  // turns into this one -- so scope the frame to the CURRENT dialogue turn (from
+  // the most recent user message). A native agent replays its history, so it
+  // genuinely saw the whole conversation: keep the full accumulation for it.
+  let start=0;
+  if(RUN.stateless){ for(let j=cur;j>=0;j--){ const y=steps[j]; if(y&&y.type==="user"&&!y.injected){start=j;break;} } }
+  for(let j=start;j<cur;j++){        // this agent's OWN prior steps, in order
     const x=steps[j];
     // A dialogue turn (a plain user node) belongs to every TOP-LEVEL agent's
     // conversation -- including every FOLLOW-UP ask, not just the opening prompt.
