@@ -246,8 +246,12 @@ def request_sys_hash(request: dict) -> str:
 def request_fingerprint(request: dict) -> str:
     """A stable content key for a model request: (system, message digest, tools).
     Two requests with the same key are the same logical call -- lets a fork match
-    a re-run's request to the recorded exchange it reproduces, order-independent."""
-    blob = json.dumps({"s": _wire_read_system(request),
+    a re-run's request to the recorded exchange it reproduces, order-independent.
+    The system is NORMALIZED (like request_sys_hash / _fingerprint): a CLI that
+    stamps a per-call token (Claude's cc_version) would otherwise give the SAME
+    logical call a different key on every run -- so the fork's prefix never replays
+    and the inject-point key never matches, silently no-op'ing the injection."""
+    blob = json.dumps({"s": _norm_system(_wire_read_system(request)),
                        "m": _wire_messages_digest(request),
                        "t": _wire_tool_names(request)}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:16]
@@ -1154,6 +1158,12 @@ class _Handler(BaseHTTPRequestHandler):
                 is_inject = key == fk.get("inject_key") and not fk.get("_injected")
                 if is_inject:
                     fk["_injected"] = True
+            if os.environ.get("LOOM_FORK_DEBUG"):
+                import sys as _sys
+                print(f"[fork] key={key} inject_key={fk.get('inject_key')} "
+                      f"prefix_hit={replayed is not None} is_inject={is_inject} "
+                      f"_injected={fk.get('_injected')} sys_hash={request_sys_hash(request)} "
+                      f"inject_sys_hash={fk.get('inject_sys_hash')}", file=_sys.stderr, flush=True)
             if replayed is not None and not is_inject:
                 self.server.persist(request, replayed, [])   # recorded prefix, free
                 if wants_stream:

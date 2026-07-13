@@ -945,3 +945,20 @@ def test_injection_persists_across_an_external_agents_later_turns():
     other = {"system": "You are agent B.", "messages": [{"role": "user", "content": "hi"}]}
     _apply_fork_edits(other, fk, is_inject=False, path="/v1/messages")
     assert other["messages"][-1]["content"] == "hi"
+
+
+def test_request_fingerprint_stable_across_a_per_call_version_token():
+    """Regression: the Claude CLI stamps a changing cc_version into the system, so
+    the SAME logical call got a different request_fingerprint each run -- the fork
+    prefix never replayed and the inject-point key never matched, so the injection
+    silently no-op'd. The fingerprint must ignore that volatile token."""
+    from loom.proxy import request_fingerprint
+
+    def req(ver):
+        return {"system": f"x-anthropic-billing-header: cc_version=2.1.207.{ver};"
+                          "You are a Claude agent.",
+                "messages": [{"role": "user", "content": "hi"}]}
+    assert request_fingerprint(req("baf")) == request_fingerprint(req("5fe"))
+    # a genuinely different system still gets a different key
+    assert request_fingerprint(req("baf")) != request_fingerprint(
+        {"system": "You are a DIFFERENT agent.", "messages": [{"role": "user", "content": "hi"}]})
