@@ -1883,9 +1883,9 @@ def _cmd_live(args: argparse.Namespace) -> int:
     from .livesession import LiveSession, start_proxy
 
     sys.path.insert(0, os.getcwd())
-    module_name, _, attr = args.agent.partition(":")
-    if not attr:
-        raise CLIError("--agent must look like module:attr")
+    trigger = getattr(args, "trigger", "")
+    if not trigger and not args.agent:
+        raise CLIError("give --agent module:attr OR --trigger '<shell command>'")
 
     # Start the proxy + set ANTHROPIC_BASE_URL BEFORE importing the module, so a
     # framework that builds its model client at import time is captured. A FIXED
@@ -1897,20 +1897,40 @@ def _cmd_live(args: argparse.Namespace) -> int:
         print(f"  recording proxy: {base}", file=sys.stderr)
         print(f"  -> start your remote agent server with ANTHROPIC_BASE_URL={base} "
               f"(OpenAI: OPENAI_BASE_URL={base}/v1)", file=sys.stderr)
-    try:
-        obj = getattr(importlib.import_module(module_name), attr)
-    except (ImportError, AttributeError) as e:
-        raise CLIError(f"could not load {args.agent!r}: {e}")
 
-    if hasattr(obj, "run") and hasattr(obj, "tools"):
-        live = LiveSession(agent=obj)          # a native loom.Agent
-        kind = "loom.Agent"
-    elif callable(obj):
-        # spec + target let an external agent be proxy-forked (re-run with edits)
-        live = LiveSession(func=obj, proxy=proxy, spec=args.agent, target=args.target)
-        kind = "external adapter (proxied)"
+    if trigger:
+        # --trigger '<shell cmd>': the Ask box runs this command per message (the
+        # prompt as $LOOM_PROMPT, JSON-escaped as $LOOM_PROMPT_JSON), stdout is the
+        # answer. No Python file needed -- e.g. a grpcurl / curl one-liner.
+        import subprocess
+
+        def _run_trigger(prompt: str, _cmd=trigger) -> str:
+            env = {**os.environ, "LOOM_PROMPT": prompt, "LOOM_PROMPT_JSON": json.dumps(prompt)}
+            r = subprocess.run(_cmd, shell=True, env=env, capture_output=True,
+                               text=True, timeout=600)
+            if r.returncode != 0:
+                return (r.stderr or r.stdout or "trigger command failed").strip()
+            return (r.stdout or "").strip()
+
+        live = LiveSession(func=_run_trigger, proxy=proxy, spec="", target=args.target)
+        kind = "trigger command (proxied)"
     else:
-        raise CLIError(f"{args.agent!r} is neither a loom.Agent nor a callable(prompt)")
+        module_name, _, attr = args.agent.partition(":")
+        if not attr:
+            raise CLIError("--agent must look like module:attr")
+        try:
+            obj = getattr(importlib.import_module(module_name), attr)
+        except (ImportError, AttributeError) as e:
+            raise CLIError(f"could not load {args.agent!r}: {e}")
+        if hasattr(obj, "run") and hasattr(obj, "tools"):
+            live = LiveSession(agent=obj)          # a native loom.Agent
+            kind = "loom.Agent"
+        elif callable(obj):
+            # spec + target let an external agent be proxy-forked (re-run with edits)
+            live = LiveSession(func=obj, proxy=proxy, spec=args.agent, target=args.target)
+            kind = "external adapter (proxied)"
+        else:
+            raise CLIError(f"{args.agent!r} is neither a loom.Agent nor a callable(prompt)")
 
     server = DebugServer(port=args.port, host=args.host,
                          copilot_model=args.copilot_model, live=live)
@@ -3816,8 +3836,12 @@ def build_parser() -> argparse.ArgumentParser:
     db.set_defaults(func=_cmd_debug)
 
     lv = sub.add_parser("live", help="run an agent LIVE with the debugger open: watch steps stream + ask follow-ups")
-    lv.add_argument("--agent", required=True,
+    lv.add_argument("--agent", default="",
                     help="module:attr -- a loom.Agent OR a callable ask(prompt) adapter (LangGraph/Claude-SDK/...)")
+    lv.add_argument("--trigger", default="",
+                    help="instead of --agent: a shell command the Ask box runs per message "
+                         "(prompt as $LOOM_PROMPT / $LOOM_PROMPT_JSON, stdout = answer) -- e.g. a "
+                         "grpcurl one-liner. Pair with --proxy-port for a remote agent.")
     lv.add_argument("--prompt", default="", help="an initial prompt to kick off (optional)")
     lv.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream model API for external adapters (proxied)")
