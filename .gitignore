@@ -33,6 +33,7 @@ htmlcov/
 
 # CI fixture traces are committed on purpose
 !examples/ci/traces/*.loom.json
+!tests/fixtures/frameworks/*.loom.json
 examples/flight-recorder/artifacts/
 .loom-lake.db
 lake.html

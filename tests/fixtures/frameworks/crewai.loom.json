@@ -1,0 +1,216 @@
+{
+  "version": 2,
+  "recorded_via": "proxy",
+  "model": "claude-haiku-4-5-20251001",
+  "system": "You are Crew Manager. You are a seasoned manager with a knack for getting the best out of your team.\nYou are also known for your ability to delegate work to the right people, and to ask the right questions to get the best out of your team.\nEven though you don't perform tasks by yourself, you have a lot of experience in the field, which allows you to properly evaluate the work of your team members.\nYour personal goal is: Manage the team to complete the task in the best way possible.",
+  "prompt": "\nCurrent Task: Find the Eiffel Tower's height, multiply it by 3, then write a one-sentence summary of both numbers.\n\nThis is the expected criteria for your final answer: One sentence stating the height and the tripled height.\nyou MUST return the actual complete content as the final answer, not a summary.",
+  "episodes": [
+    "\nCurrent Task: Find the Eiffel Tower's height, multiply it by 3, then write a one-sentence summary of both numbers.\n\nThis is the expected criteria for your final answer: One sentence stating the height and the tripled height.\nyou MUST return the actual complete content as the final answer, not a summary."
+  ],
+  "output": "Perfect! Here is the final answer:\n\n**The Eiffel Tower stands at approximately 330 meters tall, which when multiplied by 3 equals 990 meters.**",
+  "truncated": false,
+  "paused": false,
+  "pending": null,
+  "pending_depth": 0,
+  "stop_reason": "",
+  "log": [
+    {
+      "seq": 0,
+      "kind": "model",
+      "key": "abda62128b13",
+      "result": {
+        "text": "I'll help you complete this task. Let me delegate this to the Report Writer who can research the Eiffel Tower's height and create the summary.",
+        "tool_calls": [
+          {
+            "id": "toolu_01BiiM6DMSSQe2PTbR9wq9ha",
+            "name": "delegate_work_to_coworker",
+            "input": {
+              "task": "Find the Eiffel Tower's height, multiply it by 3, then write a one-sentence summary of both numbers",
+              "context": "The task requires:\n1. Finding the actual height of the Eiffel Tower in meters (or feet)\n2. Multiplying that height by 3\n3. Writing one complete sentence that states both the original height and the tripled height\n\nThe final answer must be one sentence containing both the original height and the tripled height. For example, if the height were 100 meters, the sentence should mention both 100 meters and 300 meters in a single sentence.\n\nPlease provide the complete sentence as the final answer.",
+              "coworker": "Report Writer"
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {
+          "input_tokens": 1076,
+          "output_tokens": 268
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "3f057fc22742",
+        "sys_head": "You are Crew Manager. You are a seasoned manager with a knack for getting the best out of your team.\nYou are also known for your ability to delegate work to the",
+        "tools": [
+          "ask_question_to_coworker",
+          "delegate_work_to_coworker"
+        ],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Crew Manager"
+      }
+    },
+    {
+      "seq": 1,
+      "kind": "model",
+      "key": "6cede8233540",
+      "result": {
+        "text": "The Eiffel Tower stands at approximately 330 meters tall, which when multiplied by 3 equals 990 meters.",
+        "tool_calls": [],
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 249,
+          "output_tokens": 32
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "52574173c0a2",
+        "sys_head": "You are Report Writer. You write crisp, single-sentence summaries.\nYour personal goal is: Write a one-sentence summary from given facts.",
+        "tools": [],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Report Writer"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "tool:delegate_work_to_coworker",
+      "key": "3754edd9a7b2",
+      "result": "The Eiffel Tower stands at approximately 330 meters tall, which when multiplied by 3 equals 990 meters.",
+      "depth": 0
+    },
+    {
+      "seq": 3,
+      "kind": "model",
+      "key": "3ce9cae5e5cb",
+      "result": {
+        "text": "Perfect! Here is the final answer:\n\n**The Eiffel Tower stands at approximately 330 meters tall, which when multiplied by 3 equals 990 meters.**",
+        "tool_calls": [],
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 1350,
+          "output_tokens": 42
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "3f057fc22742",
+        "sys_head": "You are Crew Manager. You are a seasoned manager with a knack for getting the best out of your team.\nYou are also known for your ability to delegate work to the",
+        "tools": [
+          "ask_question_to_coworker",
+          "delegate_work_to_coworker"
+        ],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Crew Manager"
+      }
+    }
+  ],
+  "wire": [
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CctoY4F5sM9R6i7G5UDmZ",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I'll help you complete this task. Let me delegate this to the Report Writer who can research the Eiffel Tower's height and create the summary."
+        },
+        {
+          "type": "tool_use",
+          "id": "toolu_01BiiM6DMSSQe2PTbR9wq9ha",
+          "name": "delegate_work_to_coworker",
+          "input": {
+            "task": "Find the Eiffel Tower's height, multiply it by 3, then write a one-sentence summary of both numbers",
+            "context": "The task requires:\n1. Finding the actual height of the Eiffel Tower in meters (or feet)\n2. Multiplying that height by 3\n3. Writing one complete sentence that states both the original height and the tripled height\n\nThe final answer must be one sentence containing both the original height and the tripled height. For example, if the height were 100 meters, the sentence should mention both 100 meters and 300 meters in a single sentence.\n\nPlease provide the complete sentence as the final answer.",
+            "coworker": "Report Writer"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 1076,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 268,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CctoYHs8ypZPiqHgi3gvv",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The Eiffel Tower stands at approximately 330 meters tall, which when multiplied by 3 equals 990 meters."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 249,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 32,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CctoYN9Mm4zRn3Y2jacPX",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Perfect! Here is the final answer:\n\n**The Eiffel Tower stands at approximately 330 meters tall, which when multiplied by 3 equals 990 meters.**"
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 1350,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 42,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    }
+  ],
+  "shield_events": [],
+  "workspace": {
+    "cwd": "/Users/evan/loom-mafw-demo",
+    "os": "Darwin 25.5.0",
+    "python": "3.13.11",
+    "recorded_at": "2026-07-10T17:51:57+00:00",
+    "argv": [
+      "/Users/evan/crewai-venv/bin/python",
+      "crewai_crew.py"
+    ],
+    "dialect": "anthropic"
+  },
+  "checksum": "sha256:86d2bab9da670e84c74d63c3ab99e4c4eac422141f0af2ede1f6ab80ffa66a6a"
+}

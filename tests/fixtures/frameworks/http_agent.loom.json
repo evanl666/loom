@@ -1,0 +1,278 @@
+{
+  "version": 2,
+  "recorded_via": "proxy",
+  "model": "claude-haiku-4-5-20251001",
+  "system": "You are the Coordinator. Delegate to the Research Lead and the Support Lead as needed, then summarize. Be terse.",
+  "prompt": "Use the research team to find the Eiffel Tower height.",
+  "episodes": [
+    "Use the research team to find the Eiffel Tower height."
+  ],
+  "output": "**Summary:** The Eiffel Tower is 330 meters (1,083 feet) tall.",
+  "truncated": false,
+  "paused": false,
+  "pending": null,
+  "pending_depth": 0,
+  "stop_reason": "",
+  "log": [
+    {
+      "seq": 0,
+      "kind": "model",
+      "key": "abda62128b13",
+      "result": {
+        "text": "",
+        "tool_calls": [
+          {
+            "id": "toolu_01EZ7rUMu2swxwv6v5m1N2j8",
+            "name": "ask_research",
+            "input": {
+              "task": "Find the height of the Eiffel Tower"
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {
+          "input_tokens": 663,
+          "output_tokens": 63
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "281af2c074dd",
+        "sys_head": "You are the Coordinator. Delegate to the Research Lead and the Support Lead as needed, then summarize. Be terse.",
+        "tools": [
+          "ask_research",
+          "ask_support"
+        ],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Coordinator"
+      }
+    },
+    {
+      "seq": 1,
+      "kind": "model",
+      "key": "6cede8233540",
+      "result": {
+        "text": "",
+        "tool_calls": [
+          {
+            "id": "toolu_01FkQMqigERzMZduLPcRCVU6",
+            "name": "web_search",
+            "input": {
+              "query": "height of Eiffel Tower"
+            }
+          }
+        ],
+        "stop_reason": "tool_use",
+        "usage": {
+          "input_tokens": 657,
+          "output_tokens": 60
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "ea3bfac974a5",
+        "sys_head": "You are the Research Lead. Use web_search for facts and delegate math to ask_data_analyst. Be terse.",
+        "tools": [
+          "ask_data_analyst",
+          "web_search"
+        ],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Research Lead"
+      }
+    },
+    {
+      "seq": 2,
+      "kind": "tool:web_search",
+      "key": "50d5d34eb7e0",
+      "result": "The Eiffel Tower is 330 meters tall.",
+      "depth": 0
+    },
+    {
+      "seq": 3,
+      "kind": "model",
+      "key": "3ce9cae5e5cb",
+      "result": {
+        "text": "The Eiffel Tower is **330 meters** (1,083 feet) tall.",
+        "tool_calls": [],
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 741,
+          "output_tokens": 24
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "ea3bfac974a5",
+        "sys_head": "You are the Research Lead. Use web_search for facts and delegate math to ask_data_analyst. Be terse.",
+        "tools": [
+          "ask_data_analyst",
+          "web_search"
+        ],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Research Lead"
+      }
+    },
+    {
+      "seq": 4,
+      "kind": "model",
+      "key": "788e0318f08e",
+      "result": {
+        "text": "**Summary:** The Eiffel Tower is 330 meters (1,083 feet) tall.",
+        "tool_calls": [],
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 758,
+          "output_tokens": 26
+        }
+      },
+      "depth": 0,
+      "meta": {
+        "sys_hash": "281af2c074dd",
+        "sys_head": "You are the Coordinator. Delegate to the Research Lead and the Support Lead as needed, then summarize. Be terse.",
+        "tools": [
+          "ask_research",
+          "ask_support"
+        ],
+        "model": "claude-haiku-4-5-20251001",
+        "sys_role": "Coordinator"
+      }
+    }
+  ],
+  "wire": [
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CctofL62dUbggRzLYDrae",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01EZ7rUMu2swxwv6v5m1N2j8",
+          "name": "ask_research",
+          "input": {
+            "task": "Find the height of the Eiffel Tower"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 663,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 63,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CctofPmHRYo5CD6ivjk8z",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "tool_use",
+          "id": "toolu_01FkQMqigERzMZduLPcRCVU6",
+          "name": "web_search",
+          "input": {
+            "query": "height of Eiffel Tower"
+          },
+          "caller": {
+            "type": "direct"
+          }
+        }
+      ],
+      "stop_reason": "tool_use",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 657,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 60,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011CctofU5zTJVdD7sGeuBCd",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "The Eiffel Tower is **330 meters** (1,083 feet) tall."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 741,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 24,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "id": "msg_011Cctofa88b4TvuG4vyBTBJ",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "**Summary:** The Eiffel Tower is 330 meters (1,083 feet) tall."
+        }
+      ],
+      "stop_reason": "end_turn",
+      "stop_sequence": null,
+      "stop_details": null,
+      "usage": {
+        "input_tokens": 758,
+        "cache_creation_input_tokens": 0,
+        "cache_read_input_tokens": 0,
+        "cache_creation": {
+          "ephemeral_5m_input_tokens": 0,
+          "ephemeral_1h_input_tokens": 0
+        },
+        "output_tokens": 26,
+        "service_tier": "standard",
+        "inference_geo": "not_available"
+      }
+    }
+  ],
+  "shield_events": [],
+  "workspace": {
+    "cwd": "/Users/evan/loom-mafw-demo",
+    "os": "Darwin 25.5.0",
+    "python": "3.13.11",
+    "recorded_at": "2026-07-10T17:54:02+00:00",
+    "argv": [
+      "/Users/evan/workspace/agent/loom-agent/.venv/bin/python",
+      "serve_agent.py"
+    ],
+    "dialect": "anthropic"
+  },
+  "checksum": "sha256:72031b7c713faffe517def96f1f4ba7f18a71bdc5d08eeda9dbe230607f569a7"
+}
