@@ -25,6 +25,8 @@ recorded 17 steps · 42k tokens → session.loom.json
 🔬 loom debug session.loom.json   # step through it, fork any turn live
 ```
 
+<p align="center"><img src="docs/demo.gif" alt="Loom in 15 seconds: record → taint → root cause → replay → studio" width="840"></p>
+
 ---
 
 ## Why Loom
@@ -42,6 +44,8 @@ recorded 17 steps · 42k tokens → session.loom.json
 ## The debugger
 
 `loom debug run.loom.json` (or `loom live` to watch it run) opens a step-debugger in your browser:
+
+<p align="center"><img src="docs/debugger.png" alt="The Loom debugger: a multi-agent run as a step tree" width="900"></p>
 
 - **Step** through every action — the model's reasoning, the tool call + args, the world-diff (file / SQL row / DOM), risk, tokens.
 - **Context frame** — the exact conversation the model saw at each step: the debugger's *stack & variables*.
