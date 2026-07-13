@@ -2003,7 +2003,6 @@ function renderDetail(){
       </details>
     </div>
     <button id="run">▶ Fork &amp; Run live</button>
-    <button id="autofix" class="fault" title="try several canned fixes and compare">🔧 Auto-fix (try several)</button>
     <div id="branch"></div>
   </div>`;
   if(!canFork&&forkable) h+=`<div class="k muted">re-run disabled — start with <kbd>--agent module:attr</kbd> to fork live</div>`;
@@ -2018,7 +2017,6 @@ function renderDetail(){
     select(t>=0?t:j);
   });
   const rb=document.getElementById("run"); if(rb) rb.onclick=doFork;
-  const af=document.getElementById("autofix"); if(af) af.onclick=doAutoFix;
   const cb=document.getElementById("ctxbtn"); if(cb) cb.onclick=loadContext;
   const fr=document.getElementById("faultrun"); if(fr) fr.onclick=faultInject;
   loadPanels(s.step);
@@ -2133,20 +2131,6 @@ async function faultInject(){
     }
   }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
   finally{btn.disabled=false; btn.innerHTML="🧪 Inject &amp; re-run from here";}
-}
-async function doAutoFix(){
-  const s=steps[cur], at=(s.replay||{}).turn;
-  const btn=document.getElementById("autofix"), bx=document.getElementById("branch");
-  btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> trying fixes…'; bx.innerHTML="";
-  try{
-    const r=await fetch("/api/autofix?at="+at); const res=await r.json();
-    if(!r.ok){bx.innerHTML=`<pre class="risky">${E(res.error||"failed")}</pre>`;}
-    else{
-      bx.innerHTML=`<div class="branchhead">🔧 auto-fix results (best first)</div>`+res.fixes.map((f,i)=>
-        `<div class="bnode">${i===0?"🏆 ":""}<b>${E(f.fix)}</b> ${f.error?`<span class="risky">${E(f.error)}</span>`:`<span class="bmeta">score ${f.score} · ${(f.tokens||0).toLocaleString()} tok</span><div class="muted">${E(f.output||"")}</div>`}</div>`).join("");
-    }
-  }catch(e){bx.innerHTML=`<pre class="risky">${E(e)}</pre>`;}
-  finally{btn.disabled=false; btn.innerHTML="🔧 Auto-fix (try several)";}
 }
 async function doFork(){
   const s=steps[cur], at=(s.replay||{}).turn;
