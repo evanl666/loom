@@ -362,3 +362,17 @@ def test_ai_root_cause_finds_semantic_error_and_snaps_to_valid_step():
     # 'NONE' -> the run looks fine
     r3 = ai_root_cause(data, _M("STEP: NONE\nCONFIDENCE: high\nWHY: looks correct"))
     assert r3["found"] is False
+
+
+def test_steps_for_attaches_message_count_for_context_scoping():
+    """steps_for attaches meta.msgs (the message COUNT the model saw) to each model
+    step, so the UI can tell whether a follow-up turn carried history (stateful) or
+    started fresh (stateless) -- from ground truth, not a guess about the framework."""
+    data = {"recorded_via": "proxy", "model": "m", "output": "x", "tools": {}, "log": [
+        {"seq": 0, "kind": "model", "meta": {"msgs": 1, "sys_head": "c", "tools": []},
+         "result": {"text": "hi", "stop_reason": "end_turn"}},
+        {"seq": 1, "kind": "model", "meta": {"msgs": 9, "sys_head": "c", "tools": []},
+         "result": {"text": "with history", "stop_reason": "end_turn"}}]}
+    steps = steps_for(data)
+    model_steps = [s for s in steps if s["type"] in ("reason", "answer")]
+    assert model_steps[0]["msgs"] == 1 and model_steps[1]["msgs"] == 9

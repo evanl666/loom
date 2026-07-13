@@ -62,12 +62,19 @@ def steps_for(data: dict) -> list[dict]:
                 "observation": {"text": str(text)}, "nest": 0,
                 **({"agent": "you", "agent_id": "user", "agent_color": 3} if ia["multi"] else {})}
 
+    # message COUNT the model saw at each call (meta.msgs) -- the ground-truth
+    # signal for whether a turn carried prior history (stateful) or started fresh.
+    msgs_by_seq = {e.get("seq"): (e.get("meta") or {}).get("msgs")
+                   for e in (data.get("log") or [])
+                   if isinstance(e, dict) and e.get("kind") == "model"}
     out = []
     ep_i = 0
     if episodes:
         out.append(_user_node(episodes[0])); ep_i = 1
     for idx, a in enumerate(acts):
         d = a.to_dict()
+        if a.step in msgs_by_seq and msgs_by_seq[a.step] is not None:
+            d["msgs"] = msgs_by_seq[a.step]
         aid = step_agent.get(str(a.step))
         if aid and ia["multi"]:
             d["agent"] = label.get(aid, aid)
@@ -2099,12 +2106,20 @@ function agentFrame(s){
       .map(k=>inp[k]).find(v=>typeof v==="string"&&v.trim());
     frame.push({role:"task",content:task||"(this sub-agent's task was delegated by its parent)",step:-1});
   }
-  // A STATELESS external agent re-runs fresh each ask -- it did NOT carry earlier
-  // turns into this one -- so scope the frame to the CURRENT dialogue turn (from
-  // the most recent user message). A native agent replays its history, so it
-  // genuinely saw the whole conversation: keep the full accumulation for it.
-  let start=0;
-  if(RUN.stateless){ for(let j=cur;j>=0;j--){ const y=steps[j]; if(y&&y.type==="user"&&!y.injected){start=j;break;} } }
+  // Show exactly what the model saw. Whether a follow-up turn carried prior
+  // history is NOT a guess about "external vs native" -- it's recorded: meta.msgs
+  // is the message COUNT the model actually received at each call. If this turn's
+  // opening call started ~fresh (msgs ≈ the run's baseline), the agent is stateless
+  // for this turn -> scope to the current turn; if it carried extra messages
+  // (stateful agent, external OR native replay), keep the full accumulation.
+  let start=0, uStart=0;
+  for(let j=cur;j>=0;j--){ const y=steps[j]; if(y&&y.type==="user"&&!y.injected){uStart=j;break;} }
+  if(uStart>0){                      // a follow-up turn
+    let openMsgs=null, baseMsgs=null;
+    for(let j=uStart;j<=cur&&openMsgs==null;j++){ const y=steps[j]; if(y&&(y.type==="reason"||y.type==="answer")&&y.msgs!=null) openMsgs=y.msgs; }
+    for(let j=0;j<steps.length&&baseMsgs==null;j++){ const y=steps[j]; if((y.type==="reason"||y.type==="answer")&&y.msgs!=null) baseMsgs=y.msgs; }
+    if(openMsgs!=null && baseMsgs!=null && openMsgs<=baseMsgs+1) start=uStart;   // fresh -> scope
+  }
   for(let j=start;j<cur;j++){        // this agent's OWN prior steps, in order
     const x=steps[j];
     // A dialogue turn (a plain user node) belongs to every TOP-LEVEL agent's
