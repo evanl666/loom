@@ -2420,12 +2420,20 @@ async function gotoRootCause(){
   const r = STATIC ? SD.rootcause : await (await fetch("/api/rootcause")).json();
   let h;
   if(r.found){
-    const i=steps.findIndex(s=>s.step===r.step); if(i>=0)select(i);
-    h=`<div class="cop-sum">🎯 <b>rule-based</b> — first bad step <b>${r.step} ${E(r.tool)}</b></div>`+
+    const isFail = r.kind!=="risk";
+    // Only JUMP for a genuine failure. On a clean run whose only signal is a
+    // security note (e.g. PII read that flows to an email), don't yank the user to
+    // a benign step -- report "clean" and let them click the note if they want.
+    if(isFail){ const i=steps.findIndex(s=>s.step===r.step); if(i>=0)select(i); }
+    const head = isFail
+      ? `🎯 <b>rule-based</b> — first bad step <b>${r.step} ${E(r.tool)}</b>`
+      : `✅ <b>rule-based</b> — no failure; the run looks clean.<div class="k">most security-notable step</div><span class="chip jump" data-step="${r.step}">${r.step} ${E(r.tool)}</span>`;
+    h=`<div class="cop-sum">${head}</div>`+
       `<div class="k">why</div><div>${r.signals.map(E).join("<br>")}</div>`+
-      `<div class="k">cascade</div>${r.cascade.map(c=>`<span class="chip jump" data-step="${c.step}">[${c.step}] ${E(c.tool)}</span>`).join("")}`;
+      (r.note?`<div class="sub2 muted">${E(r.note)}</div>`:``)+
+      (r.cascade.length?`<div class="k">cascade</div>${r.cascade.map(c=>`<span class="chip jump" data-step="${c.step}">[${c.step}] ${E(c.tool)}</span>`).join("")}`:``);
   } else {
-    h=`<div class="cop-sum">🎯 <b>rule-based</b> — no signal (no firewall block / taint path / tool error / loop).</div>`;
+    h=`<div class="cop-sum">🎯 <b>rule-based</b> — no failure and nothing security-notable. The run looks clean.</div>`;
   }
   // AI deep-dive: catches semantic / logic failures the rules can't see.
   if(CAN_CHAT) h+=`<div class="k">🧠 AI deep-dive <span class="muted">— finds wrong-answer / wrong-tool / misunderstood-task errors rules miss</span></div>`+

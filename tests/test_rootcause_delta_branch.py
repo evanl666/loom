@@ -20,9 +20,25 @@ def _exfil_trace():
 
 def test_first_bad_step_finds_the_leak_source():
     r = first_bad_step(_exfil_trace())
-    assert r["found"] and r["step"] == 1  # the secret read is the root cause
-    assert any("leak" in s for s in r["signals"])
+    assert r["found"] and r["step"] == 1  # the secret read is the source
+    # a taint path is a security RISK to review (no error/block/loop -> not a "failure")
+    assert r["kind"] == "risk"
+    assert any("flows to" in s for s in r["signals"])
     assert r["cascade"]  # downstream actions listed
+
+
+def test_first_bad_step_prefers_a_real_failure_over_a_risk_note():
+    """A firewall block / tool error / loop is a FAILURE and wins over a mere
+    security-risk step, so a clean-but-PII run isn't mislabelled as a 'bad step'."""
+    # a run that reads PII (risk) AND has a tool error later (failure)
+    data = {"log": [
+        {"seq": 0, "kind": "model", "result": {"tool_calls": [{"id": "1", "name": "read_customer", "input": {}}], "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "tool:read_customer", "result": "name=Jane ssn=123-45-6789"},
+        {"seq": 2, "kind": "model", "result": {"tool_calls": [{"id": "2", "name": "charge_card", "input": {}}], "stop_reason": "tool_use"}},
+        {"seq": 3, "kind": "tool:charge_card", "result": "ERROR: card declined", "error": True}],
+        "prompt": "x", "output": "d", "tools": {"read_customer": ["pii_access"], "charge_card": ["money_movement"]}}
+    r = first_bad_step(data)
+    assert r["found"] and r["kind"] == "failure" and r["step"] == 3   # the error, not the PII read
 
 
 def test_context_delta_flags_untrusted_and_dominant():

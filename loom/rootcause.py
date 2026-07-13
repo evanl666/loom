@@ -17,59 +17,81 @@ _DANGEROUS = {"money_movement", "destructive", "database_write"}
 
 
 def first_bad_step(data: Any) -> dict:
-    """The earliest action tripping a badness signal, and its downstream cascade."""
+    """The earliest step that went wrong, and its downstream cascade.
+
+    Signals are TIERED. A genuine FAILURE -- a firewall block, a tool error, a loop
+    -- is what "went wrong". A RISK signal -- an ungated dangerous call, PII/secret
+    access, a taint path to an egress -- is security-notable but NOT, on its own, a
+    failure: a legitimate refund flow reads a customer record and emails that same
+    customer. So the earliest FAILURE wins; only when there is no failure do we
+    surface the earliest RISK, clearly marked ``kind: "risk"`` ("the run completed;
+    review this") instead of alarming as a "first bad step".
+    """
     from .action import actions
     from .loops import detect_loops
     from .taint import taint_paths
 
     acts = [a for a in actions(data) if a.step >= 0]
-    signals: dict[int, list] = {}
+    fails: dict[int, list] = {}
+    risks: dict[int, list] = {}
 
-    def _add(step: int, why: str) -> None:
-        signals.setdefault(step, []).append(why)
+    def _fail(step: int, why: str) -> None:
+        fails.setdefault(step, []).append(why)
+
+    def _risk(step: int, why: str) -> None:
+        risks.setdefault(step, []).append(why)
 
     for a in acts:
         if a.type != "call":
             continue
         caps = set(a.capabilities)
         if a.policy is not None and a.policy.blocked:
-            _add(a.step, "firewall blocked this call")
-        if (caps & _DANGEROUS) and (a.policy is None):
-            _add(a.step, f"ungated {', '.join(sorted(caps & _DANGEROUS))} call")
+            _fail(a.step, "firewall blocked this call")
         if a.observation is not None and a.observation.error:
-            _add(a.step, "tool errored / returned an error")
+            _fail(a.step, "tool errored / returned an error")
+        if (caps & _DANGEROUS) and (a.policy is None):
+            _risk(a.step, f"ungated {', '.join(sorted(caps & _DANGEROUS))} call")
         if a.risky:
-            _add(a.step, f"risky action ({a.risk})")
+            _risk(a.step, f"risky action ({a.risk})")
 
-    # exfiltration paths: the source read is the bad step
+    # taint: data read here later flows OUT -- an exfiltration signal, but the sink
+    # may be a legitimate recipient, so it's a RISK to review, not a failure.
     for p in taint_paths(data):
-        _add(p["source"]["step"], f"secret read that later leaks to {p['sink']['tool']}")
+        _risk(p["source"]["step"],
+              f"data read here later flows to {p['sink']['tool']} (verify the recipient)")
 
-    # loop start
     loops = detect_loops(data)
     for f in loops["findings"]:
-        _add(f.get("started", 0), "start of a loop / oscillation")
+        _fail(f.get("started", 0), "start of a loop / oscillation")
 
-    if not signals:
+    if fails:
+        signals, kind = fails, "failure"
+        note = "everything after this step is downstream of it -- fork here to test the fix"
+    elif risks:
+        signals, kind = risks, "risk"
+        note = ("the run completed WITHOUT a failure -- this is just its most "
+                "security-notable step; review it, it isn't necessarily a bug")
+    else:
         return {"found": False}
     first = min(signals)
     target = next((a for a in acts if a.step == first), None)
     cascade = [{"step": a.step, "tool": a.tool, "type": a.type}
                for a in acts if a.step > first and a.type == "call"][:6]
     return {
-        "found": True, "step": first,
+        "found": True, "kind": kind, "step": first,
         "tool": target.tool if target else "",
         "signals": signals[first],
         "cascade": cascade,
-        "note": "everything after this step is downstream of it -- fork here to test the fix",
+        "note": note,
     }
 
 
 def describe_rootcause(r: dict) -> str:
     if not r["found"]:
         return "no root-cause signal found -- the run looks clean"
-    lines = [f"🎯 first bad step: {r['step']} ({r['tool']})",
-             "  why: " + "; ".join(r["signals"])]
+    head = (f"🎯 first bad step: {r['step']} ({r['tool']})" if r.get("kind") != "risk"
+            else f"✅ no failure -- most security-notable step: {r['step']} ({r['tool']})")
+    lines = [head, "  why: " + "; ".join(r["signals"])]
     if r["cascade"]:
         chain = " → ".join(f"[{c['step']}]{c['tool']}" for c in r["cascade"])
         lines.append(f"  cascade: {chain}")
