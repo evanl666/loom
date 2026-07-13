@@ -404,3 +404,41 @@ def test_context_at_scopes_by_msgs_for_single_agent_too():
 
     carry = [m["content"] for m in context_at(_build(9), 2) if m["role"] == "user"]
     assert carry == ["how many orders?", "now customers"]     # stateful -> accumulated
+
+
+def test_injected_node_lands_on_the_fork_point_turn_not_the_agents_first():
+    """Regression: injecting at the agent's LAST turn placed the injected node on
+    its FIRST turn (and the context frame followed). The node must land before the
+    turn given by fork_injections.agent_turn."""
+    import hashlib
+    SYS = "You are the interactive agent. Do the task."
+    TITLE = "Generate a concise title for this session."     # a utility side-call
+    h = hashlib.sha1(SYS.encode()).hexdigest()[:12]
+    th = hashlib.sha1(TITLE.encode()).hexdigest()[:12]
+
+    def m(seq, sys, hh, text, tool, tools):
+        return {"seq": seq, "kind": "model", "depth": 0,
+                "meta": {"sys_hash": hh, "sys_head": sys, "tools": tools},
+                "result": {"text": text,
+                           "tool_calls": [{"id": f"t{seq}", "name": "Read", "input": {}}] if tool else [],
+                           "stop_reason": "tool_use" if tool else "end_turn"}}
+    trace = {"recorded_via": "proxy", "model": "claude", "output": "done",
+             "systems": {h: SYS, th: TITLE}, "log": [
+                 m(0, TITLE, th, '{"title": "Files"}', False, []),      # utility (agent 2)
+                 m(1, SYS, h, "I'll list the files first.", True, ["Read"]),   # interactive turn 0
+                 {"seq": 2, "kind": "tool:Read", "depth": 0, "result": "x", "meta": {"tuid": "t1"}},
+                 m(3, SYS, h, "The folder contains four files.", False, ["Read"]),  # interactive turn 1 <- fork
+             ],
+             # injected at the interactive agent's 2nd turn (agent_turn=1)
+             "fork_injections": {"text": "SAY GOOD MORNING", "at": 3, "agent_hash": h, "agent_turn": 1}}
+    steps = steps_for(trace)
+    kinds = [(s.get("type"), (s.get("intent") or s.get("content") or "")[:22], s.get("injected", False))
+             for s in steps]
+    inj_i = next(i for i, s in enumerate(steps) if s.get("injected"))
+    reason_i = next(i for i, s in enumerate(steps) if s.get("type") == "reason")  # "I'll list..."
+    ans_i = next(i for i, s in enumerate(steps)
+                 if s.get("type") == "answer" and "folder" in (s.get("intent") or ""))  # fork point
+    # injected node sits AFTER the interactive agent's first turn, immediately
+    # BEFORE its final-answer turn -- NOT back on its first turn
+    assert reason_i < inj_i < ans_i, kinds
+    assert inj_i == ans_i - 1, kinds

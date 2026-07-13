@@ -99,9 +99,12 @@ def steps_for(data: dict) -> list[dict]:
         hash_to_id = {a.get("sys_hash"): a["id"] for a in ia["agents"] if a.get("sys_hash")}
         target_aid = hash_to_id.get(inj.get("agent_hash"))
         pos = None
-        if target_aid:   # the first step of the fork-point agent
-            pos = next((i for i, d in enumerate(out)
-                        if d.get("agent_id") == target_aid and d.get("type") in ("reason", "answer")), None)
+        if target_aid:   # the Nth turn of the fork-point agent (NOT always its first)
+            agent_steps = [i for i, d in enumerate(out)
+                           if d.get("agent_id") == target_aid and d.get("type") in ("reason", "answer")]
+            if agent_steps:
+                k = int(inj.get("agent_turn", 0) or 0)
+                pos = agent_steps[min(k, len(agent_steps) - 1)]
         if pos is None and inj.get("at") is not None:   # fallback: the turn index
             pos = next((i for i, d in enumerate(out)
                         if d.get("type") in ("reason", "answer")
@@ -826,6 +829,14 @@ class DebugSession:
                   if isinstance(e, dict) and e.get("kind") == "model"]
         fork_agent_hash = (ahash.get(sa.get(str(models[at].get("seq")))) or "") \
             if 0 <= at < len(models) else ""
+        # WHICH of the fork-point agent's turns was the fork point (0-based). A
+        # re-run's turn NUMBERS differ, but the agent's Nth call maps stably, so
+        # the injected node lands on the RIGHT turn (fork at the last turn must not
+        # show up on the agent's first turn).
+        fork_seq = models[at].get("seq") if 0 <= at < len(models) else None
+        agent_seqs = [m.get("seq") for m in models
+                      if ahash.get(sa.get(str(m.get("seq")))) == fork_agent_hash]
+        agent_turn = agent_seqs.index(fork_seq) if fork_seq in agent_seqs else 0
         edit_sys_hash = fork_agent_hash or None if system is not None else None
         edits = {"new_system": system, "edit_sys_hash": edit_sys_hash,
                  "append": append.strip() or None, "model": model,
@@ -837,7 +848,8 @@ class DebugSession:
         if append.strip():   # attribute the injected message to the fork-point AGENT
             # (a re-run's turn NUMBERS differ from the original, so the turn index
             # alone would land the node on the wrong agent).
-            bdata["fork_injections"] = {"text": append.strip(), "at": at, "agent_hash": fork_agent_hash}
+            bdata["fork_injections"] = {"text": append.strip(), "at": at,
+                                        "agent_hash": fork_agent_hash, "agent_turn": agent_turn}
         payload = _branch_payload(base, bdata, at)
         label = (append[:40] or (f"system: {system[:24]}" if system else "")
                  or (f"fault@{','.join(map(str, sorted(set_results)))}" if set_results else "")
