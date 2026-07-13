@@ -1997,9 +1997,12 @@ function renderDetail(){
         <option value="claude-opus-4-8">claude-opus-4-8</option></select>
       <details class="fdet"><summary>⚙ system + tools</summary>
         <label class="fl">system prompt <span class="muted">(${E(s.agent||"this agent")}) — edit to A/B test behavior</span></label>
-        <textarea id="sysp" rows="4">${E(agentSystem(s)||"")}</textarea>
-        <label class="fl">tools available to the fork</label>
-        <div id="toolbox">${(RUN.all_tools||[]).map(t=>`<label class="tk"><input type="checkbox" class="tchk" value="${E(t)}" checked> ${E(t)}</label>`).join("")}</div>
+        <textarea id="sysp" rows="4">${E(agentSystem(s)||"")}</textarea>`+
+        // Tool-subsetting only works for a NATIVE agent (we hold its tool functions);
+        // an external adapter's tools are baked in, so hide the control when empty
+        // rather than showing a "tools available" label with nothing under it.
+        ((RUN.all_tools&&RUN.all_tools.length)?`<label class="fl">tools available to the fork <span class="muted">— untick to remove one</span></label>
+        <div id="toolbox">${RUN.all_tools.map(t=>`<label class="tk"><input type="checkbox" class="tchk" value="${E(t)}" checked> ${E(t)}</label>`).join("")}</div>`:``)+`
       </details>
     </div>
     <button id="run">▶ Fork &amp; Run live</button>
