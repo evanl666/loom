@@ -24,13 +24,18 @@ import threading
 from typing import Any, Callable
 
 
-def start_proxy(target: str = "https://api.anthropic.com"):
+def start_proxy(target: str = "https://api.anthropic.com", port: int = 0):
     """Start an in-process recording proxy and point the model-client env vars
     at it. Call this BEFORE importing a framework whose clients read
-    ANTHROPIC_BASE_URL / OPENAI_BASE_URL at construction time."""
+    ANTHROPIC_BASE_URL / OPENAI_BASE_URL at construction time.
+
+    ``port=0`` picks a free port (in-process agents inherit the env we set here).
+    A FIXED ``port`` is for a remote agent in a SEPARATE process (gRPC/HTTP): you
+    point that server's base_url at this known port so its model calls are captured
+    even though it doesn't inherit this process's env."""
     from .proxy import ProxyServer
 
-    proxy = ProxyServer(port=0, target=target, save_path=None)
+    proxy = ProxyServer(port=port, target=target, save_path=None)
     threading.Thread(target=proxy.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{proxy.server_address[1]}"
     os.environ["ANTHROPIC_BASE_URL"] = base

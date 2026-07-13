@@ -1888,8 +1888,15 @@ def _cmd_live(args: argparse.Namespace) -> int:
         raise CLIError("--agent must look like module:attr")
 
     # Start the proxy + set ANTHROPIC_BASE_URL BEFORE importing the module, so a
-    # framework that builds its model client at import time is captured.
-    proxy = start_proxy(args.target)
+    # framework that builds its model client at import time is captured. A FIXED
+    # --proxy-port is for a REMOTE agent (gRPC/HTTP) in a separate server process:
+    # point that server's base_url at this port so its model calls are captured.
+    proxy = start_proxy(args.target, port=getattr(args, "proxy_port", 0) or 0)
+    if getattr(args, "proxy_port", 0):
+        base = f"http://127.0.0.1:{proxy.server_address[1]}"
+        print(f"  recording proxy: {base}", file=sys.stderr)
+        print(f"  -> start your remote agent server with ANTHROPIC_BASE_URL={base} "
+              f"(OpenAI: OPENAI_BASE_URL={base}/v1)", file=sys.stderr)
     try:
         obj = getattr(importlib.import_module(module_name), attr)
     except (ImportError, AttributeError) as e:
@@ -3815,6 +3822,10 @@ def build_parser() -> argparse.ArgumentParser:
     lv.add_argument("--target", default="https://api.anthropic.com",
                     help="upstream model API for external adapters (proxied)")
     lv.add_argument("--port", type=int, default=8791)
+    lv.add_argument("--proxy-port", type=int, default=0,
+                    help="fix the recording proxy's port so a REMOTE agent server "
+                         "(gRPC/HTTP, separate process) can point its ANTHROPIC_BASE_URL "
+                         "at it; the Ask box triggers your --agent callable")
     lv.add_argument("--host", default="127.0.0.1")
     lv.add_argument("--copilot-model", default="", help="model for the conversational Copilot")
     lv.add_argument("--no-open", action="store_true", help="don't open a browser")
