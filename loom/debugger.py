@@ -120,6 +120,21 @@ def steps_for(data: dict) -> list[dict]:
             node["nest"] = anchor.get("nest", 0)
         out.insert(pos, node)
 
+    # Single-agent multi-turn: the multi-agent path below segments the dialogue by
+    # user_turns, but a single-agent run never reaches it -- insert each follow-up
+    # ask's user node here too, so its step list shows the full dialogue (matching
+    # the context frame).
+    uturns_flat = data.get("user_turns") if isinstance(data.get("user_turns"), list) else []
+    # only the PROXY path caps episodes to the first prompt (its raw episodes also
+    # hold internal tool-result turns); the native path already interleaves follow-ups.
+    if len(uturns_flat) > 1 and not ia["multi"] and data.get("recorded_via") == "proxy":
+        for widx, prompt in uturns_flat[1:]:
+            pos = next((i for i, d in enumerate(out)
+                        if d.get("type") in ("reason", "answer")
+                        and (d.get("replay") or {}).get("turn", -1) >= int(widx)), None)
+            if pos is not None:
+                out.insert(pos, _user_node(str(prompt)))
+
     # DELEGATION detection -- principled, not structural. A tool call is a
     # delegation IFF the agent that made it actually SPAWNED a child agent (an
     # infer_agents edge) whose identity matches the call's name/args. This is
@@ -299,11 +314,32 @@ def context_at(data: dict, step: int, acts=None) -> list[dict]:
             if k not in arrival and t >= boundaries[k][0]:
                 arrival[k] = a.step
 
-    frame: list[dict] = [{"role": "user", "content": boundaries[0][1], "step": -1}]
-    nb = 1
+    # Scope to the CURRENT turn when it started fresh (the model didn't carry prior
+    # history). Same msgs-based rule the multi-agent agentFrame uses, so BOTH context
+    # paths agree: meta.msgs is the message count each call actually received.
+    msgs_by_seq = {e.get("seq"): (e.get("meta") or {}).get("msgs")
+                   for e in (data.get("log") or [])
+                   if isinstance(e, dict) and e.get("kind") == "model"}
+    seg = 0
+    for k in range(1, len(boundaries)):        # the turn whose context we're viewing
+        if k in arrival and arrival[k] <= step + 1:
+            seg = k
+    scope_turn = None
+    if seg > 0 and seg in arrival:
+        open_msgs = msgs_by_seq.get(arrival[seg])
+        base_msgs = next((msgs_by_seq[a.step] for a in acts_list
+                          if a.replay is not None and msgs_by_seq.get(a.step) is not None), None)
+        if open_msgs is not None and base_msgs is not None and open_msgs <= base_msgs + 1:
+            scope_turn = boundaries[seg][0]    # a fresh turn -> drop everything before it
+
+    start_b = seg if scope_turn is not None else 0
+    frame: list[dict] = [{"role": "user", "content": boundaries[start_b][1], "step": -1}]
+    nb = start_b + 1
     for a in acts_list:
         if a.step > step:
             break
+        if scope_turn is not None and a.replay is not None and a.replay.turn < scope_turn:
+            continue                           # skip prior turns' actions when scoping
         while nb < len(boundaries) and nb in arrival and arrival[nb] <= a.step:
             frame.append({"role": "user", "content": boundaries[nb][1], "step": arrival[nb]})
             nb += 1

@@ -376,3 +376,31 @@ def test_steps_for_attaches_message_count_for_context_scoping():
     steps = steps_for(data)
     model_steps = [s for s in steps if s["type"] in ("reason", "answer")]
     assert model_steps[0]["msgs"] == 1 and model_steps[1]["msgs"] == 9
+
+
+def test_context_at_scopes_by_msgs_for_single_agent_too():
+    """context_at (the single-agent path) applies the SAME msgs-based scoping as the
+    multi-agent agentFrame: a follow-up turn that started fresh (opening call's msgs
+    ~ baseline) shows only the current turn; one that carried history accumulates."""
+    from loom.debugger import context_at
+
+    def _mr(seq, msgs, q):
+        return {"seq": seq, "kind": "model", "meta": {"sys_head": "s", "tools": ["run_sql"], "msgs": msgs},
+                "result": {"tool_calls": [{"id": str(seq), "name": "run_sql", "input": {"q": q}}], "stop_reason": "tool_use"}}
+
+    def _ma(seq, msgs, t):
+        return {"seq": seq, "kind": "model", "meta": {"sys_head": "s", "tools": ["run_sql"], "msgs": msgs},
+                "result": {"text": t, "stop_reason": "end_turn"}}
+
+    def _build(fmsgs):
+        return {"recorded_via": "proxy", "model": "m", "output": "x", "prompt": "how many orders?",
+                "episodes": ["how many orders?"], "tools": {"run_sql": ["read"]},
+                "user_turns": [[0, "how many orders?"], [2, "now customers"]], "log": [
+                    _mr(0, 1, "orders"), {"seq": 1, "kind": "tool:run_sql", "result": "1842"}, _ma(2, 3, "1842 orders."),
+                    _mr(3, fmsgs, "customers"), {"seq": 4, "kind": "tool:run_sql", "result": "503"}, _ma(5, fmsgs + 2, "503 customers.")]}
+
+    fresh = [m["content"] for m in context_at(_build(1), 2) if m["role"] == "user"]
+    assert fresh == ["now customers"]                         # stateless -> scoped
+
+    carry = [m["content"] for m in context_at(_build(9), 2) if m["role"] == "user"]
+    assert carry == ["how many orders?", "now customers"]     # stateful -> accumulated
