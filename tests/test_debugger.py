@@ -442,3 +442,29 @@ def test_injected_node_lands_on_the_fork_point_turn_not_the_agents_first():
     # BEFORE its final-answer turn -- NOT back on its first turn
     assert reason_i < inj_i < ans_i, kinds
     assert inj_i == ans_i - 1, kinds
+
+
+def test_user_request_skips_a_utility_side_calls_wrapped_prompt():
+    """Record path (no LiveSession): the Claude CLI's title generator hits the wire
+    FIRST with a <session>-wrapped prompt, so episodes[0] was that scaffolding. The
+    shown user request must skip it and use the human's clean prompt."""
+    import hashlib
+    TITLE = "You are a Claude agent. Generate a concise title."
+    MAIN = "You are a Claude agent. You are an interactive CLI tool."
+    th = hashlib.sha1(TITLE.encode()).hexdigest()[:12]
+    mh = hashlib.sha1(MAIN.encode()).hexdigest()[:12]
+    trace = {"recorded_via": "proxy", "model": "claude", "output": "done",
+             "systems": {th: TITLE, mh: MAIN},
+             # title-gen's <session>-wrapped prompt hits the wire first
+             "episodes": ["<session>\nSummarize the folder.\n</session>\n\nWrite the title.",
+                          "Summarize the folder."],
+             "log": [
+                 {"seq": 0, "kind": "model", "depth": 0,
+                  "meta": {"sys_hash": th, "sys_head": TITLE, "tools": []},
+                  "result": {"text": '{"title":"x"}', "tool_calls": [], "stop_reason": "end_turn"}},
+                 {"seq": 1, "kind": "model", "depth": 0,
+                  "meta": {"sys_hash": mh, "sys_head": MAIN, "tools": ["Read"]},
+                  "result": {"text": "the folder has files", "tool_calls": [], "stop_reason": "end_turn"}},
+             ]}
+    user = next(s for s in steps_for(trace) if s.get("type") == "user")
+    assert user["intent"] == "Summarize the folder."      # NOT the <session> scaffolding

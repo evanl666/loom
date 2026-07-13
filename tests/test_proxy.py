@@ -962,3 +962,21 @@ def test_request_fingerprint_stable_across_a_per_call_version_token():
     # a genuinely different system still gets a different key
     assert request_fingerprint(req("baf")) != request_fingerprint(
         {"system": "You are a DIFFERENT agent.", "messages": [{"role": "user", "content": "hi"}]})
+
+
+def test_user_request_is_the_prompt_not_prepended_reminders():
+    """Regression: Claude Code's first user turn stacks several <system-reminder>
+    blocks before the real prompt. The episode we surface as 'the user request'
+    must be the human's message (the last real block), not the scaffolding."""
+    from loom.proxy import WireRecorder
+    r = WireRecorder()
+    r._absorb_request({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "<system-reminder>\nAvailable agent types..."},
+        {"type": "text", "text": "<system-reminder>\nThe following skills..."},
+        {"type": "text", "text": "Summarize the folder."},
+    ]}]})
+    assert r.episodes == ["Summarize the folder."]
+    # a normal single-block turn is unchanged
+    r2 = WireRecorder()
+    r2._absorb_request({"messages": [{"role": "user", "content": "plain prompt"}]})
+    assert r2.episodes == ["plain prompt"]

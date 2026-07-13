@@ -68,6 +68,19 @@ def _norm_system(system: str) -> str:
     return _VOLATILE_META.sub("", system or "")
 
 
+_REMINDER_RE = re.compile(r"^\s*<(system-reminder|environment_details|context)\b", re.I)
+
+
+def _primary_user_text(texts: "list[str]") -> str:
+    """The human's actual message within a user turn. Harnesses PREPEND scaffolding
+    -- the Claude CLI stacks several ``<system-reminder>`` blocks before the real
+    prompt -- so the ``episodes[0]`` we show as 'the user request' would otherwise
+    be a wall of injected context. Prefer the last text block that isn't such an
+    injected-context block; fall back to the last block if they all are."""
+    real = [t for t in texts if t and not _REMINDER_RE.match(t)]
+    return (real or texts or [""])[-1]
+
+
 def _gemini_parts_text(parts) -> str:
     """Concatenate the text of a Gemini content ``parts`` list."""
     if not isinstance(parts, list):
@@ -444,13 +457,19 @@ class WireRecorder:
                 continue  # assistant turns are the responses we already recorded
             content = m.get("content", "")
             blocks = content if isinstance(content, list) else [{"type": "text", "text": content}]
+            texts: list[str] = []
             for b in blocks:
                 if not isinstance(b, dict):
                     b = {"type": "text", "text": str(b)}
                 if b.get("type") == "tool_result":
                     self._emit_tool_result(b.get("tool_use_id", ""), _flatten(b.get("content", "")))
                 elif b.get("type") == "text" and b.get("text"):
-                    self._emit_episode(b["text"])
+                    texts.append(b["text"])
+            # One user turn = one episode: the human's actual message, not each of
+            # the harness's prepended <system-reminder> scaffolding blocks (Claude
+            # Code stacks several before the real prompt).
+            if texts:
+                self._emit_episode(_primary_user_text(texts))
 
     def _absorb_response(self, response: dict) -> None:
         text, tool_calls = "", []

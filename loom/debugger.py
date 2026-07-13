@@ -21,6 +21,7 @@ tail; without it the page is read-only (step + inspect, no re-run).
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
@@ -53,7 +54,13 @@ def steps_for(data: dict) -> list[dict]:
     # results, framework reminders), so only the first is a real user prompt --
     # interleave follow-ups only for our own (native / live) multi-episode runs.
     if data.get("recorded_via") == "proxy":
-        episodes = episodes[:1]
+        # The FIRST wire user-turn is often a utility side-call's prompt (the Claude
+        # CLI's title generator wraps the request in <session>…</session>) or a
+        # <system-reminder> block -- prefer the first episode that isn't such
+        # scaffolding, so the shown "user request" is the human's actual message.
+        _scaffold = re.compile(r"^\s*<(session|system-reminder|environment_details)\b", re.I)
+        clean = [e for e in episodes if not _scaffold.match(str(e))]
+        episodes = (clean or episodes)[:1]
     acts = list(actions(data))
     ends_after = [i for i, a in enumerate(acts) if a.type == "answer" and a.depth == 0]
 

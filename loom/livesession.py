@@ -212,6 +212,14 @@ class LiveSession:
     def trace(self) -> dict:
         if self._proxy is not None:
             d = self._proxy.recorder.to_dict()
+            # The LiveSession KNOWS the real user prompts (what was passed to
+            # ask()). The wire's first "episode" is whatever user text hit the wire
+            # first -- a utility call's <session> title prompt, or a stack of
+            # <system-reminder> scaffolding -- so surface the real asks as the
+            # dialogue, not that.
+            if self._episodes:
+                d["prompt"] = self._episodes[0]
+                d["episodes"] = list(self._episodes)
             if len(self._user_turns) > 1:   # multi-turn: let steps_for split by ask
                 d["user_turns"] = [list(t) for t in self._user_turns]
             return d
