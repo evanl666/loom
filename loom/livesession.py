@@ -100,6 +100,7 @@ class LiveSession:
         call and everything downstream. The adapter is re-run in a SUBPROCESS so
         its model client picks up the fork proxy's base_url (frameworks bake it at
         import). Returns the branch trace."""
+        import json
         import subprocess
         import sys
 
@@ -112,16 +113,16 @@ class LiveSession:
         rec = self._proxy.recorder
         keys, wire = list(rec.request_keys), [dict(r) for r in rec.wire]
         at = max(0, min(int(at), len(keys)))
-        # The fork point belongs to a specific ask (a multi-turn session re-runs the
-        # WHOLE adapter per ask). Re-run THAT ask's prompt -- not always the first --
-        # and replay only that ask's own prior calls, so forking a turn-2 response
-        # actually re-runs turn 2, not the turn-1 conversation.
-        ep_start, prompt = 0, (self._episodes[0] if self._episodes else "")
-        for widx, p in self._user_turns:
-            if int(widx) <= at:
-                ep_start, prompt = int(widx), str(p)
+        # Re-run EVERY ask up to and including the fork-point ask, in ONE subprocess.
+        # A STATEFUL agent (a checkpointer / server-side memory) rebuilds its state
+        # across those turns, so forking turn 2 actually remembers turn 1 -- re-running
+        # only the fork-point ask would start from an empty memory ("I don't know your
+        # name"). A STATELESS agent's earlier asks simply replay from the prefix for
+        # free. The fork-point ask's own call is where the edit lands.
+        prompts = [str(p) for widx, p in self._user_turns if int(widx) <= at] \
+            or [self._episodes[0] if self._episodes else ""]
         prefix: dict = {}                      # content key -> [recorded responses]
-        for i in range(ep_start, at):          # this ask's calls BEFORE the fork point replay
+        for i in range(0, at):                 # ALL prior calls replay (rebuilds state)
             prefix.setdefault(keys[i], []).append(wire[i])
         fproxy = ProxyServer(port=0, target=self.target, save_path=None)
         fproxy.fork = {
@@ -139,11 +140,12 @@ class LiveSession:
         base = f"http://127.0.0.1:{fproxy.server_address[1]}"
         module_name, _, attr = self.spec.partition(":")
         env = {**os.environ, "ANTHROPIC_BASE_URL": base, "ANTHROPIC_API_BASE": base,
-               "OPENAI_BASE_URL": base + "/v1", "LOOM_FORK_PROMPT": prompt,
+               "OPENAI_BASE_URL": base + "/v1", "LOOM_FORK_PROMPTS": json.dumps(prompts),
                "PYTHONPATH": os.getcwd() + os.pathsep + os.environ.get("PYTHONPATH", "")}
-        runner = ("import importlib,os,sys;sys.path.insert(0, os.getcwd());"
-                  f"getattr(importlib.import_module({module_name!r}), {attr!r})"
-                  "(os.environ['LOOM_FORK_PROMPT'])")
+        # Replay each ask in order so a stateful adapter accumulates its own memory.
+        runner = ("import importlib,os,sys,json;sys.path.insert(0, os.getcwd());"
+                  f"_a=getattr(importlib.import_module({module_name!r}), {attr!r});"
+                  "[_a(p) for p in json.loads(os.environ['LOOM_FORK_PROMPTS'])]")
         try:
             proc = subprocess.run([sys.executable, "-c", runner], env=env,
                                   capture_output=True, text=True, timeout=600)

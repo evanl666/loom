@@ -980,3 +980,53 @@ def test_user_request_is_the_prompt_not_prepended_reminders():
     r2 = WireRecorder()
     r2._absorb_request({"messages": [{"role": "user", "content": "plain prompt"}]})
     assert r2.episodes == ["plain prompt"]
+
+
+def test_fork_reruns_all_asks_so_a_stateful_adapter_rebuilds_state(tmp_path, monkeypatch):
+    """Regression: forking turn 2 of a STATEFUL external agent must replay turn 1
+    too, so the agent's own memory is rebuilt (a checkpointer / server-side state
+    lives in the process; a fresh fork subprocess starts empty). Re-running only
+    the fork-point ask made turn 2 forget turn 1 ("I don't know your name")."""
+    import time
+
+    # a stateful adapter: module-global memory grows across asks; each ask sends
+    # the WHOLE conversation so far as the user message.
+    (tmp_path / "sf_agent.py").write_text(
+        "import json, os, urllib.request\n"
+        "MEM = []\n"
+        "def run(prompt):\n"
+        "    MEM.append(prompt)\n"
+        "    base = os.environ['ANTHROPIC_BASE_URL']\n"
+        "    req = urllib.request.Request(base + '/v1/messages',\n"
+        "        data=json.dumps({'model':'claude','system':'ORIG',\n"
+        "            'messages':[{'role':'user','content':' | '.join(MEM)}]}).encode(),\n"
+        "        headers={'content-type':'application/json','x-api-key':'k'}, method='POST')\n"
+        "    return json.loads(urllib.request.urlopen(req, timeout=10).read())['content'][0]['text']\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+
+    from loom.livesession import LiveSession, start_proxy
+    up = _serve(_EchoUpstream())
+    target = f"http://127.0.0.1:{up.server_address[1]}"
+    proxy = start_proxy(target)
+    import sf_agent
+    sess = LiveSession(func=sf_agent.run, proxy=proxy, spec="sf_agent:run", target=target)
+
+    for turn in ("my name is Evan", "what is my name"):
+        sess.ask(turn)
+        for _ in range(300):
+            if not sess.running:
+                break
+            time.sleep(0.02)
+    assert len(proxy.recorder.wire) == 2          # two asks, one call each
+
+    up.seen.clear()                                # only watch the fork's live upstream calls
+    # fork at the SECOND ask (turn index 1)
+    sess.fork_external(1, {"append": None, "model": "keep"})
+    # the fork-point call that went LIVE must carry the WHOLE conversation -- i.e.
+    # turn 1 was replayed into the adapter's memory, not lost.
+    sent = [" | ".join(m.get("content", "") for m in r.get("messages", []) if m.get("role") == "user")
+            for r in up.seen]
+    live_full = [s for s in sent if "my name is Evan" in s and "what is my name" in s]
+    assert live_full, f"fork-point call lost turn-1 memory; upstream saw {sent}"
+    up.shutdown()
