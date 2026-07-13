@@ -48,7 +48,7 @@ def test_static_page_gates_off_every_server_only_feature():
     assert sd["branches"] == []              # no forking in a frozen file -> no branches
 
     html = static_page(data)
-    for bid in ("copilot", "assertbtn", "export", "brk", "rootcause", "branches",
+    for bid in ("copilot", "assertbtn", "export", "brk", "branches",
                 "agentsbtn", "palettebtn", "swim", "play", "prompt", "model"):
         assert f'id="{bid}"' in html, f"#{bid} is wired at load but missing from the HTML"
 

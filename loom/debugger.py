@@ -1665,7 +1665,6 @@ button.fault{background:#fff6e6;border:1px solid #f3dca6;color:#b26a00}button.fa
       </div>
       <span class="tspring"></span>
       <div class="tgroup">
-        <button id="rootcause" title="jump to the first bad step">🎯 root cause</button>
         <button id="palettebtn" class="ico" title="command palette (⌘K)">⌘K</button>
         <button id="swim" class="ico" title="tree view — nest steps by agent/sub-agent">🌲</button>
         <button id="export" class="ico" title="download a shareable .loomdebug session">💾</button>
@@ -2303,7 +2302,6 @@ function paletteItems(){
     return {kind:k.label,label,meta,run:()=>select(i)};
   });
   const cmds=[
-    {kind:"cmd",label:"🎯 jump to root cause",meta:"first bad step",run:gotoRootCause},
     {kind:"cmd",label:"🕸 agents",meta:"multi-agent map",run:showAgents},
     {kind:"cmd",label:"🌳 branch tree",meta:"compare / walk branches",run:showBranches},
     {kind:"cmd",label:"✔ assertions",meta:"check expectations",run:showAssert},
@@ -2451,49 +2449,6 @@ document.addEventListener("click",e=>{
   const box=document.getElementById("brkbox");
   if(box&&!box.classList.contains("hidden")&&!box.contains(e.target)&&e.target.id!=="brkbtn") closeBrk();
 });
-async function gotoRootCause(){
-  const p=openDrawer("rootcause","🎯 Root cause");
-  const r = STATIC ? SD.rootcause : await (await fetch("/api/rootcause")).json();
-  let h;
-  if(r.found){
-    const isFail = r.kind!=="risk";
-    // Only JUMP for a genuine failure. On a clean run whose only signal is a
-    // security note (e.g. PII read that flows to an email), don't yank the user to
-    // a benign step -- report "clean" and let them click the note if they want.
-    if(isFail){ const i=steps.findIndex(s=>s.step===r.step); if(i>=0)select(i); }
-    const head = isFail
-      ? `🎯 <b>rule-based</b> — first bad step <b>${r.step} ${E(r.tool)}</b>`
-      : `✅ <b>rule-based</b> — no failure; the run looks clean.<div class="k">most security-notable step</div><span class="chip jump" data-step="${r.step}">${r.step} ${E(r.tool)}</span>`;
-    h=`<div class="cop-sum">${head}</div>`+
-      `<div class="k">why</div><div>${r.signals.map(E).join("<br>")}</div>`+
-      (r.note?`<div class="sub2 muted">${E(r.note)}</div>`:``)+
-      (r.cascade.length?`<div class="k">cascade</div>${r.cascade.map(c=>`<span class="chip jump" data-step="${c.step}">[${c.step}] ${E(c.tool)}</span>`).join("")}`:``);
-  } else {
-    h=`<div class="cop-sum">🎯 <b>rule-based</b> — no failure and nothing security-notable. The run looks clean.</div>`;
-  }
-  // AI deep-dive: catches semantic / logic failures the rules can't see.
-  if(CAN_CHAT) h+=`<div class="k">🧠 AI deep-dive <span class="muted">— finds wrong-answer / wrong-tool / misunderstood-task errors rules miss</span></div>`+
-    `<button id="airc" class="accent">🧠 find the root cause with AI</button><div id="aircout"></div>`;
-  p.innerHTML=h;
-  p.querySelectorAll(".jump").forEach(c=>c.onclick=()=>{const i=steps.findIndex(s=>s.step===+c.dataset.step);if(i>=0)select(i);});
-  const ab=document.getElementById("airc"); if(ab) ab.onclick=aiRootCause;
-}
-async function aiRootCause(){
-  const btn=document.getElementById("airc"), out=document.getElementById("aircout");
-  btn.disabled=true; btn.innerHTML='<span class="spin">⟳</span> AI reading the whole run…';
-  try{
-    const r=await (await fetch("/api/ai_rootcause",{method:"POST",headers:{"content-type":"application/json"},body:"{}"})).json();
-    if(r.error){out.innerHTML=`<div class="muted">${E(r.error)}</div>`;return;}
-    const conf=r.confidence?` <span class="chip">${E(r.confidence)} confidence</span>`:"";
-    if(r.found){
-      const i=steps.findIndex(s=>s.step===r.step); if(i>=0)select(i);
-      out.innerHTML=`<div class="cop-sum">🧠 AI — step <b>${r.step} ${E(r.tool||"")}</b>${conf}</div><div>${md(r.reply||"")}</div>`;
-    } else {
-      out.innerHTML=`<div class="cop-sum">🧠 AI — the run looks correct${conf}</div><div>${md(r.reply||"")}</div>`;
-    }
-  }catch(e){out.innerHTML=`<div class="muted">${E(e)}</div>`;}
-  finally{btn.disabled=false; btn.innerHTML="🧠 find the root cause with AI";}
-}
 async function showBranches(){
   if(drawerOpen("branches")){closeDrawer();return;}
   const p=openDrawer("branches","🌳 Branches");
@@ -2551,7 +2506,6 @@ async function exportSession(){
   const u=URL.createObjectURL(blob), a=document.createElement("a");
   a.href=u; a.download="session.loomdebug"; a.click(); URL.revokeObjectURL(u);
 }
-document.getElementById("rootcause").onclick=gotoRootCause;
 document.getElementById("branches").onclick=showBranches;
 document.getElementById("agentsbtn").onclick=showAgents;
 document.getElementById("assertbtn").onclick=showAssert;
