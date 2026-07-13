@@ -128,6 +128,7 @@ class LiveSession:
             "prefix": prefix,
             "inject_key": keys[at] if (edits.get("append") and at < len(keys)) else None,
             "edit_sys_hash": edits.get("edit_sys_hash"),
+            "inject_sys_hash": edits.get("inject_sys_hash"),
             "new_system": edits.get("new_system"),
             "append": edits.get("append"),
             "model": edits.get("model", "keep"),

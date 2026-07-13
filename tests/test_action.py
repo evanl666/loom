@@ -107,3 +107,49 @@ def test_actions_accepts_a_plain_trace_dict(tmp_path):
     data = json.load(open(path))
     acts = actions(data)
     assert [a.type for a in acts] == ["reason", "call", "answer"]
+
+
+def _model_entry(seq, calls):
+    return {"seq": seq, "kind": "model", "depth": 0,
+            "result": {"text": "", "tool_calls": calls, "stop_reason": "tool_use",
+                       "usage": {"input_tokens": 1, "output_tokens": 1}}}
+
+
+def test_parallel_same_name_results_bind_to_their_call_by_tool_use_id():
+    """Regression (张冠李戴): three parallel Read calls whose results are RECORDED
+    OUT of call order must each bind to their own call's input -- matched by
+    tool_use_id, not name+FIFO (which cross-attributes fault-injected results in a
+    forked branch)."""
+    trace = {"log": [
+        _model_entry(0, [
+            {"id": "tA", "name": "Read", "input": {"file": "hello.py"}},
+            {"id": "tB", "name": "Read", "input": {"file": "utils.py"}},
+            {"id": "tC", "name": "Read", "input": {"file": "scratch.py"}},
+        ]),
+        # results arrive in a DIFFERENT order than the calls (C, A, B)
+        {"seq": 1, "kind": "tool:Read", "depth": 0, "result": "RESULT_C", "meta": {"tuid": "tC"}},
+        {"seq": 2, "kind": "tool:Read", "depth": 0, "result": "RESULT_A", "meta": {"tuid": "tA"}},
+        {"seq": 3, "kind": "tool:Read", "depth": 0, "result": "RESULT_B", "meta": {"tuid": "tB"}},
+    ]}
+    calls = {a.step: a for a in actions(trace) if a.type == "call"}
+    by_input = {a.input["file"]: a.observation.text for a in calls.values()}
+    assert by_input == {
+        "hello.py": "RESULT_A",      # tA -> RESULT_A (NOT the first-recorded RESULT_C)
+        "utils.py": "RESULT_B",
+        "scratch.py": "RESULT_C",
+    }
+
+
+def test_toolresult_without_tuid_falls_back_to_name_fifo():
+    """Native / older traces carry no tuid -- results still pair by name+FIFO."""
+    trace = {"log": [
+        _model_entry(0, [
+            {"id": "", "name": "calc", "input": {"n": 1}},
+            {"id": "", "name": "calc", "input": {"n": 2}},
+        ]),
+        {"seq": 1, "kind": "tool:calc", "depth": 0, "result": "one"},
+        {"seq": 2, "kind": "tool:calc", "depth": 0, "result": "two"},
+    ]}
+    by_input = {a.input["n"]: a.observation.text
+                for a in actions(trace) if a.type == "call"}
+    assert by_input == {1: "one", 2: "two"}

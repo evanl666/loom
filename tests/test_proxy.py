@@ -807,7 +807,9 @@ def test_fork_wire_edits_across_dialects():
     a = {"system": "OLD", "messages": [{"role": "user", "content": "hi"}]}
     fk = {"new_system": "NEW", "edit_sys_hash": request_sys_hash(a), "append": "more", "model": "keep"}
     _apply_fork_edits(a, fk, is_inject=True, path="/v1/messages")
-    assert a["system"] == "NEW" and a["messages"][-1] == {"role": "user", "content": "more"}
+    # injection MERGES into the trailing user turn (no second user turn -> no 400)
+    assert a["system"] == "NEW" and len(a["messages"]) == 1
+    assert a["messages"][-1]["role"] == "user" and "more" in a["messages"][-1]["content"]
 
     o = {"messages": [{"role": "system", "content": "OLD"}, {"role": "user", "content": "hi"}]}
     fko = {"new_system": "NEW", "edit_sys_hash": request_sys_hash(o), "model": "keep"}
@@ -818,7 +820,7 @@ def test_fork_wire_edits_across_dialects():
     fkg = {"new_system": "NEW", "edit_sys_hash": request_sys_hash(g), "append": "more", "model": "other"}
     _apply_fork_edits(g, fkg, is_inject=True, path="/v1beta/models/gemini:streamGenerateContent")
     assert _wire_read_system(g) == "NEW"
-    assert g["contents"][-1]["parts"][0]["text"] == "more"
+    assert len(g["contents"]) == 1 and g["contents"][-1]["parts"][-1]["text"] == "more"
     assert "model" not in g                               # Gemini's model lives in the URL
 
     peer = {"system": "PEER", "messages": []}             # a different agent (sys_hash) -> untouched
@@ -901,3 +903,45 @@ def test_tool_results_captured_across_interleaved_subagent_conversations():
     assert tools.get("tool:read_record") == "Jane PII"   # was dropped by the linear scan
     # a result is emitted exactly once even though it appears in many later requests
     assert sum(1 for e in rec.log if e.kind == "tool:read_record") == 1
+
+
+def test_injection_persists_across_an_external_agents_later_turns():
+    """Regression: an external agent rebuilds each turn from its OWN state, which
+    never holds Loom's injected message -- so a one-shot inject evaporated after
+    the fork-point call. The injection must re-apply to every LATER turn of the
+    SAME agent (deduped), and never steer a different agent."""
+    from loom.proxy import _apply_fork_edits, request_sys_hash
+
+    MSG = "reply in Chinese"
+    SYS = "You are agent A."
+    fk_hash = request_sys_hash({"system": SYS, "messages": []})
+    fk = {"append": MSG, "inject_sys_hash": fk_hash, "_injected": True}
+
+    # fork-point turn -> merged into the (only) user turn, NOT a new message that
+    # would make two consecutive user turns
+    req1 = {"system": SYS, "messages": [{"role": "user", "content": "hi"}]}
+    _apply_fork_edits(req1, fk, is_inject=True, path="/v1/messages")
+    assert len(req1["messages"]) == 1 and MSG in req1["messages"][-1]["content"]
+
+    # a LATER turn ending in a tool_result: the instruction is merged as a text
+    # block INTO that user turn (valid ordering), so no consecutive-user 400
+    req2 = {"system": SYS, "messages": [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "t1", "name": "Glob", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "x"}]},
+    ]}
+    _apply_fork_edits(req2, fk, is_inject=False, path="/v1/messages")
+    assert req2["messages"][-1]["role"] == "user"      # still ONE trailing user turn
+    last = req2["messages"][-1]["content"]
+    assert any(b.get("type") == "text" and b["text"] == MSG for b in last)
+    assert any(b.get("type") == "tool_result" for b in last)   # tool_result preserved
+
+    # idempotent: re-applying doesn't duplicate the instruction
+    _apply_fork_edits(req2, fk, is_inject=False, path="/v1/messages")
+    assert sum(1 for b in req2["messages"][-1]["content"]
+               if b.get("type") == "text" and b["text"] == MSG) == 1
+
+    # a DIFFERENT agent is NOT steered
+    other = {"system": "You are agent B.", "messages": [{"role": "user", "content": "hi"}]}
+    _apply_fork_edits(other, fk, is_inject=False, path="/v1/messages")
+    assert other["messages"][-1]["content"] == "hi"

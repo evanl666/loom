@@ -156,6 +156,41 @@ def _wire_append_user(request: dict, text: str) -> None:
         request.setdefault("messages", []).append({"role": "user", "content": text})
 
 
+def _wire_inject_into_last_user(request: dict, text: str) -> None:
+    """Merge an injected instruction INTO the request's last user turn (rather than
+    a separate user message). A new user message after a tool_result turn makes two
+    consecutive user turns, which the API rejects -- so an external agent's re-run
+    would 400 and die. Merging into the existing user turn is always valid and
+    persists the instruction across turns. Falls back to a new turn if there is no
+    user message yet. Idempotent: skips if the turn already carries the text."""
+    if _wire_dialect(request) == "gemini":
+        msgs = request.get("contents") or []
+        last = next((m for m in reversed(msgs)
+                     if isinstance(m, dict) and m.get("role") == "user"), None)
+        if last is None:
+            _wire_append_user(request, text)
+            return
+        parts = last.setdefault("parts", [])
+        if not any(isinstance(p, dict) and p.get("text") == text for p in parts):
+            parts.append({"text": text})
+        return
+    msgs = request.get("messages") or []
+    last = next((m for m in reversed(msgs)
+                 if isinstance(m, dict) and m.get("role") == "user"), None)
+    if last is None:
+        _wire_append_user(request, text)
+        return
+    c = last.get("content")
+    if isinstance(c, str):
+        if text not in c:
+            last["content"] = c + "\n\n" + text
+    elif isinstance(c, list):
+        if not any(isinstance(b, dict) and b.get("type") == "text" and b.get("text") == text for b in c):
+            c.append({"type": "text", "text": text})
+    else:
+        last["content"] = text
+
+
 def _wire_tool_names(request: dict) -> list:
     """Tool names declared in a request, dialect-aware."""
     if _wire_dialect(request) == "gemini":
@@ -201,8 +236,11 @@ def _wire_messages_digest(request: dict) -> list:
 
 def request_sys_hash(request: dict) -> str:
     """The agent fingerprint of a request -- the sha1 of its system prompt, the
-    SAME identity ``_fingerprint``/``infer_agents`` use to tell agents apart."""
-    return hashlib.sha1(_wire_read_system(request).encode()).hexdigest()[:12]
+    SAME identity ``_fingerprint``/``infer_agents`` use to tell agents apart.
+    Must normalize like ``_fingerprint`` does: the Claude CLI stamps a per-call
+    ``cc_version`` into the system, so the RAW hash differs on every turn and
+    fork-scoping (edit/inject a specific agent) would never match its own calls."""
+    return hashlib.sha1(_norm_system(_wire_read_system(request)).encode()).hexdigest()[:12]
 
 
 def request_fingerprint(request: dict) -> str:
@@ -251,8 +289,19 @@ def _apply_fork_edits(request: dict, fk: dict, *, is_inject: bool, path: str) ->
     model = fk.get("model")
     if model and model != "keep" and "generatecontent" not in path.lower():
         request["model"] = model            # Gemini's model is in the URL, leave it
-    if is_inject and fk.get("append"):
-        _wire_append_user(request, str(fk["append"]))
+    # Inject at the fork point AND keep re-applying it to every later request from
+    # the SAME agent. An external agent rebuilds each turn from its OWN state --
+    # which never holds our injected message -- so a one-shot inject evaporates
+    # after a single call (and the fork-point turn is often a tool call, so the
+    # visible effect only lands turns later). Re-appending a standing instruction
+    # makes it persist across the agent's turns, like a native agent carrying an
+    # injected message in its log. Scoped to the fork-point agent's sys_hash so a
+    # multi-agent run only steers that agent, and deduped per request.
+    append = fk.get("append")
+    if append and (is_inject or fk.get("_injected")):
+        ih = fk.get("inject_sys_hash")
+        if (not ih) or request_sys_hash(request) == ih:
+            _wire_inject_into_last_user(request, str(append))
     return request
 
 
@@ -371,7 +420,12 @@ class WireRecorder:
         if not tuid or tuid in self._emitted_results:
             return
         self._emitted_results.add(tuid)
-        self._append(f"tool:{name or self._tool_names.get(tuid, 'tool')}", {"id": tuid}, content)
+        # Carry the tool_use_id so actions() can bind this result to the exact call
+        # that produced it -- PARALLEL same-name calls (3x Read) whose results are
+        # recorded out of call order would otherwise be matched by name+FIFO and
+        # cross-attributed.
+        self._append(f"tool:{name or self._tool_names.get(tuid, 'tool')}", {"id": tuid},
+                     content, meta={"tuid": tuid})
 
     def _emit_episode(self, text: str) -> None:
         if text and text not in self._seen_texts:

@@ -829,6 +829,9 @@ class DebugSession:
         edit_sys_hash = fork_agent_hash or None if system is not None else None
         edits = {"new_system": system, "edit_sys_hash": edit_sys_hash,
                  "append": append.strip() or None, "model": model,
+                 # keep an injected message applied across the fork-point AGENT's
+                 # later turns (external agents don't carry it in their own state)
+                 "inject_sys_hash": fork_agent_hash or None,
                  "result_overrides": result_overrides or None}
         bdata = self.live.fork_external(at, edits)
         if append.strip():   # attribute the injected message to the fork-point AGENT

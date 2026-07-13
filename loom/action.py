@@ -289,7 +289,7 @@ def actions(source: Any) -> list[Action]:
             if resp.tool_calls:
                 for tc in resp.tool_calls:
                     pending.setdefault(e.depth, []).append(
-                        (tc.name, intent, tc.input, e.seq, max(cur_turn, 0)))
+                        (tc.name, intent, tc.input, e.seq, max(cur_turn, 0), tc.id))
                 # Always emit the model turn that MADE these calls -- even with no
                 # reasoning text -- so every tool call has a visible "the model
                 # decided to call X" step before it, not an orphaned call.
@@ -303,11 +303,19 @@ def actions(source: Any) -> list[Action]:
         elif e.kind.startswith("tool:"):
             name = e.kind[5:]
             queue = pending.get(e.depth) or []
-            match = next((i for i, q in enumerate(queue) if q[0] == name), None)
+            # Bind the result to its call by tool_use_id when the wire carried one
+            # (robust to parallel same-name calls whose results are recorded out of
+            # order); fall back to name+FIFO for native / older traces with no id.
+            tuid = (e.meta or {}).get("tuid")
+            match = None
+            if tuid:
+                match = next((i for i, q in enumerate(queue) if len(q) > 5 and q[5] == tuid), None)
+            if match is None:
+                match = next((i for i, q in enumerate(queue) if q[0] == name), None)
             if match is None:
                 intent, tool_input, req_seq = "", None, -1
             else:
-                _, intent, tool_input, req_seq, _ = queue.pop(match)
+                _, intent, tool_input, req_seq, _, _ = queue.pop(match)
             text = _result_text(e.result)
             err = isinstance(e.result, str) and e.result.startswith(("ERROR", "BLOCKED", "DRY-RUN"))
             out.append(Action(
@@ -334,7 +342,7 @@ def actions(source: Any) -> list[Action]:
     # of silently dropping it. Placed at the requesting model call's seq so it
     # sorts right before the sub-agent's steps.
     for depth, queue in pending.items():
-        for name, intent, tool_input, req_seq, req_turn in queue:
+        for name, intent, tool_input, req_seq, req_turn, _tuid in queue:
             deleg = Action(
                 step=req_seq, depth=depth, type="call", tool=name, intent=intent,
                 input=tool_input,
