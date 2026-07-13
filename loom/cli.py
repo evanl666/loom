@@ -1926,9 +1926,13 @@ def _cmd_live(args: argparse.Namespace) -> int:
             live = LiveSession(agent=obj)          # a native loom.Agent
             kind = "loom.Agent"
         elif callable(obj):
-            # spec + target let an external agent be proxy-forked (re-run with edits)
-            live = LiveSession(func=obj, proxy=proxy, spec=args.agent, target=args.target)
-            kind = "external adapter (proxied)"
+            # spec + target let an IN-PROCESS external adapter be proxy-forked (the
+            # re-run subprocess redirects its own model calls). A REMOTE server
+            # (--proxy-port) can't: its model traffic comes from another process the
+            # fork can't redirect -- so drop the spec to disable fork there.
+            fork_spec = "" if getattr(args, "proxy_port", 0) else args.agent
+            live = LiveSession(func=obj, proxy=proxy, spec=fork_spec, target=args.target)
+            kind = "remote agent (proxied)" if getattr(args, "proxy_port", 0) else "external adapter (proxied)"
         else:
             raise CLIError(f"{args.agent!r} is neither a loom.Agent nor a callable(prompt)")
 
