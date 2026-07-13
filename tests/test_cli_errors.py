@@ -62,3 +62,19 @@ def test_record_zero_steps_hints_at_target(tmp_path, capsys):
     err = _err(capsys)
     assert "no traffic recorded" in err
     assert "--target https://api.openai.com" in err
+
+
+def test_load_agent_prompt_adapter_is_a_clean_error_not_a_traceback(tmp_path, monkeypatch):
+    """Passing an ask(prompt) adapter to a native-agent command (experiment/heal)
+    must give a clean, directive error -- not a raw TypeError traceback."""
+    (tmp_path / "adapter_mod.py").write_text("def ask(prompt):\n    return 'hi'\n")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    from loom.cli import _load_agent
+    agent, err = _load_agent("adapter_mod:ask")
+    assert agent is None
+    assert "needs arguments" in err and "loom live" in err     # names problem + next step
+    # a valid () -> Agent factory still resolves
+    (tmp_path / "factory_mod.py").write_text(
+        "from loom import Agent\ndef make():\n    return Agent(model='m')\n")
+    a2, e2 = _load_agent("factory_mod:make")
+    assert a2 is not None and e2 == ""

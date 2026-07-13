@@ -620,7 +620,17 @@ def _load_agent(spec: str) -> "tuple[Any, str] | tuple[None, str]":
         obj = getattr(importlib.import_module(module_name), attr)
     except (ImportError, AttributeError) as e:
         return None, f"could not load agent {spec!r}: {e}"
-    return (obj() if callable(obj) and not hasattr(obj, "run") else obj), ""
+    if callable(obj) and not hasattr(obj, "run"):
+        # a () -> Agent factory. A prompt-taking adapter (ask(prompt), for
+        # `loom live`/`debug --agent`) is NOT a factory -- calling it with no
+        # args throws; give a clean error instead of a raw traceback.
+        try:
+            obj = obj()
+        except TypeError as e:
+            return None, (f"{spec!r} looks like a callable that needs arguments, not a "
+                          f"loom.Agent or a () -> Agent factory ({e}). For an "
+                          f"ask(prompt) adapter use `loom live`/`debug --agent`, not this command.")
+    return obj, ""
 
 
 def _cmd_heal(args: argparse.Namespace) -> int:
