@@ -1621,6 +1621,7 @@ pre.mdcode{background:#f8fafc;border-color:#e2e8f0}
 .treehead:hover{background:#f0f2f5}.treehead .tw{color:#8a9099}
 .tguide{background:#e0e3e8}.step.tstep{border-bottom:1px solid #f4f5f7}
 .subtag{font-size:8.5px;font-weight:700;letter-spacing:.4px;color:#6b3fc0;background:#efe7fb;border:1px solid #ddccf5;border-radius:4px;padding:0 4px;margin-right:4px}
+.subtag.util{color:#6b7280;background:#f1f2f4;border-color:#e2e4e8}
 .callrow{cursor:pointer}
 /* timeline + live bar */
 #tlbar{background:#fff;border-top:1px solid #e6e8eb}
@@ -1892,7 +1893,10 @@ function renderTree(el){
   // SAME node. A stack keyed by (nest, agent_id) does this: returning to a parent
   // after a child reuses the parent's open node (so Research Lead is ONE node
   // with Data Analyst nested inside, not two Research Lead segments).
-  const rootId=(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
+  // the root is the real agent (is_root from inference), NOT whatever hit the
+  // wire first -- a utility side-call (title-gen) must not outrank it.
+  const rootId=(Object.values(AGENTS).find(a=>a&&a.is_root)||{}).id
+             ||(steps.find(x=>x.agent_id&&x.type!=="user")||{}).agent_id;
   const roots=[], stack=[]; let segN=0;
   steps.forEach((s,idx)=>{
     if(isHidden(s)) return;                       // delegation call: shown on its model node
@@ -1916,7 +1920,9 @@ function renderTree(el){
   function render(node){
     const pad=6+node.nest*15, col=COLLAPSED[node.si];
     const guide=node.nest?`<span class="tguide" style="left:${pad-8}px"></span>`:"";
-    const sub=(node.aid!=="main"&&node.aid!==rootId)?`<span class="subtag">SUBAGENT</span>`:"";
+    const ameta=AGENTS[node.aid]||{};
+    const sub=ameta.utility?`<span class="subtag util">UTILITY</span>`
+      :(node.aid!=="main"&&node.aid!==rootId&&!ameta.is_root)?`<span class="subtag">SUBAGENT</span>`:"";
     const nsteps=node.content.filter(c=>c.step!=null).length;
     const head=`<div class="treehead" style="padding-left:${pad}px" data-seg="${node.si}">${guide}`+
       `<span class="tw">${col?"▸":"▾"}</span>${sub}<span class="atag c${node.color}">${E(node.agent)}</span>`+
@@ -2248,8 +2254,9 @@ async function showAgents(){
   const src={native:"recorded by Loom's harness (agent names known)",wire:"recovered from the wire (system-prompt fingerprint)",flat:"depth only"}[r.source]||r.source;
   let h=`<div class="muted" style="font-size:11px;margin-bottom:10px">${r.agents.length} agents · ${E(src)}</div>`;
   h+=r.agents.map(a=>`<div class="anode c${a.color}">
-      <div><span class="atag c${a.color}">${E(a.label)}</span>${a.is_root?' <span class="muted">root</span>':''}
+      <div><span class="atag c${a.color}">${E(a.label)}</span>${a.is_root?' <span class="muted">root</span>':''}${a.utility?' <span class="subtag util">UTILITY</span>':''}
         <span class="bmeta">${a.calls} call${a.calls===1?'':'s'}</span></div>
+      ${a.utility?`<div class="muted" style="font-size:11px">side-call (no tools) — not part of the agent tree</div>`:''}
       ${a.model?`<div class="muted" style="font-size:11px">model: ${E(a.model)}</div>`:''}
       ${a.tools&&a.tools.length?`<div style="font-size:11px;margin-top:3px">${a.tools.map(t=>`<span class="chip">${E(t)}</span>`).join("")}</div>`:''}
     </div>`).join("");

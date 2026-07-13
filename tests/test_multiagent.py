@@ -67,6 +67,53 @@ def test_wire_fingerprint_recovers_two_agents():
     assert ia["step_agent"]["0"] != ia["step_agent"]["2"]
 
 
+def test_titlegen_side_call_is_a_utility_not_the_root():
+    """The Claude CLI fires a one-shot, tool-less title-generation call BEFORE the
+    main loop. It must be flagged a UTILITY side-call -- not made the run's root,
+    which would demote the real interactive agent to a bogus 'SUBAGENT'."""
+    TITLE = ("You are a Claude agent, built on Anthropic's Claude Agent SDK. "
+             "Generate a concise, sentence-case title for this session.")
+    MAIN = "You are a Claude agent. You are an interactive CLI tool that helps with coding."
+    data = {"recorded_via": "proxy", "model": "claude", "output": "done", "tools": {}, "log": [
+        # title-gen: no tools, one call, returns text -- never delegates / delegated-to
+        {"seq": 0, "kind": "model", "depth": 0, "meta": _fp(TITLE, []),
+         "result": {"text": '{"title": "Review files"}', "stop_reason": "end_turn"}},
+        # the real agent: has tools, does the work
+        {"seq": 1, "kind": "model", "depth": 0, "meta": _fp(MAIN, ["Read", "Glob"]),
+         "result": {"tool_calls": [{"id": "1", "name": "Read", "input": {}}], "stop_reason": "tool_use"}},
+        {"seq": 2, "kind": "tool:Read", "depth": 0, "result": "ok"},
+        {"seq": 3, "kind": "model", "depth": 0, "meta": _fp(MAIN, ["Read", "Glob"]),
+         "result": {"text": "done", "stop_reason": "end_turn"}},
+    ]}
+    ia = infer_agents(data)
+    by_hash = {a["sys_hash"]: a for a in ia["agents"]}
+    title = by_hash[_fp(TITLE, [])["sys_hash"]]
+    main = by_hash[_fp(MAIN, ["Read", "Glob"])["sys_hash"]]
+    assert title["utility"] is True and title["is_root"] is False
+    assert title["label"] == "title"          # generic "agent N" relabeled
+    assert main["utility"] is False and main["is_root"] is True   # the REAL root
+    assert ia["edges"] == []                   # no false delegation between them
+
+
+def test_toolless_agent_in_a_real_delegation_is_not_marked_utility():
+    """A 0-tool agent that IS part of a delegation (a pure-reasoning planner a
+    supervisor hands off to) must NOT be mistaken for a throwaway utility call."""
+    SUP = "You are the supervisor. Delegate to the planner."
+    PLAN = "You are the planner. Think, then reply."      # no tools, but delegated-to
+    data = {"recorded_via": "proxy", "model": "claude", "output": "ok", "tools": {}, "log": [
+        {"seq": 0, "kind": "model", "depth": 0, "meta": _fp(SUP, ["delegate_planner"]),
+         "result": {"tool_calls": [{"id": "1", "name": "delegate_planner", "input": {}}],
+                    "stop_reason": "tool_use"}},
+        {"seq": 1, "kind": "tool:delegate_planner", "depth": 0, "result": "ok"},
+        {"seq": 2, "kind": "model", "depth": 0, "meta": _fp(PLAN, []),
+         "result": {"text": "the plan", "stop_reason": "end_turn"}},
+    ]}
+    ia = infer_agents(data)
+    planner = next(a for a in ia["agents"] if a["sys_hash"] == _fp(PLAN, [])["sys_hash"])
+    assert planner["utility"] is False        # linked by a delegation edge -> real
+    assert any(e["to"] for e in ia["edges"])  # the delegation is preserved
+
+
 def test_best_role_finds_specific_role_past_generic_preamble():
     # a framework preamble ("You are Claude Code...") must not mask the sub-agent's
     # real role stated later in the same (possibly long) system prompt.

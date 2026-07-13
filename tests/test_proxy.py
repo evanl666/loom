@@ -497,6 +497,63 @@ def test_sse_reconstruction():
     assert msg["stop_reason"] == "tool_use"
     assert msg["usage"] == {"input_tokens": 5, "output_tokens": 7}
 
+
+def test_thinking_block_survives_reconstruct_and_synth_roundtrip():
+    """Regression: a Claude Code multi-turn run with extended thinking used to
+    400 ("text content blocks must be non-empty") when a shield was active. The
+    accumulator dropped thinking_delta/signature_delta and the SSE synthesizer
+    coerced the thinking block into an EMPTY text block, which the client then
+    echoed back on the next turn. Thinking must round-trip as thinking, keeping
+    its signature, and NO empty text block may ever be synthesized."""
+    from loom.proxy import synthesize_sse
+
+    raw = "\n".join([
+        'data: {"type": "message_start", "message": {"usage": {"input_tokens": 3}}}',
+        'data: {"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}}',
+        'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "let me "}}',
+        'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "check"}}',
+        'data: {"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "SIG123"}}',
+        'data: {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": "Glob"}}',
+        'data: {"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\\"pattern\\": \\"*.py\\"}"}}',
+        'data: {"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}}',
+    ])
+    msg = reconstruct_sse(raw)
+    think = msg["content"][0]
+    assert think["type"] == "thinking"
+    assert think["thinking"] == "let me check"      # thinking_delta captured
+    assert think["signature"] == "SIG123"           # signature_delta captured
+    assert msg["content"][1]["input"] == {"pattern": "*.py"}
+
+    # Re-serialize (the shield path) and re-parse: the thinking block stays a
+    # thinking block -- never a text block, and never an empty one.
+    reparsed = reconstruct_sse(synthesize_sse(msg).decode())
+    assert [b["type"] for b in reparsed["content"]] == ["thinking", "tool_use"]
+    assert reparsed["content"][0]["thinking"] == "let me check"
+    assert reparsed["content"][0]["signature"] == "SIG123"
+    for b in reparsed["content"]:
+        assert not (b["type"] == "text" and not b.get("text")), "synthesized an empty text block"
+
+
+def test_synth_never_emits_an_empty_text_block():
+    """An empty text block in a recorded message must be dropped, not streamed --
+    the API rejects it when a client echoes it on a later turn."""
+    from loom.proxy import synthesize_sse
+
+    msg = {
+        "content": [
+            {"type": "text", "text": ""},                    # empty -> dropped
+            {"type": "text", "text": "real"},                # kept
+            {"type": "tool_use", "id": "t1", "name": "x", "input": {"a": 1}},
+        ],
+        "stop_reason": "tool_use",
+    }
+    reparsed = reconstruct_sse(synthesize_sse(msg).decode())
+    assert [b["type"] for b in reparsed["content"]] == ["text", "tool_use"]
+    assert reparsed["content"][0]["text"] == "real"
+    # indices stay contiguous after the drop, so the tool_use input still parses
+    assert reparsed["content"][1]["input"] == {"a": 1}
+
+
 def test_malformed_requests_get_clean_http_errors_not_crashes():
     """A misbehaving client (bad content-length, non-JSON body, non-object body)
     must get a 4xx, not crash the handler with a traceback + connection reset."""

@@ -620,6 +620,14 @@ def reconstruct_sse(raw: str) -> dict:
                 blocks[idx]["text"] = blocks[idx].get("text", "") + delta.get("text", "")
             elif delta.get("type") == "input_json_delta":
                 partial[idx] += delta.get("partial_json", "")
+            elif delta.get("type") == "thinking_delta":
+                # Extended-thinking blocks stream their text as thinking_delta and
+                # their (required-on-replay) signature as signature_delta. Miss
+                # these and the block accumulates empty -- which then re-serializes
+                # as an empty text block the API rejects on the next turn.
+                blocks[idx]["thinking"] = blocks[idx].get("thinking", "") + delta.get("thinking", "")
+            elif delta.get("type") == "signature_delta":
+                blocks[idx]["signature"] = blocks[idx].get("signature", "") + delta.get("signature", "")
         elif etype == "message_delta":
             stop_reason = event.get("delta", {}).get("stop_reason", stop_reason)
             usage.update(event.get("usage", {}) or {})
@@ -652,8 +660,12 @@ def synthesize_sse(message: dict) -> bytes:
             {"message": {**envelope, "content": [], "stop_reason": None, "usage": usage}},
         )
     ]
-    for i, block in enumerate(message.get("content", [])):
-        if block.get("type") == "tool_use":
+    # A running index (not enumerate's): skipping an empty text block must not
+    # leave a gap in the SSE block indices.
+    i = 0
+    for block in message.get("content", []):
+        btype = block.get("type")
+        if btype == "tool_use":
             start = {k: block.get(k) for k in ("type", "id", "name")}
             start["input"] = {}
             out.append(event("content_block_start", {"index": i, "content_block": start}))
@@ -669,17 +681,35 @@ def synthesize_sse(message: dict) -> bytes:
                     },
                 )
             )
-        else:
-            out.append(
-                event("content_block_start", {"index": i, "content_block": {"type": "text", "text": ""}})
-            )
-            out.append(
-                event(
+        elif btype == "thinking":
+            # Preserve extended-thinking blocks as thinking (NOT text): coercing
+            # them to text drops the signature and yields an empty text block that
+            # the API rejects when the client echoes it on the next turn.
+            out.append(event(
+                "content_block_start",
+                {"index": i, "content_block": {"type": "thinking", "thinking": ""}}))
+            out.append(event(
+                "content_block_delta",
+                {"index": i, "delta": {"type": "thinking_delta", "thinking": block.get("thinking", "")}}))
+            if block.get("signature"):
+                out.append(event(
                     "content_block_delta",
-                    {"index": i, "delta": {"type": "text_delta", "text": block.get("text", "")}},
-                )
-            )
+                    {"index": i, "delta": {"type": "signature_delta", "signature": block["signature"]}}))
+        elif btype == "redacted_thinking":
+            out.append(event(
+                "content_block_start",
+                {"index": i, "content_block": {"type": "redacted_thinking", "data": block.get("data", "")}}))
+        else:
+            text = block.get("text", "")
+            if not text:
+                continue  # never emit an empty text block -- invalid to echo back
+            out.append(event(
+                "content_block_start", {"index": i, "content_block": {"type": "text", "text": ""}}))
+            out.append(event(
+                "content_block_delta",
+                {"index": i, "delta": {"type": "text_delta", "text": text}}))
         out.append(event("content_block_stop", {"index": i}))
+        i += 1
     out.append(
         event(
             "message_delta",

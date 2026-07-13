@@ -380,6 +380,27 @@ def infer_agents(data: dict) -> dict:
     for a, key in zip(out_agents, order):
         a["level"] = depth_of.get(key, 0)
 
+    # A one-shot side-call with no tools that neither delegates nor is delegated
+    # to -- e.g. the Claude CLI's conversation-title generator -- is a UTILITY
+    # call, not the run's root agent. Left alone it outranks the real agent just
+    # for hitting the wire first (title-gen runs before the main loop), so the
+    # debugger would label the actual agent a "SUBAGENT" of a throwaway call.
+    linked = {e["from"] for e in edges} | {e["to"] for e in edges}   # keys in a delegation
+    def _is_real(a: dict, key: tuple) -> bool:
+        return bool(a["tools"]) or key in linked or a["calls"] > 1
+    real = [a for a, key in zip(out_agents, order) if _is_real(a, key)]
+    for a, key in zip(out_agents, order):
+        a["utility"] = bool(real) and not _is_real(a, key)
+        if a["utility"] and re.match(r"agent \d+$", str(a["label"]).strip(), re.I):
+            # a generic "agent N" utility reads better as what it is
+            sys = (a.get("system") or "").lower()
+            a["label"] = "title" if ("title" in sys and ("concise" in sys or "sentence" in sys)) \
+                else "utility"
+    if real:                                   # the real agent is the root, not the utility
+        root_id = real[0]["id"]
+        for a in out_agents:
+            a["is_root"] = (a["id"] == root_id)
+
     return {
         "multi": len(out_agents) > 1,
         "agents": out_agents,
