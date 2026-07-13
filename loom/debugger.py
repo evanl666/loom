@@ -1093,8 +1093,10 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 lbl = "original run" if bid == 0 else next(
                     (n["label"] for n in sess.branches if n["id"] == bid), f"branch {bid}")
+                from .multiagent import infer_agents
                 self._json(200, {"id": bid, "label": lbl,
-                                 "steps": steps_for(bd), "output": bd.get("output", "")})
+                                 "steps": steps_for(bd), "output": bd.get("output", ""),
+                                 "agents": infer_agents(bd).get("agents", [])})
         elif self.path.startswith("/api/compare"):
             from urllib.parse import parse_qs, urlparse
             q = parse_qs(urlparse(self.path).query)
@@ -2447,6 +2449,9 @@ async function viewBranch(id){
   const r=await (await fetch("/api/branch?id="+id)).json();
   if(r.error)return;
   VIEWING=id; steps=r.steps;
+  // rebuild the agent map from THIS branch so the system-prompt box / labels show
+  // the branch's (possibly edited) system, not the original run's.
+  if(r.agents){AGENTS={}; r.agents.forEach(a=>AGENTS[a.id]=a);}
   renderSteps(); renderTimeline(); select(0);
   let bn=document.getElementById("viewbanner");
   if(!bn){bn=document.createElement("div");bn.id="viewbanner";document.getElementById("toolbar").after(bn);}
